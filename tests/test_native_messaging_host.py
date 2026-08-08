@@ -291,6 +291,46 @@ def test_submit_action_binds_alias_and_exact_local_git_base(tmp_path: Path) -> N
     assert receipt.command_id == response["command_id"]
 
 
+def test_submit_action_reserves_submission_nonce_before_spool_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, config_path, _ = write_configs(tmp_path, initialize_git=True)
+    config = NativeHostConfig.from_json(config_path)
+    repository = config.repositories[ALIAS]
+    NativeArmStore(config.state_path, now_fn=lambda: NOW).arm(minutes=5)
+    service = NativeHostService(config, origin=ORIGIN, now_fn=lambda: NOW)
+
+    def fail_submit(self, envelope, *, filename):
+        raise BridgeError("internal_error", "synthetic spool failure")
+
+    monkeypatch.setattr("bdb_bridge.native_host.LocalSpoolWriter.submit", fail_submit)
+
+    with pytest.raises(BridgeError) as failure:
+        service.handle(
+            {
+                "schema": NATIVE_REQUEST_SCHEMA,
+                "request_id": "reservation-before-spool",
+                "action": "submit_action",
+                "wait_seconds": 0,
+                "bdb_action": {
+                    "schema": ACTION_SCHEMA,
+                    "repo_alias": ALIAS,
+                    "operation": "open_read",
+                    "expected_revision": 0,
+                    "client_submission_nonce": SESSION,
+                    "payload": {"path": "src/clamp.py"},
+                },
+            }
+        )
+
+    assert failure.value.code == "internal_error"
+    persisted = json.loads(config.request_store_path.read_text(encoding="utf-8"))
+    reservation = persisted["submission_reservations"][SESSION]
+    assert reservation["repo_alias"] == ALIAS
+    assert reservation["command_id"].endswith(":000001")
+    assert list(repository.bridge_config.direct_spool_dir.glob("*.json")) == []
+
+
 def test_submit_action_blocks_mutation_until_bridge_runtime_matches(tmp_path: Path) -> None:
     _, config_path, _ = write_configs(tmp_path, initialize_git=True)
     config = NativeHostConfig.from_json(config_path)

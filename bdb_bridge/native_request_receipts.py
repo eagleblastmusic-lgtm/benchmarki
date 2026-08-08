@@ -22,6 +22,7 @@ class NativeRequestReceipt:
     sequence: int
     filename: str
     created_at: str
+    client_submission_nonce: str | None = None
 
     @property
     def command_id(self) -> str:
@@ -41,15 +42,47 @@ class NativeRequestReceiptStore:
         return None if item is None else self._record(request_id, item)
 
     def bind(self, receipt: NativeRequestReceipt) -> NativeRequestReceipt:
+        return self.reserve(receipt)
+
+    def reserve(self, receipt: NativeRequestReceipt) -> NativeRequestReceipt:
         candidate = self._document(receipt)
         raw = self._read()
         requests = raw["requests"]
+        reservations = raw.setdefault("submission_reservations", {})
         existing = requests.get(receipt.request_id)
-        if existing is not None:
-            if existing != candidate:
-                raise BridgeError("journal_conflict", "Native request_id is bound to another command")
-            return receipt
-        requests[receipt.request_id] = candidate
+        if existing is not None and existing != candidate:
+            raise BridgeError("journal_conflict", "Native request_id is bound to another command")
+
+        nonce = receipt.client_submission_nonce
+        if nonce is not None:
+            validate_session_id(nonce)
+            reservation = {
+                "command_id": receipt.command_id,
+                "action_sha256": receipt.action_sha256,
+                "repo_alias": receipt.repo_alias,
+                "session_id": receipt.session_id,
+                "sequence": receipt.sequence,
+                "filename": receipt.filename,
+                "created_at": receipt.created_at,
+            }
+            existing_reservation = reservations.get(nonce)
+            if existing_reservation is not None:
+                if not isinstance(existing_reservation, dict):
+                    raise BridgeError("invalid_config", "Native submission reservation is invalid")
+                comparable = {key: value for key, value in reservation.items() if key != "created_at"}
+                existing_comparable = {
+                    key: value for key, value in existing_reservation.items() if key != "created_at"
+                }
+                if existing_comparable != comparable:
+                    raise BridgeError(
+                        "journal_conflict",
+                        "client_submission_nonce is reserved for another command",
+                    )
+            else:
+                reservations[nonce] = reservation
+
+        if existing is None:
+            requests[receipt.request_id] = candidate
         if len(requests) > _MAX_REQUEST_RECEIPTS:
             oldest = sorted(
                 requests,
@@ -59,6 +92,15 @@ class NativeRequestReceiptStore:
             )[: len(requests) - _MAX_REQUEST_RECEIPTS]
             for key in oldest:
                 del requests[key]
+        if len(reservations) > _MAX_REQUEST_RECEIPTS:
+            oldest_reservations = sorted(
+                reservations,
+                key=lambda key: str(reservations[key].get("created_at", ""))
+                if isinstance(reservations[key], dict)
+                else "",
+            )[: len(reservations) - _MAX_REQUEST_RECEIPTS]
+            for key in oldest_reservations:
+                del reservations[key]
         self._writer(self.path, raw)
         return receipt
 
@@ -101,7 +143,11 @@ class NativeRequestReceiptStore:
 
     def _read(self) -> dict[str, Any]:
         if not self.path.exists():
-            return {"schema": REQUEST_RECEIPT_SCHEMA, "requests": {}}
+            return {
+                "schema": REQUEST_RECEIPT_SCHEMA,
+                "requests": {},
+                "submission_reservations": {},
+            }
         if self.path.is_symlink() or not self.path.is_file():
             raise BridgeError("invalid_config", "Native request receipt store must be a regular file")
         import json
@@ -115,4 +161,7 @@ class NativeRequestReceiptStore:
         requests = raw.get("requests")
         if not isinstance(requests, dict) or len(requests) > _MAX_REQUEST_RECEIPTS:
             raise BridgeError("invalid_config", "Native request receipt store is invalid")
+        reservations = raw.setdefault("submission_reservations", {})
+        if not isinstance(reservations, dict) or len(reservations) > _MAX_REQUEST_RECEIPTS:
+            raise BridgeError("invalid_config", "Native submission reservation store is invalid")
         return raw

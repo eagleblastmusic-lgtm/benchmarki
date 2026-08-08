@@ -439,6 +439,7 @@ class NativeHostService:
                     sequence=sequence,
                     filename=filename,
                     created_at=_utc_text(self.now_fn()),
+                    client_submission_nonce=require_string(command, "client_submission_nonce"),
                 ),
             )
 
@@ -520,12 +521,12 @@ class NativeHostService:
         if require_string(manifest, "repository_id") != repository.bridge_config.repository_id:
             raise BridgeError("policy_denied", "Envelope repository_id does not match the trusted alias")
 
+        if request_receipt is not None:
+            self.request_store.reserve(request_receipt)
         destination = LocalSpoolWriter(repository.bridge_config.direct_spool_dir).submit(
             envelope,
             filename=filename,
         )
-        if request_receipt is not None:
-            self.request_store.bind(request_receipt)
         wake_signaled = signal_running_bridge(repository.bridge_config.runtime_dir)
         result = self._wait_for_result(repository, session_id, sequence, wait_seconds)
         if result is None:
