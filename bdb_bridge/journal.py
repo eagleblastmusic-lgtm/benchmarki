@@ -995,6 +995,71 @@ class Journal:
             )
         return self._get_event(event_id)
 
+    def append_repository_event(
+        self,
+        *,
+        repository_id: str,
+        task_id: str,
+        attempt_id: str,
+        loop_id: str,
+        iteration: int,
+        submission_nonce: str,
+        event_type: str,
+        command_id: str | None = None,
+        session_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> JournalEvent:
+        self._ensure_open()
+        _require_non_empty_str(repository_id, "repository_id")
+        _require_non_empty_str(loop_id, "loop_id")
+        _require_non_empty_str(event_type, "event_type")
+        validate_session_id(task_id)
+        validate_session_id(attempt_id)
+        validate_session_id(submission_nonce)
+        if session_id is not None:
+            validate_session_id(session_id)
+        if command_id is not None:
+            _require_non_empty_str(command_id, "command_id")
+        if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 1:
+            raise BridgeError(
+                BridgeErrorCode.INVALID_PAYLOAD,
+                "repository event iteration must be a positive integer",
+            )
+
+        now = self._now_fn()
+        payload_sha256 = sha256_text(canonical_json(payload))
+        with self._transaction():
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(event_id), 0) + 1 FROM events"
+            ).fetchone()
+            repository_event_seq = int(row[0])
+            ledger_payload = {
+                "repository_id": repository_id,
+                "repository_event_seq": repository_event_seq,
+                "task_id": task_id,
+                "attempt_id": attempt_id,
+                "loop_id": loop_id,
+                "iteration": iteration,
+                "submission_nonce": submission_nonce,
+                "command_id": command_id,
+                "event_type": event_type,
+                "payload_sha256": payload_sha256,
+                "payload": payload,
+            }
+            event_id = self._append_event_in_transaction(
+                session_id=session_id,
+                command_id=command_id,
+                event_type=event_type,
+                payload=ledger_payload,
+                created_at=now,
+            )
+            if event_id != repository_event_seq:
+                raise BridgeError(
+                    BridgeErrorCode.JOURNAL_CORRUPT,
+                    "Repository event sequence diverged from append-only event id",
+                )
+        return self._get_event(event_id)
+
     def list_events(
         self,
         *,

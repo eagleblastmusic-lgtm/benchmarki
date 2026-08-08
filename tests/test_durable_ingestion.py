@@ -101,6 +101,47 @@ def test_identical_snapshot_ingested_ten_times(tmp_path: Path) -> None:
     journal.close()
 
 
+def test_repository_event_ledger_records_identity_and_monotonic_sequence(tmp_path: Path) -> None:
+    journal = open_journal(tmp_path)
+
+    first = journal.append_repository_event(
+        repository_id="bdb-self",
+        task_id=SESSION_ID,
+        attempt_id=SESSION_ID,
+        loop_id="event-ledger-test",
+        iteration=1,
+        submission_nonce=SESSION_ID,
+        event_type="task.started",
+        payload={"step": 1},
+    )
+    second = journal.append_repository_event(
+        repository_id="bdb-self",
+        task_id=SESSION_ID,
+        attempt_id=SESSION_ID,
+        loop_id="event-ledger-test",
+        iteration=2,
+        submission_nonce=SESSION_ID,
+        event_type="task.progressed",
+        payload={"step": 2},
+    )
+
+    first_payload = json.loads(first.payload_json)
+    second_payload = json.loads(second.payload_json)
+    assert first_payload["repository_id"] == "bdb-self"
+    assert first_payload["task_id"] == SESSION_ID
+    assert first_payload["attempt_id"] == SESSION_ID
+    assert first_payload["loop_id"] == "event-ledger-test"
+    assert first_payload["iteration"] == 1
+    assert first_payload["submission_nonce"] == SESSION_ID
+    assert first_payload["event_type"] == "task.started"
+    assert first_payload["payload"] == {"step": 1}
+    assert first_payload["payload_sha256"].startswith("sha256:")
+    assert first_payload["repository_event_seq"] == first.event_id
+    assert second_payload["repository_event_seq"] == second.event_id
+    assert second_payload["repository_event_seq"] > first_payload["repository_event_seq"]
+    journal.close()
+
+
 def test_restart_after_discovered_resumes_validation(tmp_path: Path) -> None:
     path = tmp_path / "journal.db"
     snapshot = make_snapshot()
