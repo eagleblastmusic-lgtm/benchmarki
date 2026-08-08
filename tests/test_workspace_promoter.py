@@ -8,11 +8,33 @@ import pytest
 
 from bdb_bridge.config import BridgeConfig
 from bdb_bridge.protocol import BridgeError
-from bdb_bridge.workspace_promoter import WorkspacePromoter, WorkspacePromotionWatcher
+from bdb_bridge.workspace_promoter import WorkspacePromoter, WorkspacePromotionWatcher, _atomic_json
 
 
 SESSION = "795545ec-2d28-46af-a4c4-c40877e9cf2a"
 SECOND_SESSION = "3dd5c970-763e-41da-9d40-7a744164b606"
+
+
+def test_promotion_receipts_get_monotonic_repository_event_sequence(tmp_path: Path) -> None:
+    promotions = tmp_path / "promotions"
+    first = promotions / "first.json"
+    second = promotions / "second.json"
+    document = {
+        "schema": "bdb-workspace-promotion-v1",
+        "status": "promoted",
+    }
+
+    _atomic_json(first, document)
+    first_payload = json.loads(first.read_text(encoding="utf-8"))
+    assert first_payload["repository_event_seq"] == 1
+
+    _atomic_json(first, document)
+    repeated_payload = json.loads(first.read_text(encoding="utf-8"))
+    assert repeated_payload["repository_event_seq"] == 1
+
+    _atomic_json(second, document)
+    second_payload = json.loads(second.read_text(encoding="utf-8"))
+    assert second_payload["repository_event_seq"] == 2
 
 
 def git(repo: Path, *args: str) -> str:

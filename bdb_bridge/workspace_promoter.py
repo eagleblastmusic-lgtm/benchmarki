@@ -17,6 +17,7 @@ from .workspace_manager import Git, changed_paths
 
 PROMOTION_RECEIPT_SCHEMA = "bdb-workspace-promotion-v1"
 PROMOTER_STATE_SCHEMA = "bdb-workspace-promoter-state-v1"
+REPOSITORY_EVENT_SEQ_SCHEMA = "bdb-repository-event-seq-v1"
 _MAX_RESULT_BYTES = 2 * 1024 * 1024
 _MAX_CHANGED_PATHS = 200
 _MAX_STATE_ENTRIES = 5_000
@@ -30,8 +31,71 @@ def _sha256(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
+def _repository_event_seq(path: Path) -> int:
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise BridgeError("journal_corrupt", "Repository event sequence state is unreadable") from exc
+        if (
+            not isinstance(existing, dict)
+            or existing.get("schema") != REPOSITORY_EVENT_SEQ_SCHEMA
+            or isinstance(existing.get("repository_event_seq"), bool)
+            or not isinstance(existing.get("repository_event_seq"), int)
+            or existing["repository_event_seq"] < 0
+        ):
+            raise BridgeError("journal_corrupt", "Repository event sequence state is invalid")
+        current = existing["repository_event_seq"]
+    else:
+        current = 0
+
+    next_sequence = current + 1
+    payload = (
+        json.dumps(
+            {
+                "schema": REPOSITORY_EVENT_SEQ_SCHEMA,
+                "repository_event_seq": next_sequence,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+        )
+        + "\n"
+    ).encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.parent / f".{path.name}.{os.getpid()}.tmp"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "wb", closefd=True) as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return next_sequence
+
+
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if value.get("schema") == PROMOTION_RECEIPT_SCHEMA and "repository_event_seq" not in value:
+        existing_sequence = None
+        if path.exists():
+            try:
+                existing_receipt = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                existing_receipt = None
+            if isinstance(existing_receipt, dict):
+                candidate = existing_receipt.get("repository_event_seq")
+                if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate > 0:
+                    existing_sequence = candidate
+        value = dict(value)
+        value["repository_event_seq"] = (
+            existing_sequence
+            if existing_sequence is not None
+            else _repository_event_seq(path.parent / ".repository-event-seq.json")
+        )
     payload = (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
     temporary = path.parent / f".{path.name}.{os.getpid()}.tmp"
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
