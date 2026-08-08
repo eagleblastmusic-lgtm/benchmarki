@@ -142,6 +142,55 @@ def test_repository_event_ledger_records_identity_and_monotonic_sequence(tmp_pat
     journal.close()
 
 
+def test_canonical_repository_projection_uses_latest_ledger_state(tmp_path: Path) -> None:
+    journal = open_journal(tmp_path)
+    command_id = f"{SESSION_ID}:000001"
+
+    journal.append_repository_event(
+        repository_id="bdb-self",
+        task_id=SESSION_ID,
+        attempt_id=SESSION_ID,
+        loop_id="canonical-projection-test",
+        iteration=1,
+        submission_nonce=SESSION_ID,
+        command_id=command_id,
+        event_type="command.accepted",
+        payload={"phase": "accepted"},
+    )
+    journal.append_repository_event(
+        repository_id="bdb-self",
+        task_id=SESSION_ID,
+        attempt_id=SESSION_ID,
+        loop_id="canonical-projection-test",
+        iteration=2,
+        submission_nonce=SESSION_ID,
+        command_id=command_id,
+        event_type="command.completed",
+        payload={"phase": "completed"},
+    )
+
+    projection = journal.project_repository_state(repository_id="bdb-self")
+    assert projection["schema"] == "bdb-canonical-repository-projection-v1"
+    assert projection["repository_id"] == "bdb-self"
+    assert projection["repository_event_seq"] > 0
+    assert len(projection["tasks"]) == 1
+    assert len(projection["attempts"]) == 1
+    assert len(projection["commands"]) == 1
+
+    task = projection["tasks"][0]
+    attempt = projection["attempts"][0]
+    command = projection["commands"][0]
+    assert task["task_id"] == SESSION_ID
+    assert task["latest_event_type"] == "command.completed"
+    assert task["latest_iteration"] == 2
+    assert attempt["latest_event_type"] == "command.completed"
+    assert attempt["repository_event_seq"] == projection["repository_event_seq"]
+    assert command["command_id"] == command_id
+    assert command["latest_event_type"] == "command.completed"
+    assert command["repository_event_seq"] == projection["repository_event_seq"]
+    journal.close()
+
+
 def test_restart_after_discovered_resumes_validation(tmp_path: Path) -> None:
     path = tmp_path / "journal.db"
     snapshot = make_snapshot()

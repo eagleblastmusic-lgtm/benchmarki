@@ -1060,6 +1060,105 @@ class Journal:
                 )
         return self._get_event(event_id)
 
+    def project_repository_state(self, *, repository_id: str) -> dict[str, Any]:
+        self._ensure_open()
+        _require_non_empty_str(repository_id, "repository_id")
+
+        tasks: dict[str, dict[str, Any]] = {}
+        attempts: dict[str, dict[str, Any]] = {}
+        commands: dict[str, dict[str, Any]] = {}
+        last_repository_event_seq = 0
+
+        for event in self.list_events():
+            if event.payload_json is None:
+                continue
+            try:
+                payload = json.loads(event.payload_json)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(payload, dict) or payload.get("repository_id") != repository_id:
+                continue
+
+            repository_event_seq = payload.get("repository_event_seq")
+            if (
+                isinstance(repository_event_seq, bool)
+                or not isinstance(repository_event_seq, int)
+                or repository_event_seq <= 0
+            ):
+                raise BridgeError(
+                    BridgeErrorCode.JOURNAL_CORRUPT,
+                    "Canonical repository event has invalid repository_event_seq",
+                )
+            if repository_event_seq <= last_repository_event_seq:
+                raise BridgeError(
+                    BridgeErrorCode.JOURNAL_CORRUPT,
+                    "Canonical repository event sequence is not strictly monotonic",
+                )
+            last_repository_event_seq = repository_event_seq
+
+            task_id = payload.get("task_id")
+            attempt_id = payload.get("attempt_id")
+            event_type = payload.get("event_type")
+            iteration = payload.get("iteration")
+            submission_nonce = payload.get("submission_nonce")
+            command_id = payload.get("command_id")
+            if not all(
+                isinstance(value, str) and value
+                for value in (task_id, attempt_id, event_type, submission_nonce)
+            ):
+                raise BridgeError(
+                    BridgeErrorCode.JOURNAL_CORRUPT,
+                    "Canonical repository event identity is incomplete",
+                )
+            if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 1:
+                raise BridgeError(
+                    BridgeErrorCode.JOURNAL_CORRUPT,
+                    "Canonical repository event iteration is invalid",
+                )
+            if command_id is not None and (not isinstance(command_id, str) or not command_id):
+                raise BridgeError(
+                    BridgeErrorCode.JOURNAL_CORRUPT,
+                    "Canonical repository event command_id is invalid",
+                )
+
+            tasks[task_id] = {
+                "task_id": task_id,
+                "latest_attempt_id": attempt_id,
+                "latest_command_id": command_id,
+                "latest_event_type": event_type,
+                "latest_iteration": iteration,
+                "repository_event_seq": repository_event_seq,
+            }
+            attempts[attempt_id] = {
+                "attempt_id": attempt_id,
+                "task_id": task_id,
+                "latest_command_id": command_id,
+                "latest_event_type": event_type,
+                "latest_iteration": iteration,
+                "submission_nonce": submission_nonce,
+                "repository_event_seq": repository_event_seq,
+            }
+            if command_id is not None:
+                commands[command_id] = {
+                    "command_id": command_id,
+                    "task_id": task_id,
+                    "attempt_id": attempt_id,
+                    "latest_event_type": event_type,
+                    "latest_iteration": iteration,
+                    "submission_nonce": submission_nonce,
+                    "repository_event_seq": repository_event_seq,
+                }
+
+        by_sequence = lambda item: (item["repository_event_seq"], tuple(str(v) for v in item.values()))
+        return {
+            "schema": "bdb-canonical-repository-projection-v1",
+            "repository_id": repository_id,
+            "repository_event_seq": last_repository_event_seq,
+            "tasks": sorted(tasks.values(), key=by_sequence),
+            "attempts": sorted(attempts.values(), key=by_sequence),
+            "commands": sorted(commands.values(), key=by_sequence),
+        }
+
     def list_events(
         self,
         *,
