@@ -254,6 +254,19 @@ async function nativeContext(repoAlias, { syncMirror = false } = {}) {
   });
 }
 
+async function nativeSubmissionNonceLookup(repoAlias, clientSubmissionNonce) {
+  if (typeof clientSubmissionNonce !== "string" || clientSubmissionNonce.length === 0) {
+    throw new Error("client_submission_nonce must be a non-empty string");
+  }
+  return sendNative({
+    schema: REQUEST_SCHEMA,
+    request_id: requestId("submission-nonce-lookup"),
+    action: "lookup_submission_nonce",
+    repo_alias: validateRepoAlias(repoAlias),
+    client_submission_nonce: clientSubmissionNonce
+  });
+}
+
 async function workspaceContext(action) {
   const repoAlias = validateRepoAlias(action.repo_alias);
   const native = await nativeContext(repoAlias, { syncMirror: true });
@@ -1019,6 +1032,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
       case "BDB_CONTEXT":
         return nativeContext(message.repoAlias);
+      case "BDB_LOOKUP_SUBMISSION_NONCE":
+        return nativeSubmissionNonceLookup(
+          message.repoAlias,
+          message.clientSubmissionNonce
+        );
       default:
         throw new Error("Unsupported extension message");
     }

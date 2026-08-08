@@ -41,6 +41,31 @@ class NativeRequestReceiptStore:
         item = raw["requests"].get(request_id)
         return None if item is None else self._record(request_id, item)
 
+    def get_by_submission_nonce(self, client_submission_nonce: str) -> dict[str, Any] | None:
+        validate_session_id(client_submission_nonce)
+        raw = self._read()
+        item = raw["submission_reservations"].get(client_submission_nonce)
+        if item is None:
+            return None
+        if not isinstance(item, dict):
+            raise BridgeError("invalid_config", "Native submission reservation is invalid")
+        action_sha256 = require_string(item, "action_sha256")
+        if _SHA256_RE.fullmatch(action_sha256) is None:
+            raise BridgeError("invalid_config", "Native submission reservation hash is invalid")
+        session_id = require_string(item, "session_id")
+        validate_session_id(session_id)
+        sequence = require_int(item, "sequence")
+        if isinstance(sequence, bool) or sequence <= 0:
+            raise BridgeError("invalid_config", "Native submission reservation sequence is invalid")
+        command_id = require_string(item, "command_id")
+        expected_command_id = f"{session_id}:{sequence:06d}"
+        if command_id != expected_command_id:
+            raise BridgeError("invalid_config", "Native submission reservation command_id is invalid")
+        require_string(item, "repo_alias")
+        require_string(item, "filename")
+        require_string(item, "created_at")
+        return dict(item)
+
     def bind(self, receipt: NativeRequestReceipt) -> NativeRequestReceipt:
         return self.reserve(receipt)
 

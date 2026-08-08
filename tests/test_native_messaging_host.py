@@ -331,6 +331,59 @@ def test_submit_action_reserves_submission_nonce_before_spool_publish(
     assert list(repository.bridge_config.direct_spool_dir.glob("*.json")) == []
 
 
+def test_lookup_submission_nonce_returns_reserved_command_even_when_disarmed(tmp_path: Path) -> None:
+    _, config_path, _ = write_configs(tmp_path, initialize_git=True)
+    config = NativeHostConfig.from_json(config_path)
+    NativeArmStore(config.state_path, now_fn=lambda: NOW).arm(minutes=5)
+    service = NativeHostService(config, origin=ORIGIN, now_fn=lambda: NOW)
+
+    submitted = service.handle(
+        {
+            "schema": NATIVE_REQUEST_SCHEMA,
+            "request_id": "lookup-nonce-submit",
+            "action": "submit_action",
+            "wait_seconds": 0,
+            "bdb_action": {
+                "schema": ACTION_SCHEMA,
+                "repo_alias": ALIAS,
+                "operation": "open_read",
+                "expected_revision": 0,
+                "client_submission_nonce": SESSION,
+                "payload": {"path": "src/clamp.py"},
+            },
+        }
+    )
+    assert submitted["status"] == "accepted"
+
+    NativeArmStore(config.state_path, now_fn=lambda: NOW).disarm()
+    found = service.handle(
+        {
+            "schema": NATIVE_REQUEST_SCHEMA,
+            "request_id": "lookup-nonce-found",
+            "action": "lookup_submission_nonce",
+            "repo_alias": ALIAS,
+            "client_submission_nonce": SESSION,
+        }
+    )
+    assert found["status"] == "submission_nonce_found"
+    assert found["command_id"] == submitted["command_id"]
+    assert found["client_submission_nonce"] == SESSION
+    assert found["repo_alias"] == ALIAS
+
+    missing_nonce = "11111111-1111-4111-8111-111111111111"
+    missing = service.handle(
+        {
+            "schema": NATIVE_REQUEST_SCHEMA,
+            "request_id": "lookup-nonce-missing",
+            "action": "lookup_submission_nonce",
+            "repo_alias": ALIAS,
+            "client_submission_nonce": missing_nonce,
+        }
+    )
+    assert missing["status"] == "submission_nonce_missing"
+    assert missing["client_submission_nonce"] == missing_nonce
+
+
 def test_submit_action_blocks_mutation_until_bridge_runtime_matches(tmp_path: Path) -> None:
     _, config_path, _ = write_configs(tmp_path, initialize_git=True)
     config = NativeHostConfig.from_json(config_path)

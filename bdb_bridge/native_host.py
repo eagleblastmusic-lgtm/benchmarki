@@ -330,6 +330,34 @@ class NativeHostService:
                 context=context,
                 arm=self._arm_payload(),
             )
+        if action == "lookup_submission_nonce":
+            alias = require_string(request, "repo_alias")
+            repository = self._repository(alias)
+            client_submission_nonce = require_string(request, "client_submission_nonce")
+            validate_session_id(client_submission_nonce)
+            reservation = self.request_store.get_by_submission_nonce(client_submission_nonce)
+            if reservation is None:
+                return self._response(
+                    request_id,
+                    "submission_nonce_missing",
+                    repo_alias=repository.alias,
+                    client_submission_nonce=client_submission_nonce,
+                )
+            if require_string(reservation, "repo_alias") != repository.alias:
+                raise BridgeError(
+                    "journal_conflict",
+                    "client_submission_nonce belongs to another repository alias",
+                )
+            return self._response(
+                request_id,
+                "submission_nonce_found",
+                repo_alias=repository.alias,
+                client_submission_nonce=client_submission_nonce,
+                command_id=require_string(reservation, "command_id"),
+                session_id=require_string(reservation, "session_id"),
+                sequence=require_int(reservation, "sequence"),
+                filename=require_string(reservation, "filename"),
+            )
         if action not in {"submit", "submit_action", "search_text", "inspect_bundle", "result"}:
             raise BridgeError("policy_denied", "Native action is not allowed")
 

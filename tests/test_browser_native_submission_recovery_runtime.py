@@ -12,6 +12,14 @@ ROOT = Path(__file__).resolve().parents[1]
 EXTENSION = ROOT / "browser_extension"
 
 
+def test_background_exposes_submission_nonce_lookup_runtime_message() -> None:
+    source = (EXTENSION / "background.js").read_text(encoding="utf-8")
+    assert 'case "BDB_LOOKUP_SUBMISSION_NONCE":' in source
+    assert 'action: "lookup_submission_nonce"' in source
+    assert 'client_submission_nonce: clientSubmissionNonce' in source
+    assert 'requestId("submission-nonce-lookup")' in source
+
+
 def test_submission_retries_same_receipted_request_after_internal_error(tmp_path: Path) -> None:
     node = shutil.which("node")
     if node is None:
