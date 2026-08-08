@@ -270,6 +270,24 @@ def test_final_gate_accepts_only_strict_multi_file_payload() -> None:
     assert parsed["operation"] == "multi_file_patch"
     assert "task_id" not in parsed
     assert "attempt_id" not in parsed
+    assert "client_submission_nonce" not in parsed
+
+    with_nonce = command_document("sha256:" + "1" * 64)
+    with_nonce["client_submission_nonce"] = SESSION_ID
+    parsed_with_nonce = parse_command_envelope(
+        json.dumps(with_nonce),
+        source_path=f"sessions/{SESSION_ID}/commands/000001.json",
+    )
+    assert parsed_with_nonce["client_submission_nonce"] == SESSION_ID
+
+    invalid_nonce = command_document("sha256:" + "1" * 64)
+    invalid_nonce["client_submission_nonce"] = "not-a-submission-nonce"
+    with pytest.raises(BridgeError) as nonce_error:
+        parse_command_envelope(
+            json.dumps(invalid_nonce),
+            source_path=f"sessions/{SESSION_ID}/commands/000001.json",
+        )
+    assert nonce_error.value.code == BridgeErrorCode.INVALID_PAYLOAD
 
     with_task = command_document("sha256:" + "1" * 64)
     with_task["task_id"] = SESSION_ID

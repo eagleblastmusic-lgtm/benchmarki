@@ -63,11 +63,7 @@ function requestId(prefix) {
   return `${prefix}-${Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")}`;
 }
 
-function bdbRandomUuid() {
-  if (typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-
+function bdbRandomUuidFromRandomValues() {
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
   bytes[6] = (bytes[6] & 0x0f) | 0x40;
@@ -76,6 +72,13 @@ function bdbRandomUuid() {
   return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex
     .slice(6, 8)
     .join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
+}
+
+function bdbRandomUuid() {
+  if (typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return bdbRandomUuidFromRandomValues();
 }
 
 function serializedSize(value) {
@@ -558,9 +561,15 @@ async function submitAction(action, tabId) {
     if (action.operation === INSPECT_BUNDLE_OPERATION) {
       return await repositoryInspection(action);
     }
-    const preparedAction = typeof action.session_id === "string" && action.session_id.length > 0
+    const actionWithSession = typeof action.session_id === "string" && action.session_id.length > 0
       ? action
       : { ...action, session_id: bdbRandomUuid(), sequence: action.sequence || 1 };
+    const preparedAction = (
+      typeof actionWithSession.client_submission_nonce === "string" &&
+      actionWithSession.client_submission_nonce.length > 0
+    )
+      ? actionWithSession
+      : { ...actionWithSession, client_submission_nonce: bdbRandomUuidFromRandomValues() };
     const request = {
       schema: REQUEST_SCHEMA,
       request_id: requestId("submit"),

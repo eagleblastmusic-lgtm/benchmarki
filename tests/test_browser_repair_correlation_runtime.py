@@ -219,6 +219,7 @@ def test_browser_repair_correlation_runtime(tmp_path: Path) -> None:
               await context.__submit(action(content, await digest(content)), 7);
               const firstSubmit = nativeRequests.filter((request) => request.action === "submit_action").at(-1);
               assert.equal(firstSubmit.bdb_action.session_id, "11111111-1111-4111-8111-111111111111");
+              assert.match(firstSubmit.bdb_action.client_submission_nonce, /^[0-9a-f-]{36}$/);
               assert.equal(firstSubmit.bdb_action.repair_correlation.role, "initial");
 
               const terminal = repairState();
@@ -226,6 +227,11 @@ def test_browser_repair_correlation_runtime(tmp_path: Path) -> None:
               await context.__submit(action("print('repair')\n", await digest("print('repair')\n")), 7);
               const repairSubmit = nativeRequests.filter((request) => request.action === "submit_action").at(-1);
               assert.equal(repairSubmit.bdb_action.session_id, "33333333-3333-4333-8333-333333333333");
+              assert.match(repairSubmit.bdb_action.client_submission_nonce, /^[0-9a-f-]{36}$/);
+              assert.notEqual(
+                repairSubmit.bdb_action.client_submission_nonce,
+                firstSubmit.bdb_action.client_submission_nonce
+              );
               assert.deepEqual(repairSubmit.bdb_action.repair_correlation, {
                 schema: "bdb-repair-correlation-v1",
                 correlation_id: "22222222-2222-4222-8222-222222222222",

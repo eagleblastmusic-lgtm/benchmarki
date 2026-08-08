@@ -136,6 +136,20 @@ def parse_command_envelope(content: str, *, source_path: str) -> dict[str, Any]:
                 BridgeErrorCode.INVALID_PAYLOAD,
                 "Command attempt_id must be UUID or ULID",
             ) from exc
+    if "client_submission_nonce" in parsed:
+        submission_nonce = parsed["client_submission_nonce"]
+        if not isinstance(submission_nonce, str):
+            raise BridgeError(
+                BridgeErrorCode.INVALID_PAYLOAD,
+                "Command client_submission_nonce must be a string",
+            )
+        try:
+            validate_session_id(submission_nonce)
+        except BridgeError as exc:
+            raise BridgeError(
+                BridgeErrorCode.INVALID_PAYLOAD,
+                "Command client_submission_nonce must be UUID or ULID",
+            ) from exc
     sequence = require_int(parsed, "sequence")
     if isinstance(sequence, bool) or sequence <= 0:
         raise BridgeError(

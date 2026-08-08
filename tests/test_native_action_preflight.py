@@ -154,17 +154,18 @@ def test_native_preflight_allows_valid_patch_and_binds_session(tmp_path: Path) -
     composer, store, old_digest = setup(tmp_path)
     content = b"value = 3\n"
 
-    _, envelope = composer.compose(
-        replacement_action(
-            "src/app.py",
-            old_digest,
-            content,
-            digest(content),
-        )
+    action = replacement_action(
+        "src/app.py",
+        old_digest,
+        content,
+        digest(content),
     )
+    action["client_submission_nonce"] = SESSION
+    _, envelope = composer.compose(action)
 
     assert envelope["command"]["session_id"] == SESSION
     assert envelope["command"]["task_id"] == SESSION
     assert envelope["command"]["attempt_id"] == SESSION
+    assert envelope["command"]["client_submission_nonce"] == SESSION
     assert envelope["manifest"]["allowed_paths"] == ["src/**"]
     assert store.get(SESSION) is not None
