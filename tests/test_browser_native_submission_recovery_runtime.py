@@ -20,6 +20,22 @@ def test_background_exposes_submission_nonce_lookup_runtime_message() -> None:
     assert 'requestId("submission-nonce-lookup")' in source
 
 
+def test_late_submission_result_regression_uses_nonce_lookup_before_transport_retry() -> None:
+    source = (EXTENSION / "background.js").read_text(encoding="utf-8")
+    start = source.index("async function sendNativeSubmission(request)")
+    end = source.index("async function nativeContext", start)
+    submission = source[start:end]
+    catch_start = submission.index("catch (_firstError)")
+    catch_body = submission[catch_start:]
+
+    assert "recoverSubmissionByNonce(request)" in catch_body
+    assert catch_body.index("recoverSubmissionByNonce(request)") < catch_body.index("return sendNative(request)")
+    assert 'lookup.status !== "submission_nonce_found"' in source
+    assert "submission_nonce_recovered: true" in source
+    assert "request_id: request.request_id" in source
+    assert "lookup_request_id: lookup.request_id" in source
+
+
 def test_submission_retries_same_receipted_request_after_internal_error(tmp_path: Path) -> None:
     node = shutil.which("node")
     if node is None:

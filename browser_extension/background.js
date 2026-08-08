@@ -234,6 +234,10 @@ async function sendNativeSubmission(request) {
   try {
     response = await sendNative(request);
   } catch (_firstError) {
+    const recovered = await recoverSubmissionByNonce(request);
+    if (recovered !== null) {
+      return recovered;
+    }
     await sleep(100);
     return sendNative(request);
   }
@@ -265,6 +269,43 @@ async function nativeSubmissionNonceLookup(repoAlias, clientSubmissionNonce) {
     repo_alias: validateRepoAlias(repoAlias),
     client_submission_nonce: clientSubmissionNonce
   });
+}
+
+async function recoverSubmissionByNonce(request) {
+  const action = request && request.bdb_action;
+  if (
+    !action ||
+    typeof action.repo_alias !== "string" ||
+    typeof action.client_submission_nonce !== "string" ||
+    action.client_submission_nonce.length === 0
+  ) {
+    return null;
+  }
+
+  let lookup;
+  try {
+    lookup = await nativeSubmissionNonceLookup(
+      action.repo_alias,
+      action.client_submission_nonce
+    );
+  } catch (_lookupError) {
+    return null;
+  }
+  if (
+    !lookup ||
+    lookup.status !== "submission_nonce_found" ||
+    typeof lookup.command_id !== "string" ||
+    lookup.command_id.length === 0
+  ) {
+    return null;
+  }
+  return {
+    ...lookup,
+    request_id: request.request_id,
+    status: "accepted",
+    submission_nonce_recovered: true,
+    lookup_request_id: lookup.request_id
+  };
 }
 
 async function workspaceContext(action) {
