@@ -13,8 +13,8 @@ import datetime as _datetime
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping
 from types import MappingProxyType
+from typing import Any, Iterable, Mapping
 
 from bdb_shared.evidence import canonical_json_bytes, semantic_digest
 
@@ -24,6 +24,7 @@ REPO_VIEW_SCHEMA = "bdb-vnext-repo-view-v1"
 COMMITTED_KIND = "COMMITTED"
 GIT_OBJECT_DATABASE_AUTHORITY = "git-object-database"
 DEFAULT_GIT_TIMEOUT_SECONDS = 30
+DEFAULT_MAX_BLOB_BYTES = 8 * 1024 * 1024
 _HEX = frozenset("0123456789abcdef")
 
 
@@ -78,6 +79,20 @@ def _validate_oid(value: object, *, object_format: str, field_name: str) -> str:
     if len(oid) != expected_length or any(char not in _HEX for char in oid):
         raise RepoViewError("invalid_object_id", f"{field_name} is not a {object_format} object ID")
     return oid
+
+
+def _validate_max_bytes(value: object) -> int:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value < 0
+        or value > DEFAULT_MAX_BLOB_BYTES
+    ):
+        raise RepoViewError(
+            "invalid_read_limit",
+            f"max_bytes must be between 0 and {DEFAULT_MAX_BLOB_BYTES}",
+        )
+    return value
 
 
 def _absolute_existing(value: str | Path, *, field_name: str, directory: bool) -> Path:
@@ -229,9 +244,20 @@ class _GitReader:
             "committer_timestamp": committed_at,
         }
 
-    def list_tree(self, commit_oid: str, *, object_format: str) -> tuple["RepoTreeEntry", ...]:
-        commit_oid = _validate_oid(commit_oid, object_format=object_format, field_name="commit_oid")
-        raw = self.run(["ls-tree", "-r", "-z", "--long", commit_oid], operation="committed tree read")
+    def list_tree(
+        self,
+        tree_oid: str,
+        *,
+        object_format: str,
+        prefix: str | None = None,
+    ) -> tuple["RepoTreeEntry", ...]:
+        tree_oid = _validate_oid(tree_oid, object_format=object_format, field_name="tree_oid")
+        args = ["ls-tree", "-r", "-z", "--long", tree_oid]
+        normalized_prefix: str | None = None
+        if prefix is not None:
+            normalized_prefix = _validate_path(prefix)
+            args.extend(["--", f":(literal){normalized_prefix}"])
+        raw = self.run(args, operation="committed tree read")
         entries: list[RepoTreeEntry] = []
         for chunk in raw.split(b"\0"):
             if not chunk:
@@ -270,11 +296,56 @@ class _GitReader:
                 )
             )
         entries.sort(key=lambda item: item.path)
+        if normalized_prefix is not None:
+            entries = [
+                entry
+                for entry in entries
+                if entry.path == normalized_prefix or entry.path.startswith(normalized_prefix + "/")
+            ]
         return tuple(entries)
 
-    def read_blob(self, object_oid: str, *, object_format: str) -> bytes:
+    def tree_entry(self, tree_oid: str, path: str, *, object_format: str) -> "RepoTreeEntry":
+        normalized_path = _validate_path(path)
+        for entry in self.list_tree(tree_oid, object_format=object_format, prefix=normalized_path):
+            if entry.path == normalized_path:
+                return entry
+        raise RepoViewError("missing_path", f"Committed RepoView does not contain path: {normalized_path}")
+
+    def read_blob(
+        self,
+        object_oid: str,
+        *,
+        object_format: str,
+        expected_size: int,
+        max_bytes: int,
+    ) -> bytes:
         object_oid = _validate_oid(object_oid, object_format=object_format, field_name="object_oid")
-        return self.run(["cat-file", "blob", object_oid], operation="committed blob read")
+        max_bytes = _validate_max_bytes(max_bytes)
+        raw_size = self.run(["cat-file", "-s", object_oid], operation="committed blob size read")
+        try:
+            observed_size = int(raw_size.decode("ascii", errors="strict").strip())
+        except (UnicodeError, ValueError) as exc:
+            raise RepoViewError("git_read_failed", "Committed blob size has an unexpected shape") from exc
+        if observed_size != expected_size:
+            raise RepoViewError(
+                "object_size_mismatch",
+                "Committed tree entry size does not match the bound Git object",
+                details={"expected_size": expected_size, "observed_size": observed_size},
+            )
+        if observed_size > max_bytes:
+            raise RepoViewError(
+                "blob_too_large",
+                "Committed blob exceeds the bounded read limit",
+                details={"blob_size": observed_size, "max_bytes": max_bytes},
+            )
+        payload = self.run(["cat-file", "blob", object_oid], operation="committed blob read")
+        if len(payload) != observed_size:
+            raise RepoViewError(
+                "object_size_mismatch",
+                "Committed blob bytes do not match the observed Git object size",
+                details={"expected_size": observed_size, "observed_size": len(payload)},
+            )
+        return payload
 
 
 def _identity_material(
@@ -424,7 +495,6 @@ class RepositoryResource:
                 "repository_identity_digest": self.identity_digest,
             }
         )
-        entries = reader.list_tree(commit_oid, object_format=self.object_format)
         identity = {
             "schema": REPO_VIEW_SCHEMA,
             "kind": COMMITTED_KIND,
@@ -433,7 +503,6 @@ class RepositoryResource:
             "object_format": self.object_format,
             "commit_oid": commit_oid,
             "tree_oid": tree_oid,
-            "observed_ref": ref,
         }
         view_id = semantic_digest(identity)
         return CommittedRepoView(
@@ -447,7 +516,6 @@ class RepositoryResource:
             observed_ref=ref,
             view_id=view_id,
             provenance=dict(provenance),
-            entries=entries,
             _resource=self,
         )
 
@@ -467,6 +535,7 @@ class RepositoryResource:
                 "RepoView repository binding does not match this Repository resource",
                 details={"expected_repository_id": self.repository_id, "observed_repository_id": view.repository_id},
             )
+        view._authoritative_reader()
         return RepoViewQuery(view)
 
     def current_commit(self, ref: str, *, timeout_seconds: int = DEFAULT_GIT_TIMEOUT_SECONDS) -> str:
@@ -488,7 +557,9 @@ class CommittedRepoView:
     observed_ref: str
     view_id: str
     provenance: Mapping[str, Any]
-    entries: tuple[RepoTreeEntry, ...] = ()
+    # Compatibility-only projection cache. It is never consulted for path,
+    # object or byte authority; exact Git tree lookup always wins.
+    entries: tuple[RepoTreeEntry, ...] = field(default=(), repr=False, compare=False)
     _resource: RepositoryResource = field(repr=False, compare=False, default=None)  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
@@ -519,8 +590,8 @@ class CommittedRepoView:
     def tree_sha(self) -> str:
         return self.tree_oid
 
-    def to_dict(self, *, include_tree_entries: bool = False) -> dict[str, Any]:
-        document: dict[str, Any] = {
+    def to_dict(self) -> dict[str, Any]:
+        return {
             "schema": self.schema,
             "kind": self.kind,
             "view_id": self.view_id,
@@ -534,9 +605,6 @@ class CommittedRepoView:
             "observed_ref": self.observed_ref,
             "provenance": dict(self.provenance),
         }
-        if include_tree_entries:
-            document["tree_entries"] = [entry.to_dict() for entry in self.entries]
-        return document
 
     def to_json_bytes(self) -> bytes:
         return canonical_json_bytes(self.to_dict())
@@ -550,49 +618,74 @@ class CommittedRepoView:
             "object_format": self.object_format,
             "commit_oid": self.commit_oid,
             "tree_oid": self.tree_oid,
-            "observed_ref": self.observed_ref,
         }
 
     def validate_integrity(self) -> None:
         if semantic_digest(self._identity_payload()) != self.view_id:
             raise RepoViewError("view_integrity_mismatch", "Committed RepoView identity digest does not match its descriptor")
-        if self._resource.repository_id != self.repository_id or self._resource.identity_digest != self.repository_identity_digest:
+        if (
+            self._resource.repository_id != self.repository_id
+            or self._resource.identity_digest != self.repository_identity_digest
+            or self._resource.object_format != self.object_format
+        ):
             raise RepoViewError("wrong_repository", "Committed RepoView is bound to a different repository resource")
         provenance = self.provenance
         if (
-            provenance.get("commit_oid") != self.commit_oid
+            provenance.get("source_authority") != GIT_OBJECT_DATABASE_AUTHORITY
+            or provenance.get("commit_oid") != self.commit_oid
             or provenance.get("tree_oid") != self.tree_oid
             or provenance.get("observed_ref") != self.observed_ref
             or provenance.get("repository_identity_digest") != self.repository_identity_digest
         ):
             raise RepoViewError("view_integrity_mismatch", "Committed RepoView provenance does not match its descriptor")
 
-    def entry(self, path: str) -> RepoTreeEntry:
+    def _authoritative_reader(self) -> _GitReader:
         self.validate_integrity()
-        path = _validate_path(path)
-        for entry in self.entries:
-            if entry.path == path:
-                return entry
-        raise RepoViewError("missing_path", f"Committed RepoView does not contain path: {path}")
+        reader = self._resource._assert_still_bound()
+        observed = reader.commit_provenance(self.commit_oid, object_format=self.object_format)
+        provenance = self.provenance
+        if (
+            observed["tree_oid"] != self.tree_oid
+            or tuple(observed["parent_oids"]) != tuple(provenance.get("parent_oids", ()))
+            or observed["author_timestamp"] != provenance.get("author_timestamp")
+            or observed["committer_timestamp"] != provenance.get("committer_timestamp")
+        ):
+            raise RepoViewError(
+                "commit_tree_binding_mismatch",
+                "Committed RepoView metadata does not match the bound Git commit object",
+            )
+        return reader
+
+    def entry(self, path: str) -> RepoTreeEntry:
+        reader = self._authoritative_reader()
+        return reader.tree_entry(self.tree_oid, path, object_format=self.object_format)
 
     def list_entries(self, prefix: str | None = None) -> tuple[RepoTreeEntry, ...]:
-        self.validate_integrity()
-        if prefix is None or prefix == "":
-            return self.entries
-        prefix = _validate_path(prefix.rstrip("/"))
-        return tuple(entry for entry in self.entries if entry.path == prefix or entry.path.startswith(prefix + "/"))
+        reader = self._authoritative_reader()
+        normalized_prefix = None if prefix is None or prefix == "" else _validate_path(prefix.rstrip("/"))
+        return reader.list_tree(self.tree_oid, object_format=self.object_format, prefix=normalized_prefix)
 
-    def read_bytes(self, path: str) -> bytes:
-        self.validate_integrity()
-        entry = self.entry(path)
+    def read_bytes(self, path: str, *, max_bytes: int = DEFAULT_MAX_BLOB_BYTES) -> bytes:
+        reader = self._authoritative_reader()
+        entry = reader.tree_entry(self.tree_oid, path, object_format=self.object_format)
         if not entry.is_regular_file:
             raise RepoViewError("unsupported_path", f"Only regular committed files are readable: {entry.path}")
-        reader = self._resource._assert_still_bound()
-        return reader.read_blob(entry.object_oid, object_format=self.object_format)
+        return reader.read_blob(
+            entry.object_oid,
+            object_format=self.object_format,
+            expected_size=entry.size_bytes,
+            max_bytes=max_bytes,
+        )
 
-    def read_text(self, path: str, *, encoding: str = "utf-8") -> str:
+    def read_text(
+        self,
+        path: str,
+        *,
+        encoding: str = "utf-8",
+        max_bytes: int = DEFAULT_MAX_BLOB_BYTES,
+    ) -> str:
         try:
-            return self.read_bytes(path).decode(encoding, errors="strict")
+            return self.read_bytes(path, max_bytes=max_bytes).decode(encoding, errors="strict")
         except UnicodeDecodeError as exc:
             raise RepoViewError("not_text", f"Committed path is not valid {encoding}: {path}") from exc
 
@@ -652,15 +745,22 @@ class RepoViewQuery:
     def get_entry(self, path: str) -> RepoTreeEntry:
         return self.view.entry(path)
 
-    def read_bytes(self, path: str) -> bytes:
-        return self.view.read_bytes(path)
+    def read_bytes(self, path: str, *, max_bytes: int = DEFAULT_MAX_BLOB_BYTES) -> bytes:
+        return self.view.read_bytes(path, max_bytes=max_bytes)
 
-    def read_text(self, path: str, *, encoding: str = "utf-8") -> str:
-        return self.view.read_text(path, encoding=encoding)
+    def read_text(
+        self,
+        path: str,
+        *,
+        encoding: str = "utf-8",
+        max_bytes: int = DEFAULT_MAX_BLOB_BYTES,
+    ) -> str:
+        return self.view.read_text(path, encoding=encoding, max_bytes=max_bytes)
 
 
 __all__ = [
     "COMMITTED_KIND",
+    "DEFAULT_MAX_BLOB_BYTES",
     "GIT_OBJECT_DATABASE_AUTHORITY",
     "REPO_VIEW_SCHEMA",
     "REPOSITORY_RESOURCE_SCHEMA",

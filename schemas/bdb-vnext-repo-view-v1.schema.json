@@ -4,6 +4,16 @@
   "title": "BDB vNext RepoView v1",
   "type": "object",
   "additionalProperties": false,
+  "$defs": {
+    "sha1Oid": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "sha256Oid": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "gitOid": {
+      "oneOf": [
+        { "$ref": "#/$defs/sha1Oid" },
+        { "$ref": "#/$defs/sha256Oid" }
+      ]
+    }
+  },
   "required": [
     "schema",
     "kind",
@@ -28,8 +38,8 @@
         "object_format": { "enum": ["sha1", "sha256"] }
       }
     },
-    "commit_oid": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
-    "tree_oid": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+    "commit_oid": { "$ref": "#/$defs/gitOid" },
+    "tree_oid": { "$ref": "#/$defs/gitOid" },
     "observed_ref": { "type": "string", "minLength": 1 },
     "provenance": {
       "type": "object",
@@ -44,11 +54,11 @@
       ],
       "properties": {
         "source_authority": { "const": "git-object-database" },
-        "commit_oid": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
-        "tree_oid": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+        "commit_oid": { "$ref": "#/$defs/gitOid" },
+        "tree_oid": { "$ref": "#/$defs/gitOid" },
         "parent_oids": {
           "type": "array",
-          "items": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" }
+          "items": { "$ref": "#/$defs/gitOid" }
         },
         "author_timestamp": { "type": "string" },
         "committer_timestamp": { "type": "string" },
@@ -57,5 +67,59 @@
         "repository_identity_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "repository": {
+            "properties": { "object_format": { "const": "sha1" } },
+            "required": ["object_format"]
+          }
+        },
+        "required": ["repository"]
+      },
+      "then": {
+        "properties": {
+          "commit_oid": { "$ref": "#/$defs/sha1Oid" },
+          "tree_oid": { "$ref": "#/$defs/sha1Oid" },
+          "provenance": {
+            "properties": {
+              "commit_oid": { "$ref": "#/$defs/sha1Oid" },
+              "tree_oid": { "$ref": "#/$defs/sha1Oid" },
+              "parent_oids": {
+                "items": { "$ref": "#/$defs/sha1Oid" }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "repository": {
+            "properties": { "object_format": { "const": "sha256" } },
+            "required": ["object_format"]
+          }
+        },
+        "required": ["repository"]
+      },
+      "then": {
+        "properties": {
+          "commit_oid": { "$ref": "#/$defs/sha256Oid" },
+          "tree_oid": { "$ref": "#/$defs/sha256Oid" },
+          "provenance": {
+            "properties": {
+              "commit_oid": { "$ref": "#/$defs/sha256Oid" },
+              "tree_oid": { "$ref": "#/$defs/sha256Oid" },
+              "parent_oids": {
+                "items": { "$ref": "#/$defs/sha256Oid" }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }
