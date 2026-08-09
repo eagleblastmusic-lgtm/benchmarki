@@ -79,12 +79,19 @@ M1b integration evidence:
 - both restored databases reopened with `PRAGMA integrity_check = ok` and the
   expected application invariants.
 
-Fault results:
+Fault results (observed exact codes):
 
-- missing, truncated, or corrupt DB/WAL bytes: explicit
-  `backup_integrity_failure`;
-- restore with a missing WAL subject: blocked with
-  `backup_integrity_failure`;
+| Tamper case | Observed failure code |
+|---|---|
+| `missing_wal` | `backup_integrity_failure` |
+| `truncated_db` | `backup_integrity_failure` |
+| `truncated_wal` | `backup_integrity_failure` |
+| `corrupt_db` | `backup_integrity_failure` |
+| `corrupt_wal` | `backup_integrity_failure` |
+
+Every missing, truncated, or corrupt DB/WAL case was explicitly rejected.
+The missing-subject restore attempt was also fail-closed with
+`backup_integrity_failure`.
 - no silent fallback, second DB, legacy access, or production activation.
 
 Post-X1 storage decision:

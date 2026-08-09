@@ -101,6 +101,14 @@ def test_complete_x1_capsule_is_pass_with_explicit_limitations(tmp_path: Path) -
     assert evidence["status"] == "PASS"
     assert all(value in {"PASS", "PASS for coordinated Windows process-kill boundaries; native COMMIT interruption and physical power-loss not claimed"} for value in evidence["hypotheses"].values())
     assert evidence["fault_matrix"]["missing_subject_restore_blocked"] is True
+    assert evidence["fault_matrix"]["cases"] == {
+        "missing_wal": "backup_integrity_failure",
+        "truncated_db": "backup_integrity_failure",
+        "truncated_wal": "backup_integrity_failure",
+        "corrupt_db": "backup_integrity_failure",
+        "corrupt_wal": "backup_integrity_failure",
+    }
+    assert evidence["fault_matrix"]["missing_subject_restore_error"] == "backup_integrity_failure"
     assert evidence["m1b_real_wal_backup_restore"]["restore_verified"] is True
     assert evidence["m1b_real_wal_backup_restore"]["restored_integrity"]["integrity_check"] == "ok"
     assert evidence["m1b_legal_absent_wal_backup_restore"]["restore_verified"] is True
