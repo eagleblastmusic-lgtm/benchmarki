@@ -20,6 +20,7 @@ bdb = "bdb_bridge.cli:main"
 bdb-native-host = "bdb_bridge.native_host:main"
 bdb-operator = "bdb_operator.cli:main"
 bdb-control-center = "bdb_gui.app:main"
+bdb-inventory = "bdb_bridge.runtime_inventory:main"
 
 [tool.setuptools.packages.find]
 include = [

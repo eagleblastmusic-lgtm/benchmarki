@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "runtime-inventory-v1",
+  "title": "BDB R0a Minimal Reconciliation Inventory",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "provider",
+    "policy",
+    "inventory_id",
+    "representation",
+    "observation",
+    "sources",
+    "correlations",
+    "overall",
+    "semantic_digest"
+  ],
+  "properties": {
+    "schema": { "const": "runtime-inventory-v1" },
+    "provider": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "bdb-runtime-inventory" },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "policy": { "type": "object" },
+    "inventory_id": { "type": "string", "pattern": "^inv-[0-9a-f]{32}$" },
+    "representation": { "enum": ["PRIVATE_EXACT", "SANITIZED"] },
+    "observation": { "type": "object" },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "kind",
+          "required",
+          "status",
+          "complete",
+          "truncated",
+          "identity",
+          "facts",
+          "errors",
+          "observation"
+        ],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "kind": { "type": "string", "minLength": 1 },
+          "required": { "type": "boolean" },
+          "status": {
+            "enum": ["OBSERVED", "UNAVAILABLE", "UNSTABLE", "INVALID", "UNSUPPORTED"]
+          },
+          "complete": { "type": "boolean" },
+          "truncated": { "type": "boolean" },
+          "identity": { "type": "object" },
+          "facts": { "type": "object" },
+          "errors": { "type": "array", "items": { "type": "object" } },
+          "observation": { "type": "object" }
+        }
+      }
+    },
+    "correlations": { "type": "object" },
+    "overall": {
+      "type": "object",
+      "required": ["result", "complete", "safe_to_mutate"],
+      "properties": {
+        "result": {
+          "enum": ["READY_FOR_LOCAL_GATE", "INCOMPLETE", "INVALID", "UNSUPPORTED"]
+        },
+        "complete": { "type": "boolean" },
+        "safe_to_mutate": { "const": false }
+      }
+    },
+    "semantic_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "sanitization": { "type": "object" }
+  }
+}
