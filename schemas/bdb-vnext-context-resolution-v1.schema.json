@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:bdb:schema:vnext-context-resolution:v1",
+  "title": "BDB vNext ContextRequest resolution linkage v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "resolution_id", "request_id", "prior_package_id", "resulting_package_id", "outcome", "added_fragment_ids", "resolved_gap_ids", "unresolved_gap_ids", "denial_reason", "producer_id", "producer_version"],
+  "properties": {
+    "schema": { "const": "bdb-vnext-context-resolution-v1" }, "resolution_id": { "$ref": "#/$defs/sha256" }, "request_id": { "$ref": "#/$defs/sha256" }, "prior_package_id": { "$ref": "#/$defs/sha256" }, "resulting_package_id": { "type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$" },
+    "outcome": { "enum": ["RESOLVED", "DENIED", "UNAVAILABLE"] }, "added_fragment_ids": { "type": "array", "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true }, "resolved_gap_ids": { "type": "array", "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true }, "unresolved_gap_ids": { "type": "array", "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true },
+    "denial_reason": { "type": ["string", "null"], "maxLength": 4096 }, "producer_id": { "$ref": "#/$defs/identifier" }, "producer_version": { "$ref": "#/$defs/identifier" }
+  },
+  "$defs": { "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }, "identifier": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/+:-]{0,127}$" } }
+}

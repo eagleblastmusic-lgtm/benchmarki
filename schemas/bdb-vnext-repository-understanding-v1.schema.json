@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:bdb:schema:vnext-repository-understanding:v1",
+  "title": "BDB vNext RepositoryUnderstandingView v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "understanding_id", "intent_basis", "repo_view", "claims", "requested_dimensions", "covered_dimensions", "must_see_categories", "covered_must_see", "unknowns", "omissions", "contradictions", "invalidation_predicates", "coverage_status", "producer_id", "producer_version"],
+  "properties": {
+    "schema": { "const": "bdb-vnext-repository-understanding-v1" },
+    "understanding_id": { "$ref": "#/$defs/sha256" },
+    "intent_basis": { "$ref": "#/$defs/intent" },
+    "repo_view": { "$ref": "#/$defs/repoView" },
+    "claims": { "type": "array", "items": { "$ref": "#/$defs/claim" } },
+    "requested_dimensions": { "$ref": "#/$defs/identifiers" },
+    "covered_dimensions": { "$ref": "#/$defs/identifiers" },
+    "must_see_categories": { "$ref": "#/$defs/identifiers" },
+    "covered_must_see": { "$ref": "#/$defs/identifiers" },
+    "unknowns": { "type": "array", "items": { "$ref": "#/$defs/unknown" } },
+    "omissions": { "type": "array", "items": { "$ref": "#/$defs/omission" } },
+    "contradictions": { "type": "array", "items": { "$ref": "#/$defs/contradiction" } },
+    "invalidation_predicates": { "$ref": "#/$defs/nonEmptyIdentifiers" },
+    "coverage_status": { "enum": ["COMPLETE", "PARTIAL", "BLOCKED"] },
+    "producer_id": { "$ref": "#/$defs/identifier" },
+    "producer_version": { "$ref": "#/$defs/identifier" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "sha40": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "sha256Oid": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "identifier": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/+:-]{0,127}$" },
+    "identifiers": { "type": "array", "items": { "$ref": "#/$defs/identifier" }, "uniqueItems": true },
+    "nonEmptyIdentifiers": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/identifier" }, "uniqueItems": true },
+    "text": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "intent": {
+      "type": "object", "additionalProperties": false,
+      "required": ["task_id", "intent_revision", "intent_digest"],
+      "properties": {
+        "task_id": { "$ref": "#/$defs/text" },
+        "intent_revision": { "$ref": "#/$defs/identifier" },
+        "intent_digest": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "repoView": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repository_id", "repository_identity_digest", "object_format", "commit_oid", "tree_oid", "view_id"],
+      "properties": {
+        "repository_id": { "$ref": "#/$defs/text" },
+        "repository_identity_digest": { "$ref": "#/$defs/sha256" },
+        "object_format": { "enum": ["sha1", "sha256"] },
+        "commit_oid": { "oneOf": [{ "$ref": "#/$defs/sha40" }, { "$ref": "#/$defs/sha256Oid" }] },
+        "tree_oid": { "oneOf": [{ "$ref": "#/$defs/sha40" }, { "$ref": "#/$defs/sha256Oid" }] },
+        "view_id": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "claim": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "claim_id", "repo_view", "subject", "dimension", "kind", "authority", "statement", "evidence_refs", "basis_refs", "producer_id", "producer_version"],
+      "properties": {
+        "schema": { "const": "bdb-vnext-understanding-claim-v1" },
+        "claim_id": { "$ref": "#/$defs/sha256" }, "repo_view": { "$ref": "#/$defs/repoView" },
+        "subject": { "$ref": "#/$defs/text" }, "dimension": { "$ref": "#/$defs/identifier" },
+        "kind": { "enum": ["FACT", "INFERENCE", "ASSUMPTION", "HYPOTHESIS"] },
+        "authority": { "enum": ["EXACT_SOURCE", "DERIVED"] }, "statement": { "$ref": "#/$defs/text" },
+        "evidence_refs": { "type": "array", "items": { "$ref": "#/$defs/text" }, "uniqueItems": true },
+        "basis_refs": { "type": "array", "items": { "$ref": "#/$defs/text" }, "uniqueItems": true },
+        "producer_id": { "$ref": "#/$defs/identifier" }, "producer_version": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "unknown": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "unknown_id", "repo_view", "subject", "dimension", "reason", "material", "producer_id", "producer_version"],
+      "properties": {
+        "schema": { "const": "bdb-vnext-understanding-unknown-v1" }, "unknown_id": { "$ref": "#/$defs/sha256" },
+        "repo_view": { "$ref": "#/$defs/repoView" }, "subject": { "$ref": "#/$defs/text" },
+        "dimension": { "$ref": "#/$defs/identifier" }, "reason": { "$ref": "#/$defs/text" },
+        "material": { "type": "boolean" }, "producer_id": { "$ref": "#/$defs/identifier" },
+        "producer_version": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "omission": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "omission_id", "repo_view", "dimension", "reason", "policy_denied", "producer_id", "producer_version"],
+      "properties": {
+        "schema": { "const": "bdb-vnext-context-omission-v1" }, "omission_id": { "$ref": "#/$defs/sha256" },
+        "repo_view": { "$ref": "#/$defs/repoView" }, "dimension": { "$ref": "#/$defs/identifier" },
+        "reason": { "$ref": "#/$defs/text" }, "policy_denied": { "type": "boolean" },
+        "producer_id": { "$ref": "#/$defs/identifier" }, "producer_version": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "contradiction": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "contradiction_id", "repo_view", "subject", "dimension", "claim_ids", "source_claim_ids", "derived_claim_ids", "reason", "source_authority", "producer_id", "producer_version"],
+      "properties": {
+        "schema": { "const": "bdb-vnext-understanding-contradiction-v1" }, "contradiction_id": { "$ref": "#/$defs/sha256" },
+        "repo_view": { "$ref": "#/$defs/repoView" }, "subject": { "$ref": "#/$defs/text" },
+        "dimension": { "$ref": "#/$defs/identifier" }, "claim_ids": { "type": "array", "minItems": 2, "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true },
+        "source_claim_ids": { "type": "array", "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true },
+        "derived_claim_ids": { "type": "array", "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true },
+        "reason": { "$ref": "#/$defs/text" }, "source_authority": { "enum": ["EXACT_SOURCE_WINS", "NO_EXACT_SOURCE_CLAIM"] },
+        "producer_id": { "$ref": "#/$defs/identifier" }, "producer_version": { "$ref": "#/$defs/identifier" }
+      }
+    }
+  }
+}
