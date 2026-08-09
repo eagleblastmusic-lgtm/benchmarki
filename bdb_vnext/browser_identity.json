@@ -1,0 +1,10 @@
+{
+  "schema": "bdb-vnext-browser-identity-v1",
+  "component_id": "devmaster.bdb.vnext.browser-extension",
+  "extension_id": "mopnolkjddkmgojfjkenjobehhmmklll",
+  "algorithm": "RSA-2048-SPKI-SHA256",
+  "public_key_spki_der_base64": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAs3HN3IpsMUnEyuyB3nfMIZXBKM3pIgCAYdU2aEwmsN7e6eNEI1i6l/+pSOXe3WGmhg7FWdK68U1Ir/47mkLmYq80rg26QDcvHkeMjzkVJJ1r+JN/wLP0EpjY0/Y0f6RrEGduD07RyxIakYI5LQO6KMURzx6WW31dqkSnR0JatwFsfHwcYcfxNR189XEHuaO2EtX9cBTcScAbqdiGr2U0ysdK3a7nDjZQmO9x0zms6Bqz5X6ayIVLZKvXLtbaSbKR1cP5K8Rrpk9+8y0Zhut1kXYGxCWCl+TEWeyA4FHmoqeLEuZ69uSwYonnsbiHHsreqYTOIcWi1y1/wUupMXeIEQIDAQAB",
+  "public_key_sha256": "sha256:cefdeba933ac6e959a4d9e1477ccabbb622be08dc2fb121b44c33308545cc531",
+  "private_key_in_repository": false,
+  "semantic_digest": "sha256:baa8aa5834c98033fa076f8f22fe5475e5e670b3b1cf766b6a67f16c26e6478a"
+}

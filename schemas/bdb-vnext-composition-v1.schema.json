@@ -1,0 +1,297 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-composition-v1",
+  "title": "BDB vNext runtime identity and composition manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "manifest_version",
+    "architecture_freeze",
+    "execution_strategy",
+    "basis",
+    "generation",
+    "paths",
+    "identities",
+    "composition",
+    "bundles",
+    "legacy_boundary",
+    "activation",
+    "semantic_digest"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-vnext-composition-v1" },
+    "manifest_version": { "const": 1 },
+    "architecture_freeze": { "const": "BDB Architecture Freeze v1" },
+    "execution_strategy": { "const": "parallel-vnext-build-v1" },
+    "basis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_commit", "source_branch"],
+      "properties": {
+        "source_commit": { "$ref": "#/$defs/sha40" },
+        "source_branch": { "const": "bdb-vnext" }
+      }
+    },
+    "generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "generation_id",
+        "runtime_id",
+        "protocol_generation",
+        "config_generation",
+        "mode",
+        "writer_enabled"
+      ],
+      "properties": {
+        "generation_id": { "const": "bdb-vnext-g1" },
+        "runtime_id": { "const": "devmaster.bdb.vnext.runtime" },
+        "protocol_generation": { "const": "bdb-vnext-protocol-v1" },
+        "config_generation": { "const": "bdb-vnext-config-v1" },
+        "mode": { "const": "build_only" },
+        "writer_enabled": { "const": false }
+      }
+    },
+    "paths": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime_root",
+        "control_store",
+        "spool_inbox",
+        "spool_results",
+        "receipts_store",
+        "instance_lock",
+        "pid_file",
+        "config",
+        "browser_bundle_root",
+        "native_host_manifest"
+      ],
+      "properties": {
+        "runtime_root": { "$ref": "#/$defs/absolutePath" },
+        "control_store": { "$ref": "#/$defs/absolutePath" },
+        "spool_inbox": { "$ref": "#/$defs/absolutePath" },
+        "spool_results": { "$ref": "#/$defs/absolutePath" },
+        "receipts_store": { "$ref": "#/$defs/absolutePath" },
+        "instance_lock": { "$ref": "#/$defs/absolutePath" },
+        "pid_file": { "$ref": "#/$defs/absolutePath" },
+        "config": { "$ref": "#/$defs/absolutePath" },
+        "browser_bundle_root": { "$ref": "#/$defs/absolutePath" },
+        "native_host_manifest": { "$ref": "#/$defs/absolutePath" }
+      }
+    },
+    "identities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["control_store", "browser_extension", "native_host", "protocol"],
+      "properties": {
+        "control_store": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["store_id", "schema"],
+          "properties": {
+            "store_id": { "const": "devmaster.bdb.vnext.control-store" },
+            "schema": { "const": "bdb-vnext-control-store-v1" }
+          }
+        },
+        "browser_extension": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "component_id",
+            "extension_id",
+            "origin",
+            "identity_state",
+            "packaging_key_policy",
+            "identity_resource",
+            "identity_digest",
+            "public_key_sha256",
+            "private_key_in_repository",
+            "registration_state"
+          ],
+          "properties": {
+            "component_id": { "const": "devmaster.bdb.vnext.browser-extension" },
+            "extension_id": { "const": "mopnolkjddkmgojfjkenjobehhmmklll" },
+            "origin": { "const": "chrome-extension://mopnolkjddkmgojfjkenjobehhmmklll/" },
+            "identity_state": { "const": "bound" },
+            "packaging_key_policy": { "const": "dedicated_vnext_public_key_pinned" },
+            "identity_resource": { "const": "browser_identity.json" },
+            "identity_digest": { "const": "sha256:baa8aa5834c98033fa076f8f22fe5475e5e670b3b1cf766b6a67f16c26e6478a" },
+            "public_key_sha256": { "const": "sha256:cefdeba933ac6e959a4d9e1477ccabbb622be08dc2fb121b44c33308545cc531" },
+            "private_key_in_repository": { "const": false },
+            "registration_state": { "const": "uninstalled" }
+          }
+        },
+        "native_host": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "component_id",
+            "host_name",
+            "manifest_schema",
+            "registration_state",
+            "windows_registry_keys"
+          ],
+          "properties": {
+            "component_id": { "const": "devmaster.bdb.vnext.native-host" },
+            "host_name": { "const": "com.bartosz.dev_bridge.vnext" },
+            "manifest_schema": { "const": "bdb-vnext-native-host-manifest-v1" },
+            "registration_state": { "const": "unregistered" },
+            "windows_registry_keys": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 2,
+              "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "protocol": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "component_id",
+            "generation",
+            "minimum_version",
+            "maximum_version",
+            "legacy_compatible"
+          ],
+          "properties": {
+            "component_id": { "const": "devmaster.bdb.vnext.protocol" },
+            "generation": { "const": "bdb-vnext-protocol-v1" },
+            "minimum_version": { "const": 1 },
+            "maximum_version": { "const": 1 },
+            "legacy_compatible": { "const": false }
+          }
+        }
+      }
+    },
+    "composition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root_provider_id", "providers", "edges"],
+      "properties": {
+        "root_provider_id": { "const": "devmaster.bdb.vnext.composition-manifest" },
+        "providers": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/provider" }
+        },
+        "edges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["from", "to"],
+            "properties": {
+              "from": { "type": "string", "minLength": 1 },
+              "to": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    "bundles": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "component_id",
+          "state",
+          "kind",
+          "path",
+          "file_count",
+          "size_bytes",
+          "sha256"
+        ],
+        "properties": {
+          "component_id": { "type": "string", "minLength": 1 },
+          "state": { "enum": ["not_built", "observed"] },
+          "kind": {
+            "oneOf": [
+              { "type": "null" },
+              { "enum": ["file", "directory"] }
+            ]
+          },
+          "path": {
+            "oneOf": [
+              { "type": "null" },
+              { "$ref": "#/$defs/absolutePath" }
+            ]
+          },
+          "file_count": { "type": "integer", "minimum": 0, "maximum": 4096 },
+          "size_bytes": { "type": "integer", "minimum": 0, "maximum": 536870912 },
+          "sha256": {
+            "oneOf": [
+              { "type": "null" },
+              { "$ref": "#/$defs/sha256" }
+            ]
+          }
+        }
+      }
+    },
+    "legacy_boundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime_root",
+        "native_host_name",
+        "current_role",
+        "vnext_access",
+        "cutover_role",
+        "semantic_migration_required"
+      ],
+      "properties": {
+        "runtime_root": { "$ref": "#/$defs/absolutePath" },
+        "native_host_name": { "const": "com.bartosz.dev_bridge" },
+        "current_role": { "const": "frozen_active_tool" },
+        "vnext_access": { "const": "none" },
+        "cutover_role": { "const": "read_only_archive" },
+        "semantic_migration_required": { "const": false }
+      }
+    },
+    "activation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "writer_enabled", "manifest_is_activation_authority", "blockers"],
+      "properties": {
+        "state": { "const": "disabled" },
+        "writer_enabled": { "const": false },
+        "manifest_is_activation_authority": { "const": false },
+        "blockers": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "semantic_digest": { "$ref": "#/$defs/sha256" }
+  },
+  "$defs": {
+    "absolutePath": {
+      "type": "string",
+      "minLength": 3,
+      "pattern": "^(?:[A-Za-z]:[\\\\/]|\\\\\\\\|/)"
+    },
+    "sha40": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider_id", "component_id", "kind", "state", "writer_enabled"],
+      "properties": {
+        "provider_id": { "type": "string", "minLength": 1 },
+        "component_id": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "state": { "enum": ["active_read_only", "reserved_disabled"] },
+        "writer_enabled": { "const": false }
+      }
+    }
+  }
+}

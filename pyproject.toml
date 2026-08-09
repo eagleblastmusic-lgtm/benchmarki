@@ -21,6 +21,7 @@ bdb-native-host = "bdb_bridge.native_host:main"
 bdb-operator = "bdb_operator.cli:main"
 bdb-control-center = "bdb_gui.app:main"
 bdb-inventory = "bdb_bridge.runtime_inventory:main"
+bdb-vnext-manifest = "bdb_vnext.composition:main"
 
 [tool.setuptools.packages.find]
 include = [
@@ -29,9 +30,14 @@ include = [
   "bdb_gui*",
   "bdb_release*",
   "bdb_bartosz_os*",
+  "bdb_shared*",
+  "bdb_vnext*",
   "bdb_integrations*",
   "bdb_poc*"
 ]
+
+[tool.setuptools.package-data]
+bdb_vnext = ["browser_identity.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
