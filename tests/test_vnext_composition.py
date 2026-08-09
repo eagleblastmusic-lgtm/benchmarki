@@ -17,6 +17,8 @@ from bdb_vnext.composition import (
     CONFIG_GENERATION,
     NATIVE_HOST_NAME,
     PROTOCOL_GENERATION,
+    REPO_VIEW_COMPONENT_ID,
+    REPO_VIEW_PROVIDER_ID,
     RUNTIME_ID,
     VNextCompositionError,
     build_vnext_composition_manifest,
@@ -124,6 +126,10 @@ def test_provider_and_component_identities_are_explicit_and_disabled(tmp_path: P
     assert manifest["composition"]["root_provider_id"] == COMPOSITION_PROVIDER_ID
     assert len(provider_ids) == len(providers)
     assert all(provider["writer_enabled"] is False for provider in providers)
+    repo_view = next(provider for provider in providers if provider["provider_id"] == REPO_VIEW_PROVIDER_ID)
+    assert repo_view["component_id"] == REPO_VIEW_COMPONENT_ID
+    assert repo_view["kind"] == "repo_view"
+    assert repo_view["state"] == "reserved_disabled"
     assert manifest["identities"]["browser_extension"]["component_id"] == BROWSER_COMPONENT_ID
     assert manifest["identities"]["browser_extension"]["identity_state"] == "bound"
     assert manifest["identities"]["browser_extension"]["extension_id"] == BROWSER_EXTENSION_ID

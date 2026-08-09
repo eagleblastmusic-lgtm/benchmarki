@@ -40,6 +40,8 @@ CONTROL_PROVIDER_ID = "devmaster.bdb.vnext.control-store"
 NATIVE_PROVIDER_ID = "devmaster.bdb.vnext.native-transport"
 BROWSER_PROVIDER_ID = "devmaster.bdb.vnext.browser-transport"
 CONTROL_CENTER_PROVIDER_ID = "devmaster.bdb.vnext.control-center-query"
+REPO_VIEW_COMPONENT_ID = "devmaster.bdb.vnext.repo-view"
+REPO_VIEW_PROVIDER_ID = "devmaster.bdb.vnext.repo-view"
 
 _SHA40 = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -511,6 +513,7 @@ def _provider_registry() -> list[dict[str, Any]]:
             "control_center_query",
             "reserved_disabled",
         ),
+        _provider(REPO_VIEW_PROVIDER_ID, REPO_VIEW_COMPONENT_ID, "repo_view", "reserved_disabled"),
     ]
 
 

@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-repo-view-v1",
+  "title": "BDB vNext RepoView v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "kind",
+    "view_id",
+    "repository",
+    "commit_oid",
+    "tree_oid",
+    "observed_ref",
+    "provenance"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-vnext-repo-view-v1" },
+    "kind": { "const": "COMMITTED" },
+    "view_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository_id", "identity_digest", "object_format"],
+      "properties": {
+        "repository_id": { "type": "string", "minLength": 1 },
+        "identity_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "object_format": { "enum": ["sha1", "sha256"] }
+      }
+    },
+    "commit_oid": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+    "tree_oid": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+    "observed_ref": { "type": "string", "minLength": 1 },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_authority",
+        "commit_oid",
+        "tree_oid",
+        "parent_oids",
+        "observed_ref",
+        "repository_identity_digest"
+      ],
+      "properties": {
+        "source_authority": { "const": "git-object-database" },
+        "commit_oid": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+        "tree_oid": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+        "parent_oids": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" }
+        },
+        "author_timestamp": { "type": "string" },
+        "committer_timestamp": { "type": "string" },
+        "observed_ref": { "type": "string", "minLength": 1 },
+        "observed_at": { "type": "string" },
+        "repository_identity_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    }
+  }
+}
