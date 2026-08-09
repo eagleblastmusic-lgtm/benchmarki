@@ -28,6 +28,6 @@ Navigation index only. The linked documents are authoritative records in their s
 - R0a = `DONE`
 - R0b = `STOP / RECONCILIATION_REQUIRED / LEGACY EVIDENCE`; not a blocker for target-only vNext construction.
 - M1a-vNext = `DONE`; implementation commit = `de340e2564b233b8b395bdcc1dc96e8f733f44a7`
-- current `bdb-vnext` HEAD = `688d2be232a8dbbcb8cc982847d6df23d6a30858` (governance packet commit; distinct from the M1a implementation commit above)
+- governance packet introduction commit = `688d2be232a8dbbcb8cc982847d6df23d6a30858`; current `bdb-vnext` HEAD must always be established by fresh inspection under source precedence
 - vNext runtime/writer/activation = `OFF / OFF / OFF`
 - next READY EU = `M2a — COMMITTED RepoView Foundation`
