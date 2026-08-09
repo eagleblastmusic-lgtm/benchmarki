@@ -31,6 +31,16 @@ def _git(repo: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
+def _git_natural(repo: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", "--no-replace-objects", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
 def _make_repo(root: Path, *, name: str = "fixture") -> tuple[Path, str, str]:
     repo = root / name
     repo.mkdir()
@@ -250,6 +260,68 @@ def test_committed_read_is_independent_from_working_tree(tmp_path: Path) -> None
 
     (repo / "README.md").write_text("mutable checkout bytes\n", encoding="utf-8")
     assert view.read_text("README.md") == "first\n"
+
+
+def test_repo_view_ignores_git_replace_objects_for_resolution_and_later_reads(tmp_path: Path) -> None:
+    repo, first, second = _make_repo(tmp_path, name="replace-ref")
+    natural_tree = _git_natural(repo, "rev-parse", f"{first}^{{tree}}")
+    replacement_tree = _git_natural(repo, "rev-parse", f"{second}^{{tree}}")
+    _git(repo, "replace", first, second)
+
+    # Sanity-check the real Git behavior that previously poisoned RepoView.
+    assert _git(repo, "rev-parse", f"{first}^{{tree}}") == replacement_tree
+    assert _git(repo, "show", f"{first}:README.md") == "second"
+
+    resource = RepositoryResource.from_path(repo, repository_id="replace-ref")
+    view = resource.resolve_committed("refs/heads/main", observed_at="2026-08-09T00:00:00Z")
+
+    assert view.commit_oid == first
+    assert view.tree_oid == natural_tree
+    assert view.tree_oid != replacement_tree
+    assert view.read_text("README.md") == "first\n"
+    view._authoritative_reader()
+    assert view.read_text("README.md") == "first\n"
+
+
+def test_repo_view_strips_poisoned_git_authority_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bound, bound_first, _bound_second = _make_repo(tmp_path, name="bound-repository")
+    foreign, _foreign_first, _foreign_second = _make_repo(tmp_path, name="foreign-repository")
+    (foreign / "README.md").write_text("FOREIGN\n", encoding="utf-8")
+    _git(foreign, "add", "README.md")
+    _git(foreign, "commit", "-qm", "foreign-only")
+    foreign_head = _git(foreign, "rev-parse", "HEAD")
+
+    monkeypatch.setenv("GIT_DIR", str(foreign / ".git"))
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", str(foreign / ".git" / "objects"))
+
+    poisoned = subprocess.run(
+        ["git", "-C", str(bound), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert poisoned.stdout.strip() == foreign_head
+    assert poisoned.stdout.strip() != bound_first
+
+    resource = RepositoryResource.from_path(bound, repository_id="poisoned-environment")
+    view = resource.resolve_committed("refs/heads/main", observed_at="2026-08-09T00:00:00Z")
+
+    assert view.commit_oid == bound_first
+    assert view.read_text("README.md") == "first\n"
+    assert resource.current_commit("refs/heads/main") == bound_first
+
+
+def test_repo_view_git_environment_contract_removes_inherited_git_authority(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GIT_DIR", "foreign-repository")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "foreign-objects")
+    monkeypatch.setenv("GIT_NAMESPACE", "foreign-namespace")
+    monkeypatch.setenv("GIT_REPLACE_REF_BASE", "refs/foreign-replace/")
+
+    environment = repo_view_module._git_environment()
+
+    assert environment["GIT_NO_REPLACE_OBJECTS"] == "1"
+    assert all(not key.upper().startswith("GIT_") or key == "GIT_NO_REPLACE_OBJECTS" for key in environment)
+    assert "PATH" in environment
 
 
 def test_resolve_is_lazy_and_blob_reads_are_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

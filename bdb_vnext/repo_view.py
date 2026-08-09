@@ -10,6 +10,7 @@ that commit and never against a moving ref or the checkout filesystem.
 from __future__ import annotations
 
 import datetime as _datetime
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,6 +27,7 @@ GIT_OBJECT_DATABASE_AUTHORITY = "git-object-database"
 DEFAULT_GIT_TIMEOUT_SECONDS = 30
 DEFAULT_MAX_BLOB_BYTES = 8 * 1024 * 1024
 _HEX = frozenset("0123456789abcdef")
+_GIT_NO_REPLACE_OBJECTS = "GIT_NO_REPLACE_OBJECTS"
 
 
 class RepoViewError(ValueError):
@@ -35,6 +37,18 @@ class RepoViewError(ValueError):
         super().__init__(message)
         self.code = code
         self.details = dict(details or {})
+
+
+def _git_environment() -> dict[str, str]:
+    """Return the bounded environment accepted by RepoView Git reads."""
+
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.upper().startswith("GIT_")
+    }
+    environment[_GIT_NO_REPLACE_OBJECTS] = "1"
+    return environment
 
 
 def _required_text(value: object, *, field_name: str, max_length: int = 512) -> str:
@@ -143,38 +157,30 @@ class _GitReader:
         self.root = root
         self.timeout_seconds = timeout_seconds
 
-    def run(self, args: Iterable[str], *, operation: str, check: bool = True) -> bytes:
-        command = ["git", "-C", str(self.root), *args]
+    def _execute(self, args: Iterable[str], *, operation: str) -> subprocess.CompletedProcess[bytes]:
+        command = ["git", "--no-replace-objects", "-C", str(self.root), *args]
         try:
-            completed = subprocess.run(
+            return subprocess.run(
                 command,
                 shell=False,
                 capture_output=True,
                 timeout=self.timeout_seconds,
                 check=False,
+                env=_git_environment(),
             )
         except FileNotFoundError as exc:
             raise RepoViewError("git_unavailable", "git executable is not available") from exc
         except subprocess.TimeoutExpired as exc:
             raise RepoViewError("git_read_timeout", f"Git read timed out during {operation}") from exc
+
+    def run(self, args: Iterable[str], *, operation: str, check: bool = True) -> bytes:
+        completed = self._execute(args, operation=operation)
         if check and completed.returncode != 0:
             raise _parse_git_error(completed, operation=operation)
         return completed.stdout
 
     def optional(self, args: Iterable[str], *, operation: str) -> bytes | None:
-        command = ["git", "-C", str(self.root), *args]
-        try:
-            completed = subprocess.run(
-                command,
-                shell=False,
-                capture_output=True,
-                timeout=self.timeout_seconds,
-                check=False,
-            )
-        except FileNotFoundError as exc:
-            raise RepoViewError("git_unavailable", "git executable is not available") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise RepoViewError("git_read_timeout", f"Git read timed out during {operation}") from exc
+        completed = self._execute(args, operation=operation)
         return completed.stdout if completed.returncode == 0 else None
 
     def top_level(self) -> Path:
