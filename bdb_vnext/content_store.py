@@ -96,16 +96,22 @@ def _semantic_representation(content_type: str, schema: str, raw: bytes) -> tupl
 
 def _semantic_digest(content_type: str, schema: str, raw: bytes) -> str:
     domain, value = _semantic_representation(content_type, schema, raw)
-    return _digest_bytes(
-        canonical_json_bytes(
-            {
-                "domain": domain,
-                "type": content_type,
-                "schema": schema,
-                "value": value,
-            }
-        )
+    semantic = {
+        "domain": domain,
+        "type": content_type,
+        "schema": schema,
+        "value": value,
+    }
+    # X2's accepted semantic domains predate the shared evidence helper and
+    # intentionally hash canonical JSON without a trailing newline.  Keep
+    # that exact byte contract for the two published X2 domains while the
+    # versioned M2b domains continue using the repository evidence helper.
+    serialized = (
+        json.dumps(semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        if domain == X2_SEMANTIC_DOMAIN
+        else canonical_json_bytes(semantic)
     )
+    return _digest_bytes(serialized)
 
 
 @dataclass(frozen=True)

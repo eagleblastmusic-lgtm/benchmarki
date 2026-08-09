@@ -21,6 +21,13 @@ from bdb_vnext.composition import (
     REPO_VIEW_PROVIDER_ID,
     build_vnext_composition_manifest,
 )
+from bdb_vnext.context_transport import (
+    BROWSER_IMPLEMENTATION_REVISION,
+    NATIVE_IMPLEMENTATION_REVISION,
+    BrowserTransportProvider,
+    NativeTransportProvider,
+    _provider_identity,
+)
 from bdb_vnext.provider_root import (
     CompositionDiagnosticProvider,
     PRODUCT_ID,
@@ -123,6 +130,12 @@ def test_root_is_explicit_deterministic_and_build_only(tmp_path: Path) -> None:
     assert first.native_transport_provider().provider_contract_version == 1
     assert first.browser_transport_provider().implementation_identity.startswith("sha256:")
     assert first.native_transport_provider().implementation_identity.startswith("sha256:")
+    assert first.browser_transport_provider().implementation_module == "bdb_vnext.context_transport"
+    assert first.browser_transport_provider().implementation_qualname == "BrowserTransportProvider"
+    assert first.browser_transport_provider().implementation_revision == BROWSER_IMPLEMENTATION_REVISION
+    assert first.native_transport_provider().implementation_module == "bdb_vnext.context_transport"
+    assert first.native_transport_provider().implementation_qualname == "NativeTransportProvider"
+    assert first.native_transport_provider().implementation_revision == NATIVE_IMPLEMENTATION_REVISION
     assert "0x" not in repr(first)
     assert "bdb_bridge" not in json.dumps(first.status())
 
@@ -272,6 +285,65 @@ def test_provider_binding_validation_is_fail_closed(tmp_path: Path) -> None:
     tampered_manifest = dict(manifest)
     tampered_manifest["semantic_digest"] = "sha256:" + "0" * 64
     assert _failure(VNextCompositionRoot.from_manifest, tampered_manifest).code == "manifest_identity_mismatch"
+
+
+def test_transport_provider_subclasses_are_not_accepted_as_canonical_bindings(tmp_path: Path) -> None:
+    class AlteredBrowserTransportProvider(BrowserTransportProvider):
+        def encode(self, *args: object, **kwargs: object) -> bytes:
+            return b"altered"
+
+    class AlteredNativeTransportProvider(NativeTransportProvider):
+        def decode(self, *args: object, **kwargs: object) -> object:
+            return "altered"
+
+    manifest = _manifest(tmp_path)
+    defaults = list(default_provider_bindings(manifest))
+    browser_index = next(index for index, item in enumerate(defaults) if item.provider_id == BROWSER_PROVIDER_ID)
+    native_index = next(index for index, item in enumerate(defaults) if item.provider_id == NATIVE_PROVIDER_ID)
+
+    altered_browser = [
+        *defaults[:browser_index],
+        replace(defaults[browser_index], implementation=AlteredBrowserTransportProvider()),
+        *defaults[browser_index + 1 :],
+    ]
+    altered_native = [
+        *defaults[:native_index],
+        replace(defaults[native_index], implementation=AlteredNativeTransportProvider()),
+        *defaults[native_index + 1 :],
+    ]
+
+    assert _failure(VNextCompositionRoot.from_manifest, manifest, bindings=altered_browser).code == "provider_binding_mismatch"
+    assert _failure(VNextCompositionRoot.from_manifest, manifest, bindings=altered_native).code == "provider_binding_mismatch"
+
+
+def test_transport_implementation_revision_changes_identity_and_is_bound_in_root(tmp_path: Path) -> None:
+    browser = BrowserTransportProvider()
+    changed_revision = BROWSER_IMPLEMENTATION_REVISION + "-changed"
+    changed_identity = _provider_identity(
+        "devmaster.bdb.vnext.browser-transport",
+        browser.provider_contract,
+        browser.implementation_module,
+        browser.implementation_qualname,
+        changed_revision,
+    )
+    assert changed_identity != browser.implementation_identity
+
+    manifest = _manifest(tmp_path)
+    root = VNextCompositionRoot.from_manifest(manifest)
+    browser_descriptor = next(
+        item for item in root.status()["providers"] if item["provider_id"] == BROWSER_PROVIDER_ID
+    )
+    assert browser_descriptor["implementation_revision"] == BROWSER_IMPLEMENTATION_REVISION
+
+    defaults = list(default_provider_bindings(manifest))
+    browser_index = next(index for index, item in enumerate(defaults) if item.provider_id == BROWSER_PROVIDER_ID)
+    changed_binding = replace(
+        defaults[browser_index],
+        implementation_identity=changed_identity,
+        implementation_revision=changed_revision,
+    )
+    mutated = [*defaults[:browser_index], changed_binding, *defaults[browser_index + 1 :]]
+    assert _failure(VNextCompositionRoot.from_manifest, manifest, bindings=mutated).code == "provider_identity_mismatch"
 
 
 def test_import_order_is_independent_in_fresh_subprocesses(tmp_path: Path) -> None:

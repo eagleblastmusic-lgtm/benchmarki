@@ -18,6 +18,7 @@ from bdb_vnext.content_store import (
     make_content_ref,
 )
 from bdb_vnext.repo_view import RepositoryResource
+from bdb_vnext.x2_typed_content_experiment import make_content_ref as x2_make_content_ref
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -71,6 +72,34 @@ def test_content_ref_preserves_four_field_semantic_and_raw_identity() -> None:
     assert set(text_ref.as_dict()) == {"type", "schema", "semantic_digest", "raw_digest"}
     assert text_ref.raw_digest == binary_ref.raw_digest
     assert text_ref.semantic_digest != binary_ref.semantic_digest
+
+
+@pytest.mark.parametrize(
+    ("content_type", "schema", "payloads"),
+    [
+        (
+            "text/plain",
+            "x2-text-v1",
+            (b"", b"ascii\n", "Giclée — typed context 🧭\n".encode("utf-8")),
+        ),
+        (
+            "application/octet-stream",
+            "x2-bytes-v1",
+            (b"", b"\x00\x01\xff\x10", "Giclée — bytes 🧭".encode("utf-8")),
+        ),
+    ],
+)
+def test_m2b_x2_content_ref_golden_compatibility(
+    content_type: str,
+    schema: str,
+    payloads: tuple[bytes, ...],
+) -> None:
+    for raw in payloads:
+        assert make_content_ref(content_type, schema, raw).as_dict() == x2_make_content_ref(
+            content_type,
+            schema,
+            raw,
+        ).as_dict()
 
 
 def test_immutable_content_publication_converges_and_never_overwrites(tmp_path: Path) -> None:

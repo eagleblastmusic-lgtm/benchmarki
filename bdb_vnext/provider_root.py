@@ -77,6 +77,9 @@ class ProviderBinding:
     provider_contract: str | None = None
     provider_contract_version: int | None = None
     implementation_identity: str | None = None
+    implementation_module: str | None = None
+    implementation_qualname: str | None = None
+    implementation_revision: str | None = None
 
     def descriptor(self) -> dict[str, Any]:
         descriptor: dict[str, Any] = {
@@ -94,6 +97,12 @@ class ProviderBinding:
             descriptor["provider_contract_version"] = self.provider_contract_version
         if self.implementation_identity is not None:
             descriptor["implementation_identity"] = self.implementation_identity
+        if self.implementation_module is not None:
+            descriptor["implementation_module"] = self.implementation_module
+        if self.implementation_qualname is not None:
+            descriptor["implementation_qualname"] = self.implementation_qualname
+        if self.implementation_revision is not None:
+            descriptor["implementation_revision"] = self.implementation_revision
         return descriptor
 
 
@@ -306,6 +315,9 @@ def default_provider_bindings(manifest: Mapping[str, Any]) -> tuple[ProviderBind
         provider_contract = getattr(implementation, "provider_contract", None)
         provider_contract_version = getattr(implementation, "provider_contract_version", None)
         implementation_identity = getattr(implementation, "implementation_identity", None)
+        implementation_module = getattr(implementation, "implementation_module", None)
+        implementation_qualname = getattr(implementation, "implementation_qualname", None)
+        implementation_revision = getattr(implementation, "implementation_revision", None)
         result.append(
             ProviderBinding(
                 provider_id=provider_id,
@@ -317,6 +329,9 @@ def default_provider_bindings(manifest: Mapping[str, Any]) -> tuple[ProviderBind
                 provider_contract=provider_contract,
                 provider_contract_version=provider_contract_version,
                 implementation_identity=implementation_identity,
+                implementation_module=implementation_module,
+                implementation_qualname=implementation_qualname,
+                implementation_revision=implementation_revision,
             )
         )
     return tuple(result)
@@ -483,17 +498,27 @@ class VNextCompositionRoot:
                         if provider_id == _composition.BROWSER_PROVIDER_ID
                         else NativeTransportProvider
                     )
-                    if not isinstance(declaration.implementation, expected_type):
+                    if type(declaration.implementation) is not expected_type:
                         raise ProviderRootError(
                             "provider_binding_mismatch",
-                            f"wrong implementation for {provider_id}",
+                            f"provider implementation must be the exact canonical class for {provider_id}",
                         )
                     implementation = declaration.implementation
-                    assert isinstance(implementation, expected_type)
+                    expected_implementation = expected_type()
                     if (
-                        declaration.provider_contract != implementation.provider_contract
+                        implementation.generation != expected_implementation.generation
+                        or declaration.provider_contract != implementation.provider_contract
                         or declaration.provider_contract_version != implementation.provider_contract_version
                         or declaration.implementation_identity != implementation.implementation_identity
+                        or declaration.implementation_module != implementation.implementation_module
+                        or declaration.implementation_qualname != implementation.implementation_qualname
+                        or declaration.implementation_revision != implementation.implementation_revision
+                        or implementation.provider_contract != expected_implementation.provider_contract
+                        or implementation.provider_contract_version != expected_implementation.provider_contract_version
+                        or implementation.implementation_identity != expected_implementation.implementation_identity
+                        or implementation.implementation_module != expected_implementation.implementation_module
+                        or implementation.implementation_qualname != expected_implementation.implementation_qualname
+                        or implementation.implementation_revision != expected_implementation.implementation_revision
                     ):
                         raise ProviderRootError(
                             "provider_identity_mismatch",
@@ -510,6 +535,9 @@ class VNextCompositionRoot:
                     declaration.provider_contract,
                     declaration.provider_contract_version,
                     declaration.implementation_identity,
+                    declaration.implementation_module,
+                    declaration.implementation_qualname,
+                    declaration.implementation_revision,
                 )
             ):
                 raise ProviderRootError(

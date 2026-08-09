@@ -26,6 +26,12 @@ MAX_TRANSPORT_PAYLOAD_BYTES = MAX_CONTEXT_FRAGMENT_BYTES
 MAX_TRANSPORT_ENVELOPE_BYTES = 2 * 1024 * 1024
 BROWSER_PROVIDER_CONTRACT = "bdb-vnext-browser-transport-contract-v1"
 NATIVE_PROVIDER_CONTRACT = "bdb-vnext-native-transport-contract-v1"
+IMPLEMENTATION_IDENTITY_SCHEMA = "bdb-vnext-transport-implementation-identity-v1"
+BROWSER_IMPLEMENTATION_REVISION = "bdb-vnext-browser-transport-implementation-r1"
+NATIVE_IMPLEMENTATION_REVISION = "bdb-vnext-native-transport-implementation-r1"
+_IMPLEMENTATION_MODULE = "bdb_vnext.context_transport"
+_BROWSER_PROVIDER_ID = "devmaster.bdb.vnext.browser-transport"
+_NATIVE_PROVIDER_ID = "devmaster.bdb.vnext.native-transport"
 
 
 class TransportError(ValueError):
@@ -44,14 +50,23 @@ def _message_id(core: dict[str, Any]) -> str:
     return f"sha256:{hashlib.sha256(canonical_json_bytes(core)).hexdigest()}"
 
 
-def _provider_identity(provider_id: str, contract: str) -> str:
+def _provider_identity(
+    provider_id: str,
+    contract: str,
+    implementation_module: str,
+    implementation_qualname: str,
+    implementation_revision: str,
+) -> str:
     return semantic_digest(
         {
+            "identity_schema": IMPLEMENTATION_IDENTITY_SCHEMA,
             "provider_id": provider_id,
             "provider_contract": contract,
             "provider_contract_version": PROTOCOL_VERSION,
             "protocol_generation": PROTOCOL_GENERATION,
-            "implementation": f"bdb_vnext.context_transport:{provider_id}",
+            "implementation_module": implementation_module,
+            "implementation_qualname": implementation_qualname,
+            "implementation_revision": implementation_revision,
         }
     )
 
@@ -163,9 +178,15 @@ class BrowserTransportProvider:
     generation: str = GENERATION_ID
     provider_contract: str = BROWSER_PROVIDER_CONTRACT
     provider_contract_version: int = PROTOCOL_VERSION
+    implementation_module: str = _IMPLEMENTATION_MODULE
+    implementation_qualname: str = "BrowserTransportProvider"
+    implementation_revision: str = BROWSER_IMPLEMENTATION_REVISION
     implementation_identity: str = _provider_identity(
-        "devmaster.bdb.vnext.browser-transport",
+        _BROWSER_PROVIDER_ID,
         BROWSER_PROVIDER_CONTRACT,
+        _IMPLEMENTATION_MODULE,
+        "BrowserTransportProvider",
+        BROWSER_IMPLEMENTATION_REVISION,
     )
 
     def encode(
@@ -188,9 +209,15 @@ class NativeTransportProvider:
     generation: str = GENERATION_ID
     provider_contract: str = NATIVE_PROVIDER_CONTRACT
     provider_contract_version: int = PROTOCOL_VERSION
+    implementation_module: str = _IMPLEMENTATION_MODULE
+    implementation_qualname: str = "NativeTransportProvider"
+    implementation_revision: str = NATIVE_IMPLEMENTATION_REVISION
     implementation_identity: str = _provider_identity(
-        "devmaster.bdb.vnext.native-transport",
+        _NATIVE_PROVIDER_ID,
         NATIVE_PROVIDER_CONTRACT,
+        _IMPLEMENTATION_MODULE,
+        "NativeTransportProvider",
+        NATIVE_IMPLEMENTATION_REVISION,
     )
 
     def decode(
@@ -200,25 +227,31 @@ class NativeTransportProvider:
         bindings: DurableBindingStore | None = None,
         expected_view: CommittedRepoView | None = None,
     ) -> DecodedTransport:
-        decoded = decode_envelope(payload)
-        if bindings is not None:
-            accepted = bindings.resolve_accepted(
-                decoded.fragment.fragment_id,
-                expected_view=expected_view,
+        if bindings is None:
+            _fail(
+                "binding_store_required",
+                "bound Native transport decoding requires a durable binding store",
             )
-            if accepted.fragment != decoded.fragment or accepted.raw != decoded.raw:
-                _fail("binding_integrity_failure", "decoded envelope differs from accepted durable binding")
+        decoded = decode_envelope(payload)
+        accepted = bindings.resolve_accepted(
+            decoded.fragment.fragment_id,
+            expected_view=expected_view,
+        )
+        if accepted.fragment != decoded.fragment or accepted.raw != decoded.raw:
+            _fail("binding_integrity_failure", "decoded envelope differs from accepted durable binding")
         return decoded
 
 
 __all__ = [
     "BROWSER_PROVIDER_CONTRACT",
+    "BROWSER_IMPLEMENTATION_REVISION",
     "BrowserTransportProvider",
     "DecodedTransport",
     "MESSAGE_KIND",
     "MAX_TRANSPORT_ENVELOPE_BYTES",
     "MAX_TRANSPORT_PAYLOAD_BYTES",
     "NATIVE_PROVIDER_CONTRACT",
+    "NATIVE_IMPLEMENTATION_REVISION",
     "NativeTransportProvider",
     "PROTOCOL_VERSION",
     "TRANSPORT_SCHEMA",

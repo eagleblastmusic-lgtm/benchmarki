@@ -35,7 +35,11 @@ def _git(repo: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def _fixture(tmp_path: Path) -> tuple[Path, object, DurableBindingStore, TypedContextFragment, bytes]:
+def _fixture(
+    tmp_path: Path,
+    *,
+    accept: bool = True,
+) -> tuple[Path, object, DurableBindingStore, TypedContextFragment, bytes]:
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
@@ -61,7 +65,8 @@ def _fixture(tmp_path: Path) -> tuple[Path, object, DurableBindingStore, TypedCo
         fragment_schema="bdb-vnext-context-fragment-text-v1",
         payload_size_bytes=len(raw),
     )
-    bindings.accept(fragment, view=view)
+    if accept:
+        bindings.accept(fragment, view=view)
     return runtime, view, bindings, fragment, raw
 
 
@@ -91,6 +96,28 @@ def test_browser_to_native_exact_roundtrip_preserves_binding_and_bytes(tmp_path:
     assert decoded.fragment.content_ref == fragment.content_ref
     assert decoded.fragment.repo_view == fragment.repo_view
     assert decoded.message_id.startswith("sha256:")
+    bindings.close()
+
+
+def test_native_transport_requires_durable_acceptance(tmp_path: Path) -> None:
+    _runtime, view, bindings, fragment, raw = _fixture(tmp_path, accept=False)
+    envelope = encode_envelope(fragment, raw)
+
+    # The exact codec remains usable as a low-level parser independent of
+    # authority; the bound Native provider is deliberately stricter.
+    assert decode_envelope(envelope).raw == raw
+    with pytest.raises(TransportError) as missing_store:
+        NativeTransportProvider().decode(envelope)
+    assert missing_store.value.code == "binding_store_required"
+
+    with pytest.raises(ContentStoreError) as unaccepted:
+        NativeTransportProvider().decode(envelope, bindings=bindings, expected_view=view)
+    assert unaccepted.value.code == "binding_missing"
+
+    bindings.accept(fragment, view=view)
+    accepted = NativeTransportProvider().decode(envelope, bindings=bindings, expected_view=view)
+    assert accepted.fragment == fragment
+    assert accepted.raw == raw
     bindings.close()
 
 

@@ -95,7 +95,9 @@ Each transport binding contributes deterministic:
 
 - provider contract;
 - contract version;
-- implementation identity digest derived from a stable contract descriptor.
+- exact implementation module and qualname;
+- explicit implementation revision;
+- implementation identity digest derived from that stable, versioned descriptor.
 
 No identity depends on object representation, memory address, import order, or
 mutable global state. Runtime, writer, and activation remain `OFF / OFF / OFF`.
