@@ -4,13 +4,14 @@
   "title": "BDB vNext ContextPackage v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "package_id", "intent_basis", "repo_view", "understanding_id", "horizon", "requested_dimensions", "covered_dimensions", "must_see_categories", "covered_must_see", "unknowns", "omissions", "contradictions", "included_fragment_ids", "affordances", "architecture_constraints_included", "invalidation_predicates", "coverage_status", "policy_version", "producer_id", "producer_version", "fact_claim_ids", "inference_claim_ids", "assumption_claim_ids", "hypothesis_claim_ids"],
+  "required": ["schema", "package_id", "intent_basis", "repo_view", "understanding_id", "horizon", "requested_dimensions", "covered_dimensions", "must_see_categories", "covered_must_see", "coverage_bindings", "unknowns", "omissions", "contradictions", "included_fragment_ids", "affordances", "architecture_constraints_included", "invalidation_predicates", "coverage_status", "policy_version", "producer_id", "producer_version", "fact_claim_ids", "inference_claim_ids", "assumption_claim_ids", "hypothesis_claim_ids"],
   "properties": {
     "schema": { "const": "bdb-vnext-context-package-v1" }, "package_id": { "$ref": "#/$defs/sha256" },
     "intent_basis": { "$ref": "#/$defs/intent" }, "repo_view": { "$ref": "#/$defs/repoView" },
     "understanding_id": { "$ref": "#/$defs/sha256" }, "horizon": { "enum": ["LOCAL", "COMPONENT", "REPOSITORY"] },
     "requested_dimensions": { "$ref": "#/$defs/identifiers" }, "covered_dimensions": { "$ref": "#/$defs/identifiers" },
     "must_see_categories": { "$ref": "#/$defs/identifiers" }, "covered_must_see": { "$ref": "#/$defs/identifiers" },
+    "coverage_bindings": { "type": "array", "items": { "$ref": "#/$defs/coverageBinding" }, "uniqueItems": true },
     "unknowns": { "type": "array", "items": { "$ref": "#/$defs/unknown" } },
     "omissions": { "type": "array", "items": { "$ref": "#/$defs/omission" } },
     "contradictions": { "type": "array", "items": { "$ref": "#/$defs/contradiction" } },
@@ -38,6 +39,15 @@
       "properties": {
         "repository_id": { "$ref": "#/$defs/text" }, "repository_identity_digest": { "$ref": "#/$defs/sha256" }, "object_format": { "enum": ["sha1", "sha256"] },
         "commit_oid": { "oneOf": [{ "$ref": "#/$defs/sha40" }, { "$ref": "#/$defs/sha256Oid" }] }, "tree_oid": { "oneOf": [{ "$ref": "#/$defs/sha40" }, { "$ref": "#/$defs/sha256Oid" }] }, "view_id": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "coverageBinding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "coverage_binding_id", "repo_view", "target_kind", "target", "supporting_claim_ids", "supporting_fragment_ids"],
+      "properties": {
+        "schema": { "const": "bdb-vnext-coverage-binding-v1" }, "coverage_binding_id": { "$ref": "#/$defs/sha256" },
+        "repo_view": { "$ref": "#/$defs/repoView" }, "target_kind": { "enum": ["DIMENSION", "MUST_SEE"] }, "target": { "$ref": "#/$defs/identifier" },
+        "supporting_claim_ids": { "$ref": "#/$defs/digests" }, "supporting_fragment_ids": { "$ref": "#/$defs/digests" }
       }
     },
     "unknown": {

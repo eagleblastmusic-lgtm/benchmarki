@@ -17,6 +17,9 @@ from typing import Any, Literal, NoReturn
 
 from bdb_shared.evidence import canonical_json_bytes, semantic_digest
 from bdb_vnext.content_store import (
+    AcceptedBinding,
+    ContentRef,
+    ContentStoreError,
     DurableBindingStore,
     ImmutableContentStore,
     RepoViewBinding,
@@ -38,6 +41,9 @@ UNKNOWN_SCHEMA = "bdb-vnext-understanding-unknown-v1"
 OMISSION_SCHEMA = "bdb-vnext-context-omission-v1"
 AFFORDANCE_SCHEMA = "bdb-vnext-context-affordance-v1"
 DECISION_OPTION_SCHEMA = "bdb-vnext-decision-option-v1"
+SOURCE_EVIDENCE_SCHEMA = "bdb-vnext-source-evidence-ref-v1"
+COVERAGE_BINDING_SCHEMA = "bdb-vnext-coverage-binding-v1"
+GAP_RESOLUTION_EVIDENCE_SCHEMA = "bdb-vnext-gap-resolution-evidence-v1"
 M2C_PRODUCER_ID = "bdb-vnext-engineering-intelligence"
 M2C_PRODUCER_VERSION = "m2c-v1"
 M2C_POLICY_VERSION = "m2c-context-policy-v1"
@@ -140,6 +146,37 @@ def _same_repo(left: RepoViewBinding, right: RepoViewBinding) -> bool:
     return left == right
 
 
+def _binding_for_repo(repo_view: CommittedRepoView | RepoViewBinding) -> RepoViewBinding:
+    binding = RepoViewBinding.from_view(repo_view) if isinstance(repo_view, CommittedRepoView) else repo_view
+    if not isinstance(binding, RepoViewBinding):
+        _fail("malformed_repo_view_basis", "an exact RepoView binding is required")
+    return binding
+
+
+def _accepted_fragment(
+    evidence: "SourceEvidenceRef",
+    binding_store: DurableBindingStore,
+    repo_view: CommittedRepoView | RepoViewBinding,
+) -> TypedContextFragment:
+    if not isinstance(binding_store, DurableBindingStore):
+        _fail("source_evidence_store_required", "source evidence requires the M2b DurableBindingStore")
+    expected_view = repo_view if isinstance(repo_view, CommittedRepoView) else None
+    try:
+        accepted = binding_store.resolve_accepted(evidence.fragment_id, expected_view=expected_view)
+    except ContentStoreError as exc:
+        _fail("source_evidence_unaccepted", "source evidence is not an accepted durable M2b fragment", details={"cause": exc.code})
+    fragment = accepted.fragment
+    if fragment.repo_view != evidence.repo_view or fragment.content_ref != evidence.content_ref:
+        _fail("source_evidence_binding_mismatch", "source evidence does not match the accepted fragment ContentRef/RepoView")
+    if fragment.fragment_type != evidence.fragment_type or fragment.fragment_schema != evidence.fragment_schema:
+        _fail("source_evidence_binding_mismatch", "source evidence does not match the accepted fragment type/schema")
+    if evidence.evidence_id != SourceEvidenceRef.from_fragment(fragment).evidence_id:
+        _fail("source_evidence_integrity_failure", "source evidence identity differs from the accepted fragment")
+    if fragment.repo_view != _binding_for_repo(repo_view):
+        _fail("source_evidence_repo_mismatch", "source evidence is bound to a different exact RepoView")
+    return fragment
+
+
 def _coverage_state(
     requested_dimensions: Sequence[str],
     covered_dimensions: Sequence[str],
@@ -148,10 +185,13 @@ def _coverage_state(
     unknowns: Sequence[object],
     omissions: Sequence[object],
     contradictions: Sequence[object],
+    coverage_bindings: Sequence[CoverageBinding] = (),
 ) -> Literal["COMPLETE", "PARTIAL", "BLOCKED"]:
     missing_requested = set(requested_dimensions) - set(covered_dimensions)
     missing_must_see = set(must_see_categories) - set(covered_must_see)
     if missing_requested or missing_must_see:
+        return "BLOCKED"
+    if (set(covered_dimensions) or set(covered_must_see)) and not coverage_bindings:
         return "BLOCKED"
     if any(getattr(item, "policy_denied", False) for item in omissions):
         return "BLOCKED"
@@ -187,6 +227,203 @@ class IntentBasis:
 
 
 @dataclass(frozen=True)
+class SourceEvidenceRef:
+    """A non-authoritative descriptor for one accepted M2b typed fragment.
+
+    Parsing this descriptor is intentionally pure.  Only ``create_verified``
+    (or ``validate`` against a live DurableBindingStore) establishes that the
+    descriptor still names the exact accepted fragment for the exact RepoView.
+    """
+
+    evidence_id: str
+    repo_view: RepoViewBinding
+    fragment_id: str
+    content_ref: ContentRef
+    fragment_type: str
+    fragment_schema: str
+
+    def __post_init__(self) -> None:
+        _digest(self.evidence_id, field="source_evidence.evidence_id")
+        if not isinstance(self.repo_view, RepoViewBinding):
+            _fail("malformed_source_evidence", "source evidence requires a typed RepoView binding")
+        _digest(self.fragment_id, field="source_evidence.fragment_id")
+        if not isinstance(self.content_ref, ContentRef):
+            _fail("malformed_source_evidence", "source evidence requires a typed ContentRef")
+        _identifier(self.fragment_type, field="source_evidence.fragment_type")
+        _identifier(self.fragment_schema, field="source_evidence.fragment_schema")
+        if self.evidence_id != _record_digest(self._identity_payload()):
+            _fail("source_evidence_integrity_failure", "evidence_id does not match the exact fragment descriptor")
+
+    def _identity_payload(self) -> dict[str, Any]:
+        return {
+            "schema": SOURCE_EVIDENCE_SCHEMA,
+            "repo_view": self.repo_view.as_dict(),
+            "fragment_id": self.fragment_id,
+            "content_ref": self.content_ref.as_dict(),
+            "fragment_type": self.fragment_type,
+            "fragment_schema": self.fragment_schema,
+        }
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"schema": SOURCE_EVIDENCE_SCHEMA, "evidence_id": self.evidence_id, **self._identity_payload()}
+
+    @classmethod
+    def from_fragment(cls, fragment: TypedContextFragment) -> "SourceEvidenceRef":
+        if not isinstance(fragment, TypedContextFragment):
+            _fail("malformed_source_evidence", "source evidence descriptor requires TypedContextFragment")
+        identity = {
+            "schema": SOURCE_EVIDENCE_SCHEMA,
+            "repo_view": fragment.repo_view.as_dict(),
+            "fragment_id": fragment.fragment_id,
+            "content_ref": fragment.content_ref.as_dict(),
+            "fragment_type": fragment.fragment_type,
+            "fragment_schema": fragment.fragment_schema,
+        }
+        result = cls(
+            _record_digest(identity),
+            fragment.repo_view,
+            fragment.fragment_id,
+            fragment.content_ref,
+            fragment.fragment_type,
+            fragment.fragment_schema,
+        )
+        return result
+
+    @classmethod
+    def create_verified(
+        cls,
+        view: CommittedRepoView | RepoViewBinding,
+        fragment: TypedContextFragment,
+        binding_store: DurableBindingStore,
+    ) -> "SourceEvidenceRef":
+        descriptor = cls.from_fragment(fragment)
+        _accepted_fragment(descriptor, binding_store, view)
+        return descriptor
+
+    @classmethod
+    def from_accepted(
+        cls,
+        accepted: AcceptedBinding,
+        *,
+        view: CommittedRepoView | RepoViewBinding,
+        binding_store: DurableBindingStore,
+    ) -> "SourceEvidenceRef":
+        if not isinstance(accepted, AcceptedBinding):
+            _fail("malformed_source_evidence", "from_accepted requires an M2b AcceptedBinding")
+        return cls.create_verified(view, accepted.fragment, binding_store)
+
+    def validate(
+        self,
+        binding_store: DurableBindingStore,
+        view: CommittedRepoView | RepoViewBinding,
+    ) -> TypedContextFragment:
+        return _accepted_fragment(self, binding_store, view)
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "SourceEvidenceRef":
+        _exact_fields(
+            value,
+            {"schema", "evidence_id", "repo_view", "fragment_id", "content_ref", "fragment_type", "fragment_schema"},
+            field="source_evidence",
+        )
+        if value["schema"] != SOURCE_EVIDENCE_SCHEMA:
+            _fail("schema_mismatch", "unsupported source evidence schema")
+        return cls(
+            value["evidence_id"],
+            _parse_repo_binding(value["repo_view"], field="source_evidence.repo_view"),
+            value["fragment_id"],
+            ContentRef.from_mapping(_mapping(value["content_ref"], field="source_evidence.content_ref")),
+            value["fragment_type"],
+            value["fragment_schema"],
+        )
+
+
+@dataclass(frozen=True)
+class CoverageBinding:
+    """Deterministic proof that one covered target has explicit support."""
+
+    coverage_binding_id: str
+    repo_view: RepoViewBinding
+    target_kind: str
+    target: str
+    supporting_claim_ids: tuple[str, ...]
+    supporting_fragment_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _digest(self.coverage_binding_id, field="coverage_binding.coverage_binding_id")
+        if not isinstance(self.repo_view, RepoViewBinding):
+            _fail("malformed_coverage_binding", "coverage binding requires a typed RepoView")
+        if self.target_kind not in {"DIMENSION", "MUST_SEE"}:
+            _fail("coverage_target_invalid", "coverage binding target_kind must be DIMENSION or MUST_SEE")
+        _identifier(self.target, field="coverage_binding.target")
+        _digest_sequence(self.supporting_claim_ids, field="coverage_binding.supporting_claim_ids")
+        _digest_sequence(self.supporting_fragment_ids, field="coverage_binding.supporting_fragment_ids")
+        if not self.supporting_claim_ids and not self.supporting_fragment_ids:
+            _fail("coverage_grounding_required", "every covered target requires explicit claim or fragment support")
+        if self.coverage_binding_id != _record_digest(self._identity_payload()):
+            _fail("coverage_binding_integrity_failure", "coverage_binding_id does not match exact binding identity")
+
+    def _identity_payload(self) -> dict[str, Any]:
+        return {
+            "schema": COVERAGE_BINDING_SCHEMA,
+            "repo_view": self.repo_view.as_dict(),
+            "target_kind": self.target_kind,
+            "target": self.target,
+            "supporting_claim_ids": list(self.supporting_claim_ids),
+            "supporting_fragment_ids": list(self.supporting_fragment_ids),
+        }
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"schema": COVERAGE_BINDING_SCHEMA, "coverage_binding_id": self.coverage_binding_id, **self._identity_payload()}
+
+    @classmethod
+    def create(
+        cls,
+        repo_view: CommittedRepoView | RepoViewBinding,
+        *,
+        target_kind: str,
+        target: str,
+        supporting_claim_ids: Sequence[str] = (),
+        supporting_fragment_ids: Sequence[str] = (),
+    ) -> "CoverageBinding":
+        binding = _binding_for_repo(repo_view)
+        identity = {
+            "schema": COVERAGE_BINDING_SCHEMA,
+            "repo_view": binding.as_dict(),
+            "target_kind": target_kind,
+            "target": target,
+            "supporting_claim_ids": list(supporting_claim_ids),
+            "supporting_fragment_ids": list(supporting_fragment_ids),
+        }
+        return cls(
+            _record_digest(identity),
+            binding,
+            target_kind,
+            target,
+            tuple(supporting_claim_ids),
+            tuple(supporting_fragment_ids),
+        )
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "CoverageBinding":
+        _exact_fields(
+            value,
+            {"schema", "coverage_binding_id", "repo_view", "target_kind", "target", "supporting_claim_ids", "supporting_fragment_ids"},
+            field="coverage_binding",
+        )
+        if value["schema"] != COVERAGE_BINDING_SCHEMA:
+            _fail("schema_mismatch", "unsupported coverage binding schema")
+        return cls(
+            value["coverage_binding_id"],
+            _parse_repo_binding(value["repo_view"], field="coverage_binding.repo_view"),
+            value["target_kind"],
+            value["target"],
+            _digest_sequence(value["supporting_claim_ids"], field="coverage_binding.supporting_claim_ids"),
+            _digest_sequence(value["supporting_fragment_ids"], field="coverage_binding.supporting_fragment_ids"),
+        )
+
+
+@dataclass(frozen=True)
 class UnderstandingClaim:
     """One epistemic claim explicitly separated from exact source authority."""
 
@@ -201,6 +438,7 @@ class UnderstandingClaim:
     basis_refs: tuple[str, ...]
     producer_id: str = M2C_PRODUCER_ID
     producer_version: str = M2C_PRODUCER_VERSION
+    source_evidence: tuple[SourceEvidenceRef, ...] = ()
 
     def __post_init__(self) -> None:
         _digest(self.claim_id, field="claim_id")
@@ -219,8 +457,16 @@ class UnderstandingClaim:
         _text(self.statement, field="claim.statement")
         if not self.evidence_refs and self.kind in {"FACT", "INFERENCE"}:
             _fail("claim_evidence_required", "FACT and INFERENCE claims require evidence references")
-        if self.kind == "FACT" and any(_DIGEST.fullmatch(reference) is None for reference in self.evidence_refs):
-            _fail("claim_evidence_not_exact", "FACT evidence references must be exact sha256-bound IDs")
+        if any(not isinstance(item, SourceEvidenceRef) for item in self.source_evidence):
+            _fail("malformed_claim", "claim source_evidence must contain SourceEvidenceRef records")
+        if self.kind == "FACT":
+            if not self.source_evidence:
+                _fail("source_evidence_required", "FACT claims require verified SourceEvidenceRef records")
+            expected_refs = tuple(item.evidence_id for item in self.source_evidence)
+            if tuple(self.evidence_refs) != expected_refs:
+                _fail("source_evidence_binding_mismatch", "FACT evidence_refs must exactly name source_evidence IDs")
+        elif self.source_evidence:
+            _fail("claim_authority_mismatch", "only FACT claims may carry source evidence")
         for reference in (*self.evidence_refs, *self.basis_refs):
             _text(reference, field="claim.reference", max_length=512)
         _identifier(self.producer_id, field="claim.producer_id")
@@ -241,6 +487,7 @@ class UnderstandingClaim:
             "basis_refs": list(self.basis_refs),
             "producer_id": self.producer_id,
             "producer_version": self.producer_version,
+            "source_evidence": [item.as_dict() for item in self.source_evidence],
         }
 
     def as_dict(self) -> dict[str, Any]:
@@ -257,12 +504,31 @@ class UnderstandingClaim:
         statement: str,
         evidence_refs: Sequence[str] = (),
         basis_refs: Sequence[str] = (),
+        source_evidence: Sequence[SourceEvidenceRef] = (),
+        source_evidence_refs: Sequence[SourceEvidenceRef] | None = None,
+        binding_store: DurableBindingStore | None = None,
         producer_id: str = M2C_PRODUCER_ID,
         producer_version: str = M2C_PRODUCER_VERSION,
     ) -> "UnderstandingClaim":
         binding = RepoViewBinding.from_view(repo_view) if isinstance(repo_view, CommittedRepoView) else repo_view
         if not isinstance(binding, RepoViewBinding):
             _fail("malformed_repo_view_basis", "claim requires an exact RepoView binding")
+        evidence_items = tuple(source_evidence_refs if source_evidence_refs is not None else source_evidence)
+        if kind == "FACT":
+            if not evidence_items:
+                _fail("source_evidence_required", "FACT claims require SourceEvidenceRef records")
+            if binding_store is None:
+                _fail("source_evidence_store_required", "FACT claims require the M2b DurableBindingStore")
+            for item in evidence_items:
+                if not isinstance(item, SourceEvidenceRef):
+                    _fail("malformed_source_evidence", "FACT source evidence must be typed")
+                item.validate(binding_store, repo_view)
+            normalized_refs = tuple(item.evidence_id for item in evidence_items)
+            if evidence_refs and tuple(evidence_refs) not in {normalized_refs, tuple(item.fragment_id for item in evidence_items)}:
+                _fail("source_evidence_binding_mismatch", "FACT evidence_refs must match verified source evidence IDs")
+            evidence_refs = normalized_refs
+        elif evidence_items:
+            _fail("claim_authority_mismatch", "only FACT claims may carry source evidence")
         identity = {
             "schema": CLAIM_SCHEMA,
             "repo_view": binding.as_dict(),
@@ -275,6 +541,7 @@ class UnderstandingClaim:
             "basis_refs": list(basis_refs),
             "producer_id": producer_id,
             "producer_version": producer_version,
+            "source_evidence": [item.as_dict() for item in evidence_items],
         }
         return cls(
             _record_digest(identity),
@@ -288,7 +555,20 @@ class UnderstandingClaim:
             tuple(basis_refs),
             producer_id,
             producer_version,
+            evidence_items,
         )
+
+    def validate_source_grounding(
+        self,
+        binding_store: DurableBindingStore,
+        repo_view: CommittedRepoView | RepoViewBinding,
+    ) -> None:
+        if self.kind != "FACT":
+            return
+        if not self.source_evidence:
+            _fail("source_evidence_required", "FACT claims require SourceEvidenceRef records")
+        for item in self.source_evidence:
+            item.validate(binding_store, repo_view)
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "UnderstandingClaim":
@@ -307,6 +587,7 @@ class UnderstandingClaim:
                 "basis_refs",
                 "producer_id",
                 "producer_version",
+                "source_evidence",
             },
             field="claim",
         )
@@ -324,6 +605,7 @@ class UnderstandingClaim:
             _sequence(value["basis_refs"], field="claim.basis_refs"),
             value["producer_id"],
             value["producer_version"],
+            tuple(SourceEvidenceRef.from_mapping(item) for item in value["source_evidence"]),
         )
 
 
@@ -689,6 +971,66 @@ class ContextAffordance:
         )
 
 
+def _validate_coverage_bindings(
+    bindings: Sequence[CoverageBinding],
+    *,
+    repo_view: RepoViewBinding,
+    claims: Sequence[UnderstandingClaim],
+    allowed_claim_ids: Sequence[str] | None = None,
+    requested_dimensions: Sequence[str],
+    covered_dimensions: Sequence[str],
+    must_see_categories: Sequence[str],
+    covered_must_see: Sequence[str],
+    binding_store: DurableBindingStore | None = None,
+    committed_view: CommittedRepoView | None = None,
+    included_fragment_ids: Sequence[str] = (),
+    allowed_fragment_ids: Sequence[str] | None = None,
+) -> None:
+    _validate_unique_records(bindings, "coverage_binding_id", field="coverage_bindings")
+    claim_by_id = {claim.claim_id: claim for claim in claims}
+    allowed_claim_set = set(allowed_claim_ids if allowed_claim_ids is not None else claim_by_id)
+    expected_targets = {("DIMENSION", item) for item in covered_dimensions} | {
+        ("MUST_SEE", item) for item in covered_must_see
+    }
+    observed_targets: set[tuple[str, str]] = set()
+    for binding in bindings:
+        if not isinstance(binding, CoverageBinding) or binding.repo_view != repo_view:
+            _fail("coverage_basis_mismatch", "coverage bindings must bind the exact RepoView")
+        target = (binding.target_kind, binding.target)
+        if target not in expected_targets:
+            _fail("coverage_overclaim", "coverage binding targets an uncovered or unrequested target")
+        if target in observed_targets:
+            _fail("duplicate_m2c_value", "coverage targets must have one deterministic binding")
+        observed_targets.add(target)
+        if not set(binding.supporting_claim_ids).issubset(allowed_claim_set):
+            _fail("coverage_claim_missing", "coverage binding names a claim outside the Understanding")
+        for claim_id in binding.supporting_claim_ids:
+            claim = claim_by_id.get(claim_id)
+            if claim is not None and claim.repo_view != repo_view:
+                _fail("coverage_basis_mismatch", "coverage supporting claim has a foreign RepoView")
+        for fragment_id in binding.supporting_fragment_ids:
+            if included_fragment_ids and fragment_id not in set(included_fragment_ids):
+                _fail("coverage_fragment_missing", "coverage binding fragment is not included in the ContextPackage")
+            if allowed_fragment_ids is not None and fragment_id not in set(allowed_fragment_ids):
+                _fail("coverage_fragment_missing", "coverage binding fragment is not part of the real Understanding evidence")
+            if binding_store is None:
+                # Pure record parsing remains possible, but it does not confer
+                # authority.  Authority-sensitive construction validates the
+                # same edge again with a live binding store below.
+                continue
+            try:
+                accepted = binding_store.resolve_accepted(
+                    fragment_id,
+                    expected_view=committed_view,
+                )
+            except ContentStoreError as exc:
+                _fail("coverage_fragment_unaccepted", "coverage fragment is not an accepted durable M2b binding", details={"cause": exc.code})
+            if accepted.fragment.repo_view != repo_view:
+                _fail("coverage_basis_mismatch", "coverage fragment has a foreign RepoView")
+    if observed_targets != expected_targets:
+        _fail("coverage_grounding_required", "every covered dimension and must-see target needs a CoverageBinding")
+
+
 @dataclass(frozen=True)
 class RepositoryUnderstandingView:
     """Rebuildable exact-RepoView claim projection, never source-byte authority."""
@@ -701,6 +1043,7 @@ class RepositoryUnderstandingView:
     covered_dimensions: tuple[str, ...]
     must_see_categories: tuple[str, ...]
     covered_must_see: tuple[str, ...]
+    coverage_bindings: tuple[CoverageBinding, ...]
     unknowns: tuple[Unknown, ...]
     omissions: tuple[Omission, ...]
     contradictions: tuple[ClaimContradiction, ...]
@@ -716,6 +1059,8 @@ class RepositoryUnderstandingView:
         _validate_unique_records(self.unknowns, "unknown_id", field="understanding.unknowns")
         _validate_unique_records(self.omissions, "omission_id", field="understanding.omissions")
         _validate_unique_records(self.contradictions, "contradiction_id", field="understanding.contradictions")
+        if any(not isinstance(item, CoverageBinding) for item in self.coverage_bindings):
+            _fail("malformed_coverage_binding", "understanding coverage_bindings must be typed")
         for claim in self.claims:
             if not isinstance(claim, UnderstandingClaim) or not _same_repo(claim.repo_view, self.repo_view):
                 _fail("understanding_basis_mismatch", "all claims must bind the exact Understanding RepoView")
@@ -742,6 +1087,15 @@ class RepositoryUnderstandingView:
             self.covered_dimensions,
             self.must_see_categories,
             self.covered_must_see,
+        )
+        _validate_coverage_bindings(
+            self.coverage_bindings,
+            repo_view=self.repo_view,
+            claims=self.claims,
+            requested_dimensions=self.requested_dimensions,
+            covered_dimensions=self.covered_dimensions,
+            must_see_categories=self.must_see_categories,
+            covered_must_see=self.covered_must_see,
         )
         if not self.invalidation_predicates:
             _fail("invalidation_predicates_required", "Understanding must expose invalidation predicates")
@@ -777,6 +1131,7 @@ class RepositoryUnderstandingView:
             "covered_dimensions": list(self.covered_dimensions),
             "must_see_categories": list(self.must_see_categories),
             "covered_must_see": list(self.covered_must_see),
+            "coverage_bindings": [item.as_dict() for item in self.coverage_bindings],
             "unknowns": [item.as_dict() for item in self.unknowns],
             "omissions": [item.as_dict() for item in self.omissions],
             "contradictions": [item.as_dict() for item in self.contradictions],
@@ -795,6 +1150,7 @@ class RepositoryUnderstandingView:
             self.unknowns,
             self.omissions,
             self.contradictions,
+            self.coverage_bindings,
         )
 
     @property
@@ -812,6 +1168,7 @@ class RepositoryUnderstandingView:
             "covered_dimensions": list(self.covered_dimensions),
             "must_see_categories": list(self.must_see_categories),
             "covered_must_see": list(self.covered_must_see),
+            "coverage_bindings": [item.as_dict() for item in self.coverage_bindings],
             "unknowns": [item.as_dict() for item in self.unknowns],
             "omissions": [item.as_dict() for item in self.omissions],
             "contradictions": [item.as_dict() for item in self.contradictions],
@@ -835,6 +1192,7 @@ class RepositoryUnderstandingView:
         covered_dimensions: Sequence[str] = (),
         must_see_categories: Sequence[str] = (),
         covered_must_see: Sequence[str] = (),
+        coverage_bindings: Sequence[CoverageBinding] = (),
         unknowns: Sequence[Unknown] = (),
         omissions: Sequence[Omission] = (),
         contradictions: Sequence[ClaimContradiction] = (),
@@ -845,6 +1203,7 @@ class RepositoryUnderstandingView:
         ),
         producer_id: str = M2C_PRODUCER_ID,
         producer_version: str = M2C_PRODUCER_VERSION,
+        binding_store: DurableBindingStore | None = None,
     ) -> "RepositoryUnderstandingView":
         if not isinstance(intent_basis, IntentBasis):
             _fail("malformed_intent_basis", "Understanding requires IntentBasis")
@@ -860,6 +1219,7 @@ class RepositoryUnderstandingView:
             "covered_dimensions": list(covered_dimensions),
             "must_see_categories": list(must_see_categories),
             "covered_must_see": list(covered_must_see),
+            "coverage_bindings": [item.as_dict() for item in coverage_bindings],
             "unknowns": [item.as_dict() for item in unknowns],
             "omissions": [item.as_dict() for item in omissions],
             "contradictions": [item.as_dict() for item in contradictions],
@@ -867,7 +1227,7 @@ class RepositoryUnderstandingView:
             "producer_id": producer_id,
             "producer_version": producer_version,
         }
-        return cls(
+        result = cls(
             _record_digest(identity),
             intent_basis,
             binding,
@@ -876,12 +1236,42 @@ class RepositoryUnderstandingView:
             tuple(covered_dimensions),
             tuple(must_see_categories),
             tuple(covered_must_see),
+            tuple(coverage_bindings),
             tuple(unknowns),
             tuple(omissions),
             tuple(contradictions),
             tuple(invalidation_predicates),
             producer_id,
             producer_version,
+        )
+        if any(claim.kind == "FACT" for claim in result.claims) or any(
+            item.supporting_fragment_ids for item in result.coverage_bindings
+        ):
+            if binding_store is None:
+                _fail("source_evidence_store_required", "authoritative Understanding construction requires M2b grounding")
+            result.validate_source_grounding(binding_store, repo_view)
+        return result
+
+    def validate_source_grounding(
+        self,
+        binding_store: DurableBindingStore,
+        repo_view: CommittedRepoView | RepoViewBinding | None = None,
+    ) -> None:
+        expected_repo = self.repo_view if repo_view is None else _binding_for_repo(repo_view)
+        if expected_repo != self.repo_view:
+            _fail("understanding_basis_mismatch", "grounding RepoView differs from Understanding RepoView")
+        for claim in self.claims:
+            claim.validate_source_grounding(binding_store, repo_view or self.repo_view)
+        _validate_coverage_bindings(
+            self.coverage_bindings,
+            repo_view=self.repo_view,
+            claims=self.claims,
+            requested_dimensions=self.requested_dimensions,
+            covered_dimensions=self.covered_dimensions,
+            must_see_categories=self.must_see_categories,
+            covered_must_see=self.covered_must_see,
+            binding_store=binding_store,
+            committed_view=repo_view if isinstance(repo_view, CommittedRepoView) else None,
         )
 
     @classmethod
@@ -898,6 +1288,7 @@ class RepositoryUnderstandingView:
                 "covered_dimensions",
                 "must_see_categories",
                 "covered_must_see",
+                "coverage_bindings",
                 "unknowns",
                 "omissions",
                 "contradictions",
@@ -910,14 +1301,19 @@ class RepositoryUnderstandingView:
         )
         if value["schema"] != UNDERSTANDING_SCHEMA:
             _fail("schema_mismatch", "unsupported RepositoryUnderstanding schema")
-        result = cls.create(
-            _parse_intent(value["intent_basis"]),
-            _parse_repo_binding(value["repo_view"]),
-            claims=tuple(UnderstandingClaim.from_mapping(item) for item in value["claims"]),
+        intent = _parse_intent(value["intent_basis"])
+        binding = _parse_repo_binding(value["repo_view"])
+        claims = tuple(UnderstandingClaim.from_mapping(item) for item in value["claims"])
+        result = cls(
+            value["understanding_id"],
+            intent,
+            binding,
+            claims,
             requested_dimensions=_identifier_sequence(value["requested_dimensions"], field="understanding.requested_dimensions"),
             covered_dimensions=_identifier_sequence(value["covered_dimensions"], field="understanding.covered_dimensions"),
             must_see_categories=_identifier_sequence(value["must_see_categories"], field="understanding.must_see_categories"),
             covered_must_see=_identifier_sequence(value["covered_must_see"], field="understanding.covered_must_see"),
+            coverage_bindings=tuple(CoverageBinding.from_mapping(item) for item in value["coverage_bindings"]),
             unknowns=tuple(Unknown.from_mapping(item) for item in value["unknowns"]),
             omissions=tuple(Omission.from_mapping(item) for item in value["omissions"]),
             contradictions=tuple(ClaimContradiction.from_mapping(item) for item in value["contradictions"]),
@@ -970,6 +1366,7 @@ class ContextPackage:
     covered_dimensions: tuple[str, ...]
     must_see_categories: tuple[str, ...]
     covered_must_see: tuple[str, ...]
+    coverage_bindings: tuple[CoverageBinding, ...]
     unknowns: tuple[Unknown, ...]
     omissions: tuple[Omission, ...]
     contradictions: tuple[ClaimContradiction, ...]
@@ -998,6 +1395,8 @@ class ContextPackage:
             self.must_see_categories,
             self.covered_must_see,
         )
+        if any(not isinstance(item, CoverageBinding) for item in self.coverage_bindings):
+            _fail("malformed_coverage_binding", "package coverage_bindings must be typed")
         _validate_unique_records(self.unknowns, "unknown_id", field="package.unknowns")
         _validate_unique_records(self.omissions, "omission_id", field="package.omissions")
         _validate_unique_records(self.contradictions, "contradiction_id", field="package.contradictions")
@@ -1011,6 +1410,27 @@ class ContextPackage:
         for contradiction in self.contradictions:
             if not isinstance(contradiction, ClaimContradiction) or not _same_repo(contradiction.repo_view, self.repo_view):
                 _fail("context_package_basis_mismatch", "package contradictions must bind the package RepoView")
+        claim_ids = {
+            claim_id
+            for values in (
+                self.fact_claim_ids,
+                self.inference_claim_ids,
+                self.assumption_claim_ids,
+                self.hypothesis_claim_ids,
+            )
+            for claim_id in values
+        }
+        _validate_coverage_bindings(
+            self.coverage_bindings,
+            repo_view=self.repo_view,
+            claims=(),
+            allowed_claim_ids=claim_ids,
+            requested_dimensions=self.requested_dimensions,
+            covered_dimensions=self.covered_dimensions,
+            must_see_categories=self.must_see_categories,
+            covered_must_see=self.covered_must_see,
+            included_fragment_ids=self.included_fragment_ids,
+        )
         for fragment_id in self.included_fragment_ids:
             _digest(fragment_id, field="package.included_fragment_ids[]")
         _identifier_sequence(self.architecture_constraints_included, field="package.architecture_constraints_included")
@@ -1043,6 +1463,7 @@ class ContextPackage:
             "covered_dimensions": list(self.covered_dimensions),
             "must_see_categories": list(self.must_see_categories),
             "covered_must_see": list(self.covered_must_see),
+            "coverage_bindings": [item.as_dict() for item in self.coverage_bindings],
             "unknowns": [item.as_dict() for item in self.unknowns],
             "omissions": [item.as_dict() for item in self.omissions],
             "contradictions": [item.as_dict() for item in self.contradictions],
@@ -1069,6 +1490,7 @@ class ContextPackage:
             self.unknowns,
             self.omissions,
             self.contradictions,
+            self.coverage_bindings,
         )
 
     @property
@@ -1087,6 +1509,7 @@ class ContextPackage:
             "covered_dimensions": list(self.covered_dimensions),
             "must_see_categories": list(self.must_see_categories),
             "covered_must_see": list(self.covered_must_see),
+            "coverage_bindings": [item.as_dict() for item in self.coverage_bindings],
             "unknowns": [item.as_dict() for item in self.unknowns],
             "omissions": [item.as_dict() for item in self.omissions],
             "contradictions": [item.as_dict() for item in self.contradictions],
@@ -1119,6 +1542,7 @@ class ContextPackage:
         covered_dimensions: Sequence[str] = (),
         must_see_categories: Sequence[str] = (),
         covered_must_see: Sequence[str] = (),
+        coverage_bindings: Sequence[CoverageBinding] = (),
         unknowns: Sequence[Unknown] = (),
         omissions: Sequence[Omission] = (),
         contradictions: Sequence[ClaimContradiction] = (),
@@ -1137,12 +1561,74 @@ class ContextPackage:
         inference_claim_ids: Sequence[str] = (),
         assumption_claim_ids: Sequence[str] = (),
         hypothesis_claim_ids: Sequence[str] = (),
+        understanding: RepositoryUnderstandingView | None = None,
+        binding_store: DurableBindingStore | None = None,
     ) -> "ContextPackage":
         if not isinstance(intent_basis, IntentBasis):
             _fail("malformed_intent_basis", "ContextPackage requires IntentBasis")
         binding = RepoViewBinding.from_view(repo_view) if isinstance(repo_view, CommittedRepoView) else repo_view
         if not isinstance(binding, RepoViewBinding):
             _fail("malformed_repo_view_basis", "ContextPackage requires an exact RepoView binding")
+        _validate_coverage_fields(requested_dimensions, covered_dimensions, must_see_categories, covered_must_see)
+        if understanding is not None:
+            if (
+                not isinstance(understanding, RepositoryUnderstandingView)
+                or understanding.understanding_id != understanding_id
+                or understanding.intent_basis != intent_basis
+                or understanding.repo_view != binding
+            ):
+                _fail("context_package_basis_mismatch", "ContextPackage must bind the exact RepositoryUnderstanding")
+            expected_claims = {
+                "FACT": tuple(claim.claim_id for claim in understanding.claims if claim.kind == "FACT"),
+                "INFERENCE": tuple(claim.claim_id for claim in understanding.claims if claim.kind == "INFERENCE"),
+                "ASSUMPTION": tuple(claim.claim_id for claim in understanding.claims if claim.kind == "ASSUMPTION"),
+                "HYPOTHESIS": tuple(claim.claim_id for claim in understanding.claims if claim.kind == "HYPOTHESIS"),
+            }
+            if (
+                tuple(requested_dimensions) != understanding.requested_dimensions
+                or tuple(covered_dimensions) != understanding.covered_dimensions
+                or tuple(must_see_categories) != understanding.must_see_categories
+                or tuple(covered_must_see) != understanding.covered_must_see
+                or tuple(coverage_bindings) != understanding.coverage_bindings
+                or tuple(unknowns) != understanding.unknowns
+                or tuple(omissions) != understanding.omissions
+                or tuple(contradictions) != understanding.contradictions
+                or tuple(fact_claim_ids) != expected_claims["FACT"]
+                or tuple(inference_claim_ids) != expected_claims["INFERENCE"]
+                or tuple(assumption_claim_ids) != expected_claims["ASSUMPTION"]
+                or tuple(hypothesis_claim_ids) != expected_claims["HYPOTHESIS"]
+            ):
+                _fail("context_package_basis_mismatch", "ContextPackage fields must be derived from the exact Understanding")
+            if binding_store is not None:
+                understanding.validate_source_grounding(binding_store, repo_view)
+        if (covered_dimensions or covered_must_see or coverage_bindings or fact_claim_ids or inference_claim_ids or assumption_claim_ids or hypothesis_claim_ids) and understanding is None:
+            _fail("understanding_basis_required", "covered ContextPackage claims require a real RepositoryUnderstanding basis")
+        allowed_fragments = None
+        if understanding is not None and binding_store is None:
+            allowed_fragments = tuple(
+                fragment_id
+                for claim in understanding.claims
+                for evidence in claim.source_evidence
+                for fragment_id in (evidence.fragment_id,)
+            )
+        _validate_coverage_bindings(
+            tuple(coverage_bindings),
+            repo_view=binding,
+            claims=(),
+            allowed_claim_ids=tuple(
+                claim_id
+                for values in (fact_claim_ids, inference_claim_ids, assumption_claim_ids, hypothesis_claim_ids)
+                for claim_id in values
+            ),
+            requested_dimensions=requested_dimensions,
+            covered_dimensions=covered_dimensions,
+            must_see_categories=must_see_categories,
+            covered_must_see=covered_must_see,
+            binding_store=binding_store,
+            committed_view=repo_view if isinstance(repo_view, CommittedRepoView) else None,
+            included_fragment_ids=included_fragment_ids,
+            allowed_fragment_ids=allowed_fragments,
+        )
         identity = {
             "schema": CONTEXT_PACKAGE_SCHEMA,
             "intent_basis": intent_basis.as_dict(),
@@ -1153,6 +1639,7 @@ class ContextPackage:
             "covered_dimensions": list(covered_dimensions),
             "must_see_categories": list(must_see_categories),
             "covered_must_see": list(covered_must_see),
+            "coverage_bindings": [item.as_dict() for item in coverage_bindings],
             "unknowns": [item.as_dict() for item in unknowns],
             "omissions": [item.as_dict() for item in omissions],
             "contradictions": [item.as_dict() for item in contradictions],
@@ -1178,6 +1665,7 @@ class ContextPackage:
             tuple(covered_dimensions),
             tuple(must_see_categories),
             tuple(covered_must_see),
+            tuple(coverage_bindings),
             tuple(unknowns),
             tuple(omissions),
             tuple(contradictions),
@@ -1203,6 +1691,7 @@ class ContextPackage:
         included_fragment_ids: Sequence[str] = (),
         affordances: Sequence[ContextAffordance] = (),
         architecture_constraints_included: Sequence[str] = (),
+        binding_store: DurableBindingStore | None = None,
     ) -> "ContextPackage":
         return cls.create(
             understanding.intent_basis,
@@ -1213,6 +1702,7 @@ class ContextPackage:
             covered_dimensions=understanding.covered_dimensions,
             must_see_categories=understanding.must_see_categories,
             covered_must_see=understanding.covered_must_see,
+            coverage_bindings=understanding.coverage_bindings,
             unknowns=understanding.unknowns,
             omissions=understanding.omissions,
             contradictions=understanding.contradictions,
@@ -1226,6 +1716,8 @@ class ContextPackage:
             inference_claim_ids=tuple(claim.claim_id for claim in understanding.claims if claim.kind == "INFERENCE"),
             assumption_claim_ids=tuple(claim.claim_id for claim in understanding.claims if claim.kind == "ASSUMPTION"),
             hypothesis_claim_ids=tuple(claim.claim_id for claim in understanding.claims if claim.kind == "HYPOTHESIS"),
+            understanding=understanding,
+            binding_store=binding_store,
         )
 
     @classmethod
@@ -1243,6 +1735,7 @@ class ContextPackage:
                 "covered_dimensions",
                 "must_see_categories",
                 "covered_must_see",
+                "coverage_bindings",
                 "unknowns",
                 "omissions",
                 "contradictions",
@@ -1263,15 +1756,17 @@ class ContextPackage:
         )
         if value["schema"] != CONTEXT_PACKAGE_SCHEMA:
             _fail("schema_mismatch", "unsupported ContextPackage schema")
-        result = cls.create(
-            _parse_intent(value["intent_basis"]),
-            _parse_repo_binding(value["repo_view"]),
+        result = cls(
+            package_id=value["package_id"],
+            intent_basis=_parse_intent(value["intent_basis"]),
+            repo_view=_parse_repo_binding(value["repo_view"]),
             understanding_id=value["understanding_id"],
             horizon=value["horizon"],
             requested_dimensions=_identifier_sequence(value["requested_dimensions"], field="package.requested_dimensions"),
             covered_dimensions=_identifier_sequence(value["covered_dimensions"], field="package.covered_dimensions"),
             must_see_categories=_identifier_sequence(value["must_see_categories"], field="package.must_see_categories"),
             covered_must_see=_identifier_sequence(value["covered_must_see"], field="package.covered_must_see"),
+            coverage_bindings=tuple(CoverageBinding.from_mapping(item) for item in value["coverage_bindings"]),
             unknowns=tuple(Unknown.from_mapping(item) for item in value["unknowns"]),
             omissions=tuple(Omission.from_mapping(item) for item in value["omissions"]),
             contradictions=tuple(ClaimContradiction.from_mapping(item) for item in value["contradictions"]),
@@ -1454,6 +1949,81 @@ class ContextRequest:
 
 
 @dataclass(frozen=True)
+class GapResolutionEvidence:
+    """Explicit evidence edge for one resolved ContextPackage gap."""
+
+    gap_resolution_id: str
+    gap_id: str
+    added_fragment_ids: tuple[str, ...]
+    supporting_claim_ids: tuple[str, ...]
+    coverage_binding_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _digest(self.gap_resolution_id, field="gap_resolution.gap_resolution_id")
+        _digest(self.gap_id, field="gap_resolution.gap_id")
+        _digest_sequence(self.added_fragment_ids, field="gap_resolution.added_fragment_ids")
+        _digest_sequence(self.supporting_claim_ids, field="gap_resolution.supporting_claim_ids")
+        _digest_sequence(self.coverage_binding_ids, field="gap_resolution.coverage_binding_ids")
+        if not (self.added_fragment_ids or self.supporting_claim_ids or self.coverage_binding_ids):
+            _fail("resolution_evidence_required", "each resolved gap requires explicit fragment/claim/coverage evidence")
+        if self.gap_resolution_id != _record_digest(self._identity_payload()):
+            _fail("gap_resolution_integrity_failure", "gap_resolution_id does not match exact evidence identity")
+
+    def _identity_payload(self) -> dict[str, Any]:
+        return {
+            "schema": GAP_RESOLUTION_EVIDENCE_SCHEMA,
+            "gap_id": self.gap_id,
+            "added_fragment_ids": list(self.added_fragment_ids),
+            "supporting_claim_ids": list(self.supporting_claim_ids),
+            "coverage_binding_ids": list(self.coverage_binding_ids),
+        }
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"schema": GAP_RESOLUTION_EVIDENCE_SCHEMA, "gap_resolution_id": self.gap_resolution_id, **self._identity_payload()}
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        gap_id: str,
+        added_fragment_ids: Sequence[str] = (),
+        supporting_claim_ids: Sequence[str] = (),
+        coverage_binding_ids: Sequence[str] = (),
+    ) -> "GapResolutionEvidence":
+        identity = {
+            "schema": GAP_RESOLUTION_EVIDENCE_SCHEMA,
+            "gap_id": gap_id,
+            "added_fragment_ids": list(added_fragment_ids),
+            "supporting_claim_ids": list(supporting_claim_ids),
+            "coverage_binding_ids": list(coverage_binding_ids),
+        }
+        return cls(
+            _record_digest(identity),
+            gap_id,
+            tuple(added_fragment_ids),
+            tuple(supporting_claim_ids),
+            tuple(coverage_binding_ids),
+        )
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "GapResolutionEvidence":
+        _exact_fields(
+            value,
+            {"schema", "gap_resolution_id", "gap_id", "added_fragment_ids", "supporting_claim_ids", "coverage_binding_ids"},
+            field="gap_resolution_evidence",
+        )
+        if value["schema"] != GAP_RESOLUTION_EVIDENCE_SCHEMA:
+            _fail("schema_mismatch", "unsupported gap-resolution evidence schema")
+        return cls(
+            value["gap_resolution_id"],
+            value["gap_id"],
+            _digest_sequence(value["added_fragment_ids"], field="gap_resolution.added_fragment_ids"),
+            _digest_sequence(value["supporting_claim_ids"], field="gap_resolution.supporting_claim_ids"),
+            _digest_sequence(value["coverage_binding_ids"], field="gap_resolution.coverage_binding_ids"),
+        )
+
+
+@dataclass(frozen=True)
 class ContextResolution:
     """Immutable request-to-result linkage; no request lifecycle state machine."""
 
@@ -1466,6 +2036,8 @@ class ContextResolution:
     resolved_gap_ids: tuple[str, ...]
     unresolved_gap_ids: tuple[str, ...]
     denial_reason: str | None = None
+    introduced_gap_ids: tuple[str, ...] = ()
+    gap_resolution_evidence: tuple[GapResolutionEvidence, ...] = ()
     producer_id: str = M2C_PRODUCER_ID
     producer_version: str = M2C_PRODUCER_VERSION
 
@@ -1480,6 +2052,10 @@ class ContextResolution:
         _digest_sequence(self.added_fragment_ids, field="resolution.added_fragment_ids")
         _digest_sequence(self.resolved_gap_ids, field="resolution.resolved_gap_ids")
         _digest_sequence(self.unresolved_gap_ids, field="resolution.unresolved_gap_ids")
+        _digest_sequence(self.introduced_gap_ids, field="resolution.introduced_gap_ids")
+        _validate_unique_records(self.gap_resolution_evidence, "gap_resolution_id", field="resolution.gap_resolution_evidence")
+        if any(not isinstance(item, GapResolutionEvidence) for item in self.gap_resolution_evidence):
+            _fail("malformed_context_resolution", "gap_resolution_evidence must be typed")
         if self.outcome == "RESOLVED":
             if self.resulting_package_id is None or not self.added_fragment_ids or not self.resolved_gap_ids:
                 _fail("resolution_evidence_required", "RESOLVED linkage requires resulting package, fragments and gaps")
@@ -1488,7 +2064,7 @@ class ContextResolution:
         else:
             if not self.unresolved_gap_ids:
                 _fail("resolution_gap_mismatch", "denied/unavailable linkage must keep at least one gap visible")
-            if self.resulting_package_id is not None or self.added_fragment_ids or self.resolved_gap_ids:
+            if self.resulting_package_id is not None or self.added_fragment_ids or self.resolved_gap_ids or self.introduced_gap_ids or self.gap_resolution_evidence:
                 _fail("resolution_denial_mismatch", "denied/unavailable linkage cannot claim a result or repair")
             if self.denial_reason is None:
                 _fail("resolution_denial_reason_required", "denied/unavailable linkage requires a visible reason")
@@ -1508,6 +2084,8 @@ class ContextResolution:
             "resolved_gap_ids": list(self.resolved_gap_ids),
             "unresolved_gap_ids": list(self.unresolved_gap_ids),
             "denial_reason": self.denial_reason,
+            "introduced_gap_ids": list(self.introduced_gap_ids),
+            "gap_resolution_evidence": [item.as_dict() for item in self.gap_resolution_evidence],
             "producer_id": self.producer_id,
             "producer_version": self.producer_version,
         }
@@ -1531,6 +2109,8 @@ class ContextResolution:
         unresolved_gap_ids: Sequence[str] | None = None,
         outcome: str = "RESOLVED",
         denial_reason: str | None = None,
+        gap_resolution_evidence: Sequence[GapResolutionEvidence] = (),
+        introduced_gap_ids: Sequence[str] = (),
     ) -> "ContextResolution":
         if not isinstance(request, ContextRequest) or not isinstance(prior_package, ContextPackage):
             _fail("malformed_context_resolution", "resolution requires typed request and prior package")
@@ -1556,21 +2136,68 @@ class ContextResolution:
                 _fail("resolution_gap_mismatch", "resolved gaps must be requested visible gaps")
             if set(resolved) & set(resulting_package.gap_ids):
                 _fail("resolution_gap_mismatch", "a resolved gap remains visible in resulting package")
-            unresolved = tuple(unresolved_gap_ids or resulting_package.gap_ids)
+            introduced = tuple(introduced_gap_ids)
+            if set(introduced) & set(prior_package.gap_ids):
+                _fail("resolution_gap_mismatch", "introduced gaps must be new to the prior package")
+            expected_resulting = (set(prior_package.gap_ids) - set(resolved)) | set(introduced)
+            if set(resulting_package.gap_ids) != expected_resulting:
+                _fail("resolution_gap_mismatch", "resulting gaps must equal prior minus resolved plus introduced gaps")
+            unresolved = tuple(resulting_package.gap_ids) if unresolved_gap_ids is None else tuple(unresolved_gap_ids)
             if set(unresolved) != set(resulting_package.gap_ids):
                 _fail("resolution_gap_mismatch", "unresolved gaps must match resulting package gaps")
             added = tuple(fragment_ids)
+            evidence = tuple(gap_resolution_evidence)
+            if {item.gap_id for item in evidence} != set(resolved) or len(evidence) != len(resolved):
+                _fail("resolution_evidence_required", "each and only each resolved gap requires one evidence edge")
+            package_claim_ids = {
+                claim_id
+                for values in (
+                    resulting_package.fact_claim_ids,
+                    resulting_package.inference_claim_ids,
+                    resulting_package.assumption_claim_ids,
+                    resulting_package.hypothesis_claim_ids,
+                )
+                for claim_id in values
+            }
+            coverage_by_id = {item.coverage_binding_id: item for item in resulting_package.coverage_bindings}
+            gaps_by_id = {item.unknown_id: item for item in prior_package.unknowns} | {
+                item.omission_id: item for item in prior_package.omissions
+            }
+            for item in evidence:
+                if not set(item.added_fragment_ids).issubset(set(added)):
+                    _fail("resolution_evidence_mismatch", "gap evidence must point only to newly accepted fragments")
+                if not set(item.supporting_claim_ids).issubset(package_claim_ids):
+                    _fail("resolution_evidence_mismatch", "gap evidence names a claim outside the resulting package")
+                if not set(item.coverage_binding_ids).issubset(coverage_by_id):
+                    _fail("resolution_evidence_mismatch", "gap evidence names a coverage binding outside the resulting package")
+                gap = gaps_by_id.get(item.gap_id)
+                if gap is None:
+                    _fail("resolution_gap_mismatch", "gap evidence names a gap outside the prior package")
+                if not any(
+                    coverage_by_id[binding_id].target == gap.dimension
+                    for binding_id in item.coverage_binding_ids
+                ):
+                    _fail("resolution_evidence_mismatch", "gap evidence does not ground the resolved gap dimension")
+                for binding_id in item.coverage_binding_ids:
+                    coverage = coverage_by_id[binding_id]
+                    if not (
+                        set(coverage.supporting_fragment_ids) & set(item.added_fragment_ids)
+                        or set(coverage.supporting_claim_ids) & set(item.supporting_claim_ids)
+                    ):
+                        _fail("resolution_evidence_mismatch", "gap evidence is not linked to the binding support it names")
             result_id = resulting_package.package_id
         elif outcome in {"DENIED", "UNAVAILABLE"}:
-            if resulting_package is not None or added_fragments or resolved_gap_ids:
+            if resulting_package is not None or added_fragments or resolved_gap_ids or gap_resolution_evidence or introduced_gap_ids:
                 _fail("resolution_denial_mismatch", "denied/unavailable request cannot carry repair evidence")
-            unresolved = tuple(unresolved_gap_ids or prior_package.gap_ids)
+            unresolved = tuple(prior_package.gap_ids) if unresolved_gap_ids is None else tuple(unresolved_gap_ids)
             if not set(request.gap_ids).issubset(unresolved):
                 _fail("resolution_gap_mismatch", "denied/unavailable request must keep requested gaps visible")
             if set(unresolved) != set(prior_package.gap_ids):
                 _fail("resolution_gap_mismatch", "denied/unavailable linkage must preserve all prior gaps")
             added = ()
             resolved = ()
+            evidence = ()
+            introduced = ()
             result_id = None
         else:
             _fail("resolution_outcome_invalid", f"unsupported ContextResolution outcome: {outcome}")
@@ -1584,6 +2211,8 @@ class ContextResolution:
             "resolved_gap_ids": list(resolved),
             "unresolved_gap_ids": list(unresolved),
             "denial_reason": denial_reason,
+            "introduced_gap_ids": list(introduced),
+            "gap_resolution_evidence": [item.as_dict() for item in evidence],
             "producer_id": M2C_PRODUCER_ID,
             "producer_version": M2C_PRODUCER_VERSION,
         }
@@ -1597,13 +2226,15 @@ class ContextResolution:
             resolved,
             unresolved,
             denial_reason,
+            introduced,
+            evidence,
         )
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "ContextResolution":
         _exact_fields(
             value,
-            {"schema", "resolution_id", "request_id", "prior_package_id", "resulting_package_id", "outcome", "added_fragment_ids", "resolved_gap_ids", "unresolved_gap_ids", "denial_reason", "producer_id", "producer_version"},
+            {"schema", "resolution_id", "request_id", "prior_package_id", "resulting_package_id", "outcome", "added_fragment_ids", "resolved_gap_ids", "unresolved_gap_ids", "denial_reason", "introduced_gap_ids", "gap_resolution_evidence", "producer_id", "producer_version"},
             field="context_resolution",
         )
         if value["schema"] != CONTEXT_RESOLUTION_SCHEMA:
@@ -1618,6 +2249,8 @@ class ContextResolution:
             _digest_sequence(value["resolved_gap_ids"], field="resolution.resolved_gap_ids"),
             _digest_sequence(value["unresolved_gap_ids"], field="resolution.unresolved_gap_ids"),
             value["denial_reason"],
+            _digest_sequence(value["introduced_gap_ids"], field="resolution.introduced_gap_ids"),
+            tuple(GapResolutionEvidence.from_mapping(item) for item in value["gap_resolution_evidence"]),
             value["producer_id"],
             value["producer_version"],
         )
@@ -1792,6 +2425,9 @@ class EngineeringDecision:
         revisit_triggers: Sequence[str] = (),
         producer_id: str = M2C_PRODUCER_ID,
         producer_version: str = M2C_PRODUCER_VERSION,
+        understanding_bases: Sequence[RepositoryUnderstandingView] = (),
+        understandings: Sequence[RepositoryUnderstandingView] | None = None,
+        binding_store: DurableBindingStore | None = None,
     ) -> "EngineeringDecision":
         if not isinstance(intent_basis, IntentBasis):
             _fail("malformed_intent_basis", "EngineeringDecision requires IntentBasis")
@@ -1810,6 +2446,53 @@ class EngineeringDecision:
             for package in packages
         ):
             _fail("decision_basis_mismatch", "decision ContextPackages must share exact intent and RepoView basis")
+        if {item for item in bindings} != {package.repo_view for package in packages}:
+            _fail("decision_basis_mismatch", "decision RepoView bases must exactly equal package RepoView bases")
+        supplied_bases = tuple(understandings) if understandings is not None else tuple(understanding_bases)
+        claim_groups = (
+            ("FACT", tuple(established_fact_claim_ids)),
+            ("INFERENCE", tuple(inference_claim_ids)),
+            ("ASSUMPTION", tuple(assumption_claim_ids)),
+            ("HYPOTHESIS", tuple(hypothesis_claim_ids)),
+        )
+        if any(ids for _kind, ids in claim_groups) and not supplied_bases:
+            _fail("decision_claim_basis_required", "decision claims require the actual Understanding basis")
+        actual_claims: dict[str, UnderstandingClaim] = {}
+        for understanding in supplied_bases:
+            if not isinstance(understanding, RepositoryUnderstandingView):
+                _fail("decision_claim_basis_mismatch", "decision Understanding bases must be typed")
+            if understanding.intent_basis != intent_basis or understanding.repo_view not in bindings:
+                _fail("decision_basis_mismatch", "decision Understanding basis has a foreign intent or RepoView")
+            if binding_store is not None:
+                understanding.validate_source_grounding(binding_store, understanding.repo_view)
+            for claim in understanding.claims:
+                if claim.claim_id in actual_claims and actual_claims[claim.claim_id] != claim:
+                    _fail("decision_claim_basis_mismatch", "decision claim ID has conflicting Understanding definitions")
+                actual_claims[claim.claim_id] = claim
+        package_by_understanding = {package.understanding_id: package for package in packages}
+        for understanding in supplied_bases:
+            package = package_by_understanding.get(understanding.understanding_id)
+            if package is None:
+                _fail("decision_basis_mismatch", "decision Understanding has no exact ContextPackage")
+        package_claim_classes: dict[str, str] = {}
+        for package in packages:
+            for kind, ids in (
+                ("FACT", package.fact_claim_ids),
+                ("INFERENCE", package.inference_claim_ids),
+                ("ASSUMPTION", package.assumption_claim_ids),
+                ("HYPOTHESIS", package.hypothesis_claim_ids),
+            ):
+                for claim_id in ids:
+                    package_claim_classes[claim_id] = kind
+        for kind, ids in claim_groups:
+            for claim_id in ids:
+                claim = actual_claims.get(claim_id)
+                if claim is None or claim.kind != kind or package_claim_classes.get(claim_id) != kind:
+                    _fail("decision_claim_basis_mismatch", "decision claim ID is not an exact member of its declared class")
+                if kind == "FACT":
+                    claim.validate_source_grounding(binding_store, claim.repo_view) if binding_store is not None else _fail(
+                        "decision_claim_basis_required", "FACT decision claims require source grounding"
+                    )
         identity = {
             "schema": ENGINEERING_DECISION_SCHEMA,
             "intent_basis": intent_basis.as_dict(),
@@ -1943,14 +2626,12 @@ def validate_decision_applicability(
     current_views = tuple(
         RepoViewBinding.from_view(view) if isinstance(view, CommittedRepoView) else view for view in repo_views
     )
-    for binding in decision.repo_view_bases:
-        if binding not in current_views:
-            _fail("stale_decision_basis", "EngineeringDecision RepoView commit/tree basis is stale")
+    if set(decision.repo_view_bases) != set(current_views):
+        _fail("stale_decision_basis", "EngineeringDecision RepoView basis set is not exactly current")
     current_packages = {package.package_id: package for package in context_packages}
-    for package_id in decision.context_package_ids:
-        package = current_packages.get(package_id)
-        if package is None:
-            _fail("stale_decision_basis", "EngineeringDecision ContextPackage basis is unavailable")
+    if set(decision.context_package_ids) != set(current_packages):
+        _fail("stale_decision_basis", "EngineeringDecision ContextPackage basis set is not exactly current")
+    for package in current_packages.values():
         if package.intent_basis != intent_basis or package.repo_view not in current_views:
             _fail("stale_decision_basis", "EngineeringDecision ContextPackage basis is stale")
 

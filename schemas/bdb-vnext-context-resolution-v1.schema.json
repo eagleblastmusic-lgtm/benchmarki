@@ -4,11 +4,22 @@
   "title": "BDB vNext ContextRequest resolution linkage v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "resolution_id", "request_id", "prior_package_id", "resulting_package_id", "outcome", "added_fragment_ids", "resolved_gap_ids", "unresolved_gap_ids", "denial_reason", "producer_id", "producer_version"],
+  "required": ["schema", "resolution_id", "request_id", "prior_package_id", "resulting_package_id", "outcome", "added_fragment_ids", "resolved_gap_ids", "unresolved_gap_ids", "denial_reason", "introduced_gap_ids", "gap_resolution_evidence", "producer_id", "producer_version"],
   "properties": {
     "schema": { "const": "bdb-vnext-context-resolution-v1" }, "resolution_id": { "$ref": "#/$defs/sha256" }, "request_id": { "$ref": "#/$defs/sha256" }, "prior_package_id": { "$ref": "#/$defs/sha256" }, "resulting_package_id": { "type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$" },
-    "outcome": { "enum": ["RESOLVED", "DENIED", "UNAVAILABLE"] }, "added_fragment_ids": { "type": "array", "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true }, "resolved_gap_ids": { "type": "array", "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true }, "unresolved_gap_ids": { "type": "array", "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true },
+    "outcome": { "enum": ["RESOLVED", "DENIED", "UNAVAILABLE"] }, "added_fragment_ids": { "type": "array", "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true }, "resolved_gap_ids": { "type": "array", "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true }, "unresolved_gap_ids": { "type": "array", "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true }, "introduced_gap_ids": { "type": "array", "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true },
+    "gap_resolution_evidence": { "type": "array", "items": { "$ref": "#/$defs/gapResolutionEvidence" }, "uniqueItems": true },
     "denial_reason": { "type": ["string", "null"], "maxLength": 4096 }, "producer_id": { "$ref": "#/$defs/identifier" }, "producer_version": { "$ref": "#/$defs/identifier" }
   },
-  "$defs": { "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }, "identifier": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/+:-]{0,127}$" } }
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }, "identifier": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/+:-]{0,127}$" },
+    "gapResolutionEvidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "gap_resolution_id", "gap_id", "added_fragment_ids", "supporting_claim_ids", "coverage_binding_ids"],
+      "properties": {
+        "schema": { "const": "bdb-vnext-gap-resolution-evidence-v1" }, "gap_resolution_id": { "$ref": "#/$defs/sha256" }, "gap_id": { "$ref": "#/$defs/sha256" },
+        "added_fragment_ids": { "type": "array", "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true }, "supporting_claim_ids": { "type": "array", "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true }, "coverage_binding_ids": { "type": "array", "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true }
+      }
+    }
+  }
 }

@@ -7,38 +7,31 @@ from pathlib import Path
 import pytest
 
 from bdb_shared.evidence import semantic_digest
-from bdb_vnext.content_store import DurableBindingStore, ImmutableContentStore
+from bdb_vnext.content_store import DurableBindingStore, ImmutableContentStore, TypedContextFragment, make_content_ref
 from bdb_vnext.engineering_intelligence import (
     ClaimContradiction,
     ContextPackage,
     ContextRequest,
     ContextResolution,
+    CoverageBinding,
     DecisionOption,
     EngineeringDecision,
     EngineeringIntelligenceError,
+    GapResolutionEvidence,
     IntentBasis,
     Omission,
     RepositoryUnderstandingView,
+    SourceEvidenceRef,
     UnderstandingClaim,
     Unknown,
-    publish_semantic_record,
     reconstruct_semantic_record,
-    transport_semantic_record,
     validate_decision_applicability,
 )
 from bdb_vnext.repo_view import RepositoryResource
 
 
-ROOT = Path(__file__).resolve().parents[1]
-
-
 def _git(repo: Path, *args: str) -> str:
-    completed = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    completed = subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
     return completed.stdout.strip()
 
 
@@ -63,19 +56,43 @@ def _fixture(tmp_path: Path) -> tuple[Path, object, object, IntentBasis]:
     return repo, resource, view, intent
 
 
-def _source_ref(label: str) -> str:
-    return "sha256:" + hashlib.sha256(label.encode("utf-8")).hexdigest()
+def _accepted_fragment(tmp_path: Path, view: object, label: str) -> tuple[ImmutableContentStore, DurableBindingStore, TypedContextFragment, SourceEvidenceRef]:
+    runtime = tmp_path / f"runtime-{label}"
+    content_store = ImmutableContentStore(runtime)
+    binding_store = DurableBindingStore(runtime, content_store=content_store)
+    raw = f"source evidence: {label}\n".encode("utf-8")
+    content_ref = make_content_ref("text/plain", "m2c-source-v1", raw)
+    content_store.publish(content_ref, raw)
+    fragment = TypedContextFragment.create(
+        view,
+        content_ref,
+        fragment_type="text/plain",
+        fragment_schema="m2c-source-v1",
+        payload_size_bytes=len(raw),
+    )
+    binding_store.accept(fragment, view=view)
+    evidence = SourceEvidenceRef.create_verified(view, fragment, binding_store)
+    return content_store, binding_store, fragment, evidence
 
 
-def _seeded(tmp_path: Path) -> tuple[Path, object, IntentBasis, RepositoryUnderstandingView, ContextPackage, Unknown]:
+def _seeded(tmp_path: Path):
     repo, resource, view, intent = _fixture(tmp_path)
+    content_store, binding_store, ownership_fragment, ownership_evidence = _accepted_fragment(tmp_path, view, "ownership")
     ownership = UnderstandingClaim.create(
         view,
         subject="src/service.py",
         dimension="ownership",
         kind="FACT",
         statement="component ownership is explicit in the committed source",
-        evidence_refs=[_source_ref("src/service.py")],
+        source_evidence=[ownership_evidence],
+        binding_store=binding_store,
+    )
+    ownership_coverage = CoverageBinding.create(
+        view,
+        target_kind="DIMENSION",
+        target="ownership",
+        supporting_claim_ids=[ownership.claim_id],
+        supporting_fragment_ids=[ownership_fragment.fragment_id],
     )
     recovery_gap = Unknown.create(
         view,
@@ -83,44 +100,158 @@ def _seeded(tmp_path: Path) -> tuple[Path, object, IntentBasis, RepositoryUnders
         dimension="recovery",
         reason="no exact recovery evidence was requested in this initial package",
     )
+    unrelated_gap = Unknown.create(
+        view,
+        subject="dependency boundary",
+        dimension="dependencies",
+        reason="dependency evidence was intentionally not requested",
+    )
     understanding = RepositoryUnderstandingView.create(
         intent,
         view,
         claims=[ownership],
-        requested_dimensions=["ownership", "recovery"],
+        requested_dimensions=["ownership", "recovery", "dependencies"],
         covered_dimensions=["ownership"],
         must_see_categories=["recovery"],
         covered_must_see=[],
-        unknowns=[recovery_gap],
+        coverage_bindings=[ownership_coverage],
+        unknowns=[recovery_gap, unrelated_gap],
+        binding_store=binding_store,
     )
     package = ContextPackage.from_understanding(
         understanding,
         horizon="COMPONENT",
-        included_fragment_ids=[ownership.evidence_refs[0]],
+        included_fragment_ids=[ownership_fragment.fragment_id],
     )
-    return repo, resource, intent, understanding, package, recovery_gap
+    return (
+        repo,
+        resource,
+        view,
+        intent,
+        content_store,
+        binding_store,
+        ownership_fragment,
+        ownership,
+        understanding,
+        package,
+        recovery_gap,
+        unrelated_gap,
+    )
+
+
+def _digest(label: str) -> str:
+    return "sha256:" + hashlib.sha256(label.encode("utf-8")).hexdigest()
+
+
+def test_fact_requires_verified_source_evidence_and_exact_repo_content_binding(tmp_path: Path) -> None:
+    _repo, _resource, view, _intent = _fixture(tmp_path)
+    with pytest.raises(EngineeringIntelligenceError) as arbitrary:
+        UnderstandingClaim.create(
+            view,
+            subject="src/service.py",
+            dimension="ownership",
+            kind="FACT",
+            statement="untrusted digest is not source authority",
+            evidence_refs=[_digest("arbitrary")],
+        )
+    assert arbitrary.value.code in {"source_evidence_required", "source_evidence_store_required"}
+
+    content, bindings, fragment, evidence = _accepted_fragment(tmp_path, view, "accepted")
+    claim = UnderstandingClaim.create(
+        view,
+        subject="src/service.py",
+        dimension="ownership",
+        kind="FACT",
+        statement="accepted source is exact",
+        source_evidence=[evidence],
+        binding_store=bindings,
+    )
+    assert claim.source_evidence[0].fragment_id == fragment.fragment_id
+    foreign_root = tmp_path / "foreign"
+    foreign_root.mkdir()
+    _foreign_repo, _foreign_resource, foreign_view, _foreign_intent = _fixture(foreign_root)
+    foreign_content, foreign_bindings, foreign_fragment, foreign_evidence = _accepted_fragment(foreign_root, foreign_view, "foreign")
+    content.publish(foreign_evidence.content_ref, foreign_content.resolve(foreign_evidence.content_ref))
+    bindings.accept(foreign_fragment, view=foreign_view)
+    with pytest.raises(EngineeringIntelligenceError) as foreign_repo:
+        UnderstandingClaim.create(
+            view,
+            subject="src/service.py",
+            dimension="ownership",
+            kind="FACT",
+            statement="foreign RepoView cannot ground this claim",
+            source_evidence=[foreign_evidence],
+            binding_store=bindings,
+        )
+    assert foreign_repo.value.code == "source_evidence_unaccepted"
+    with pytest.raises(EngineeringIntelligenceError) as unaccepted:
+        UnderstandingClaim.create(
+            view,
+            subject="src/service.py",
+            dimension="ownership",
+            kind="FACT",
+            statement="descriptor must be accepted",
+            source_evidence=[SourceEvidenceRef.from_fragment(fragment)],
+            binding_store=DurableBindingStore(tmp_path / "empty-runtime"),
+        )
+    assert unaccepted.value.code == "source_evidence_unaccepted"
+    bindings.close()
+    foreign_bindings.close()
 
 
 def test_understanding_claims_separate_fact_inference_and_require_exact_basis(tmp_path: Path) -> None:
-    _repo, _resource, _intent, _understanding, _package, _gap = _seeded(tmp_path)
+    (_repo, _resource, _view, _intent, _content, bindings, _fragment, _ownership, understanding, _package, _gap, _other) = _seeded(tmp_path)
     with pytest.raises(EngineeringIntelligenceError) as failure:
         UnderstandingClaim(
-            "sha256:" + "0" * 64,
-            _understanding.repo_view,
+            _digest("bad-claim"),
+            understanding.repo_view,
             "src/service.py",
             "ownership",
             "FACT",
             "DERIVED",
             "source-looking claim",
-            (_source_ref("bad"),),
+            (_digest("bad"),),
             (),
         )
     assert failure.value.code == "claim_authority_mismatch"
+    bindings.close()
+
+
+def test_coverage_requires_explicit_grounded_bindings_and_rejects_random_support(tmp_path: Path) -> None:
+    (_repo, _resource, view, intent, _content, bindings, _fragment, ownership, _understanding, _package, gap, _other) = _seeded(tmp_path)
+    with pytest.raises(EngineeringIntelligenceError) as missing:
+        RepositoryUnderstandingView.create(
+            intent,
+            view,
+            claims=[ownership],
+            requested_dimensions=["ownership"],
+            covered_dimensions=["ownership"],
+            binding_store=bindings,
+        )
+    assert missing.value.code == "coverage_grounding_required"
+    random_binding = CoverageBinding.create(
+        view,
+        target_kind="DIMENSION",
+        target="ownership",
+        supporting_claim_ids=[_digest("foreign-claim")],
+    )
+    with pytest.raises(EngineeringIntelligenceError) as foreign:
+        RepositoryUnderstandingView.create(
+            intent,
+            view,
+            claims=[ownership],
+            requested_dimensions=["ownership"],
+            covered_dimensions=["ownership"],
+            coverage_bindings=[random_binding],
+            binding_store=bindings,
+        )
+    assert foreign.value.code == "coverage_claim_missing"
+    assert gap.unknown_id not in ownership.claim_id
+    bindings.close()
 
 
 def test_conflicting_source_and_inference_remain_visible_and_source_wins(tmp_path: Path) -> None:
-    _repo, _resource, _intent, seeded, _package, _gap = _seeded(tmp_path)
-    source = seeded.claims[0]
+    (_repo, _resource, _view, _intent, _content, bindings, _fragment, source, seeded, _package, _gap, _other) = _seeded(tmp_path)
     inference = UnderstandingClaim.create(
         seeded.repo_view,
         subject=source.subject,
@@ -145,11 +276,12 @@ def test_conflicting_source_and_inference_remain_visible_and_source_wins(tmp_pat
         claims=[source, inference],
         requested_dimensions=["ownership"],
         covered_dimensions=["ownership"],
+        coverage_bindings=[CoverageBinding.create(seeded.repo_view, target_kind="DIMENSION", target="ownership", supporting_claim_ids=[source.claim_id])],
         contradictions=[contradiction],
+        binding_store=bindings,
     )
     assert combined.contradictions[0].source_authority == "EXACT_SOURCE_WINS"
     assert combined.coverage_status == "PARTIAL"
-
     with pytest.raises(EngineeringIntelligenceError) as missing_contradiction:
         RepositoryUnderstandingView.create(
             seeded.intent_basis,
@@ -157,176 +289,165 @@ def test_conflicting_source_and_inference_remain_visible_and_source_wins(tmp_pat
             claims=[source, inference],
             requested_dimensions=["ownership"],
             covered_dimensions=["ownership"],
+            coverage_bindings=[CoverageBinding.create(seeded.repo_view, target_kind="DIMENSION", target="ownership", supporting_claim_ids=[source.claim_id])],
+            binding_store=bindings,
         )
     assert missing_contradiction.value.code == "contradiction_required"
+    bindings.close()
 
 
-def test_coverage_status_cannot_overclaim_uncovered_must_see(tmp_path: Path) -> None:
-    _repo, _resource, _intent, understanding, _package, _gap = _seeded(tmp_path)
-    assert understanding.coverage_status == "BLOCKED"
-    assert understanding.gap_ids == (_gap.unknown_id,)
-    with pytest.raises(EngineeringIntelligenceError) as overclaim:
-        ContextPackage.create(
-            understanding.intent_basis,
-            understanding.repo_view,
-            understanding_id=understanding.understanding_id,
-            horizon="COMPONENT",
-            requested_dimensions=["ownership"],
-            covered_dimensions=["recovery"],
-        )
-    assert overclaim.value.code == "coverage_overclaim"
-
-
-def test_context_request_resolution_repairs_only_seeded_gap_and_denial_keeps_it_visible(tmp_path: Path) -> None:
-    repo, resource, intent, seeded, prior_package, gap = _seeded(tmp_path)
-    view = resource.resolve_committed("refs/heads/main", observed_at="2026-08-10T00:00:00Z")
+def test_context_resolution_preserves_unrelated_gaps_and_denial_keeps_all_visible(tmp_path: Path) -> None:
+    (
+        _repo,
+        _resource,
+        view,
+        intent,
+        content_store,
+        bindings,
+        ownership_fragment,
+        ownership,
+        seeded,
+        prior_package,
+        recovery_gap,
+        unrelated_gap,
+    ) = _seeded(tmp_path)
     request = ContextRequest.create(
         prior_package,
-        gap_ids=[gap.unknown_id],
+        gap_ids=[recovery_gap.unknown_id],
         horizon="COMPONENT",
         requested_dimensions=["recovery"],
-        requested_evidence=["committed recovery ownership and backup boundary"],
+        requested_evidence=["committed recovery boundary"],
         question="Which exact committed component owns recovery?",
-        reason="repair the visible recovery gap",
-        counterexample="a summary that omits the backup boundary",
+        reason="repair only the visible recovery gap",
     )
-    request.validate_source_package(prior_package)
-
+    recovery_content, _unused_bindings, recovery_fragment, recovery_evidence = _accepted_fragment(tmp_path, view, "recovery")
+    # The second helper has an isolated store; publish the same immutable fragment into
+    # the seeded M2b store so resolution can verify one authority.
+    bindings.content_store.publish(recovery_evidence.content_ref, b"source evidence: recovery\n")
+    bindings.accept(recovery_fragment, view=view)
     recovery = UnderstandingClaim.create(
         view,
         subject="repository recovery boundary",
         dimension="recovery",
         kind="FACT",
-        statement="recovery evidence is supplied by the exact committed M2c record",
-        evidence_refs=[_source_ref("recovery-evidence")],
+        statement="recovery evidence is supplied by the exact committed source",
+        source_evidence=[recovery_evidence],
+        binding_store=bindings,
+    )
+    recovery_dimension = CoverageBinding.create(
+        view,
+        target_kind="DIMENSION",
+        target="recovery",
+        supporting_claim_ids=[recovery.claim_id],
+        supporting_fragment_ids=[recovery_fragment.fragment_id],
+    )
+    recovery_must_see = CoverageBinding.create(
+        view,
+        target_kind="MUST_SEE",
+        target="recovery",
+        supporting_claim_ids=[recovery.claim_id],
+        supporting_fragment_ids=[recovery_fragment.fragment_id],
     )
     expanded = RepositoryUnderstandingView.create(
         intent,
         view,
-        claims=[*seeded.claims, recovery],
-        requested_dimensions=["ownership", "recovery"],
+        claims=[ownership, recovery],
+        requested_dimensions=["ownership", "recovery", "dependencies"],
         covered_dimensions=["ownership", "recovery"],
         must_see_categories=["recovery"],
         covered_must_see=["recovery"],
+        coverage_bindings=[seeded.coverage_bindings[0], recovery_dimension, recovery_must_see],
+        unknowns=[unrelated_gap],
+        binding_store=bindings,
     )
-    runtime = tmp_path / "runtime"
-    content_store = ImmutableContentStore(runtime)
-    binding_store = DurableBindingStore(runtime, content_store=content_store)
-    added_fragment, reconstructed = transport_semantic_record(expanded, view, content_store, binding_store)
-    assert reconstructed == expanded
     repaired_package = ContextPackage.from_understanding(
         expanded,
         horizon="COMPONENT",
-        included_fragment_ids=[*prior_package.included_fragment_ids, added_fragment.fragment_id],
+        included_fragment_ids=[ownership_fragment.fragment_id, recovery_fragment.fragment_id],
+    )
+    evidence = GapResolutionEvidence.create(
+        gap_id=recovery_gap.unknown_id,
+        added_fragment_ids=[recovery_fragment.fragment_id],
+        supporting_claim_ids=[recovery.claim_id],
+        coverage_binding_ids=[recovery_dimension.coverage_binding_id],
     )
     resolution = ContextResolution.create(
         request,
         prior_package,
         resulting_package=repaired_package,
-        added_fragments=[added_fragment],
-        binding_store=binding_store,
-        resolved_gap_ids=[gap.unknown_id],
+        added_fragments=[recovery_fragment],
+        binding_store=bindings,
+        resolved_gap_ids=[recovery_gap.unknown_id],
+        gap_resolution_evidence=[evidence],
     )
     assert resolution.outcome == "RESOLVED"
-    assert gap.unknown_id not in repaired_package.gap_ids
-    assert set(repaired_package.gap_ids) == set(prior_package.gap_ids) - {gap.unknown_id}
-    assert prior_package.package_id != repaired_package.package_id
-    assert prior_package.gap_ids == (gap.unknown_id,)
-    binding_store.close()
-
-    denied = ContextResolution.create(
-        request,
-        prior_package,
-        outcome="DENIED",
-        denial_reason="policy denied the requested source evidence",
-    )
-    assert denied.unresolved_gap_ids == prior_package.gap_ids
-    assert denied.resulting_package_id is None
-    assert ContextRequest.from_mapping(request.as_dict()) == request
-    assert ContextPackage.from_mapping(prior_package.as_dict()) == prior_package
-    assert ContextPackage.from_mapping(repaired_package.as_dict()) == repaired_package
-    assert ContextResolution.from_mapping(resolution.as_dict()) == resolution
-    assert RepositoryUnderstandingView.from_mapping(expanded.as_dict()) == expanded
-
-
-def test_decision_is_deterministic_and_rejects_stale_repo_intent_and_package_basis(tmp_path: Path) -> None:
-    repo, resource, intent, understanding, package, _gap = _seeded(tmp_path)
-    option_zero = DecisionOption("OPTION_ZERO", "retain the current read-only path", ("no new writer",), ("known gap remains",))
-    option_one = DecisionOption("OPTION_ONE", "expand exact recovery context", ("more evidence",), ("larger package",))
-    decision = EngineeringDecision.create(
-        intent,
-        [understanding.repo_view],
-        [package],
-        established_fact_claim_ids=[understanding.claims[0].claim_id],
-        alternatives=[option_zero, option_one],
-        chosen_option_id="OPTION_ONE",
-        must_preserve=["exact RepoView authority", "runtime OFF"],
-        must_not=["Task lifecycle", "private chain-of-thought"],
-        expected_effect_scope=["M2c semantic records only"],
-        acceptance_obligations=["seeded gap repair"],
-        evidence_obligations=["M2b exact roundtrip"],
-        uncertainty=["recovery evidence is initially unknown"],
-        requested_context_ids=[],
-        architecture_consequences=["rebuildable projection"],
-        revisit_triggers=["RepoView or intent basis changes"],
-    )
-    same = EngineeringDecision.create(
-        intent,
-        [understanding.repo_view],
-        [package],
-        established_fact_claim_ids=[understanding.claims[0].claim_id],
-        alternatives=[option_zero, option_one],
-        chosen_option_id="OPTION_ONE",
-        must_preserve=["exact RepoView authority", "runtime OFF"],
-        must_not=["Task lifecycle", "private chain-of-thought"],
-        expected_effect_scope=["M2c semantic records only"],
-        acceptance_obligations=["seeded gap repair"],
-        evidence_obligations=["M2b exact roundtrip"],
-        uncertainty=["recovery evidence is initially unknown"],
-        architecture_consequences=["rebuildable projection"],
-        revisit_triggers=["RepoView or intent basis changes"],
-    )
-    assert same.decision_id == decision.decision_id
-    assert EngineeringDecision.from_mapping(decision.as_dict()) == decision
-    validate_decision_applicability(decision, intent_basis=intent, repo_views=[understanding.repo_view], context_packages=[package])
-
-    with pytest.raises(EngineeringIntelligenceError) as stale_intent:
-        validate_decision_applicability(
-            decision,
-            intent_basis=IntentBasis(intent.task_id, "r2", intent.intent_digest),
-            repo_views=[understanding.repo_view],
-            context_packages=[package],
+    assert set(repaired_package.gap_ids) == {unrelated_gap.unknown_id}
+    assert resolution.unresolved_gap_ids == (unrelated_gap.unknown_id,)
+    with pytest.raises(EngineeringIntelligenceError) as silent_drop:
+        ContextResolution.create(
+            request,
+            prior_package,
+            resulting_package=ContextPackage.from_understanding(expanded, horizon="COMPONENT", included_fragment_ids=[ownership_fragment.fragment_id, recovery_fragment.fragment_id]),
+            added_fragments=[recovery_fragment],
+            binding_store=bindings,
+            resolved_gap_ids=[recovery_gap.unknown_id],
+            unresolved_gap_ids=[],
+            gap_resolution_evidence=[evidence],
         )
-    assert stale_intent.value.code == "stale_intent_basis"
+    assert silent_drop.value.code == "resolution_gap_mismatch"
+    denied = ContextResolution.create(request, prior_package, outcome="DENIED", denial_reason="policy denied")
+    assert denied.unresolved_gap_ids == prior_package.gap_ids
+    assert ContextResolution.from_mapping(resolution.as_dict()) == resolution
+    bindings.close()
 
-    (repo / "README.md").write_text("M2c changed\n", encoding="utf-8")
+
+def test_decision_claim_membership_and_exact_basis_sets(tmp_path: Path) -> None:
+    (repo, resource, view, intent, _content, bindings, ownership_fragment, ownership, understanding, package, _gap, _other) = _seeded(tmp_path)
+    option_zero = DecisionOption("OPTION_ZERO", "retain the read-only path", ("no writer",), ("gap remains",))
+    option_one = DecisionOption("OPTION_ONE", "expand exact context", ("more evidence",), ("larger package",))
+    kwargs = dict(
+        established_fact_claim_ids=[ownership.claim_id],
+        alternatives=[option_zero, option_one],
+        chosen_option_id="OPTION_ONE",
+        must_preserve=["exact RepoView authority", "runtime OFF"],
+        must_not=["Task lifecycle", "private chain-of-thought"],
+        expected_effect_scope=["M2c semantic records only"],
+        acceptance_obligations=["seeded gap repair"],
+        evidence_obligations=["M2b exact roundtrip"],
+        uncertainty=["recovery evidence is initially unknown"],
+        architecture_consequences=["rebuildable projection"],
+        revisit_triggers=["RepoView or intent basis changes"],
+        understanding_bases=[understanding],
+        binding_store=bindings,
+    )
+    decision = EngineeringDecision.create(intent, [view], [package], **kwargs)
+    same = EngineeringDecision.create(intent, [view], [package], **kwargs)
+    assert same.decision_id == decision.decision_id
+    validate_decision_applicability(decision, intent_basis=intent, repo_views=[view], context_packages=[package])
+    with pytest.raises(EngineeringIntelligenceError) as random_claim:
+        EngineeringDecision.create(intent, [view], [package], established_fact_claim_ids=[_digest("random")], **{k: v for k, v in kwargs.items() if k != "established_fact_claim_ids"})
+    assert random_claim.value.code == "decision_claim_basis_mismatch"
+    changed_package = ContextPackage.from_understanding(understanding, horizon="COMPONENT", included_fragment_ids=[ownership_fragment.fragment_id, _digest("new")])
+    with pytest.raises(EngineeringIntelligenceError) as old_new:
+        validate_decision_applicability(decision, intent_basis=intent, repo_views=[view], context_packages=[package, changed_package])
+    assert old_new.value.code == "stale_decision_basis"
+    with pytest.raises(EngineeringIntelligenceError) as new_only:
+        validate_decision_applicability(decision, intent_basis=intent, repo_views=[view], context_packages=[changed_package])
+    assert new_only.value.code == "stale_decision_basis"
+    (repo / "README.md").write_text("changed\n", encoding="utf-8")
     _git(repo, "add", "README.md")
     _git(repo, "commit", "-qm", "changed view")
     changed_view = resource.resolve_committed("refs/heads/main", observed_at="2026-08-10T00:01:00Z")
     with pytest.raises(EngineeringIntelligenceError) as stale_view:
         validate_decision_applicability(decision, intent_basis=intent, repo_views=[changed_view], context_packages=[package])
     assert stale_view.value.code == "stale_decision_basis"
-
-    changed_package = ContextPackage.from_understanding(
-        understanding,
-        horizon="COMPONENT",
-        included_fragment_ids=[*package.included_fragment_ids, _source_ref("new-fragment")],
-    )
-    with pytest.raises(EngineeringIntelligenceError) as stale_package:
-        validate_decision_applicability(decision, intent_basis=intent, repo_views=[understanding.repo_view], context_packages=[changed_package])
-    assert stale_package.value.code == "stale_decision_basis"
+    bindings.close()
 
 
 def test_semantic_record_roundtrip_and_import_side_effect_contract(tmp_path: Path) -> None:
     _repo, _resource, view, intent = _fixture(tmp_path)
     unknown = Unknown.create(view, subject="network boundary", dimension="network", reason="not requested")
-    understanding = RepositoryUnderstandingView.create(
-        intent,
-        view,
-        requested_dimensions=["network"],
-        covered_dimensions=[],
-        unknowns=[unknown],
-    )
+    understanding = RepositoryUnderstandingView.create(intent, view, requested_dimensions=["network"], unknowns=[unknown])
     package = ContextPackage.from_understanding(understanding, horizon="LOCAL")
     request = ContextRequest.create(
         package,

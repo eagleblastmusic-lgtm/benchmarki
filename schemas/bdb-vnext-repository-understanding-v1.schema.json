@@ -4,7 +4,7 @@
   "title": "BDB vNext RepositoryUnderstandingView v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "understanding_id", "intent_basis", "repo_view", "claims", "requested_dimensions", "covered_dimensions", "must_see_categories", "covered_must_see", "unknowns", "omissions", "contradictions", "invalidation_predicates", "coverage_status", "producer_id", "producer_version"],
+  "required": ["schema", "understanding_id", "intent_basis", "repo_view", "claims", "requested_dimensions", "covered_dimensions", "must_see_categories", "covered_must_see", "coverage_bindings", "unknowns", "omissions", "contradictions", "invalidation_predicates", "coverage_status", "producer_id", "producer_version"],
   "properties": {
     "schema": { "const": "bdb-vnext-repository-understanding-v1" },
     "understanding_id": { "$ref": "#/$defs/sha256" },
@@ -15,6 +15,7 @@
     "covered_dimensions": { "$ref": "#/$defs/identifiers" },
     "must_see_categories": { "$ref": "#/$defs/identifiers" },
     "covered_must_see": { "$ref": "#/$defs/identifiers" },
+    "coverage_bindings": { "type": "array", "items": { "$ref": "#/$defs/coverageBinding" }, "uniqueItems": true },
     "unknowns": { "type": "array", "items": { "$ref": "#/$defs/unknown" } },
     "omissions": { "type": "array", "items": { "$ref": "#/$defs/omission" } },
     "contradictions": { "type": "array", "items": { "$ref": "#/$defs/contradiction" } },
@@ -54,7 +55,7 @@
     },
     "claim": {
       "type": "object", "additionalProperties": false,
-      "required": ["schema", "claim_id", "repo_view", "subject", "dimension", "kind", "authority", "statement", "evidence_refs", "basis_refs", "producer_id", "producer_version"],
+      "required": ["schema", "claim_id", "repo_view", "subject", "dimension", "kind", "authority", "statement", "evidence_refs", "basis_refs", "producer_id", "producer_version", "source_evidence"],
       "properties": {
         "schema": { "const": "bdb-vnext-understanding-claim-v1" },
         "claim_id": { "$ref": "#/$defs/sha256" }, "repo_view": { "$ref": "#/$defs/repoView" },
@@ -63,7 +64,32 @@
         "authority": { "enum": ["EXACT_SOURCE", "DERIVED"] }, "statement": { "$ref": "#/$defs/text" },
         "evidence_refs": { "type": "array", "items": { "$ref": "#/$defs/text" }, "uniqueItems": true },
         "basis_refs": { "type": "array", "items": { "$ref": "#/$defs/text" }, "uniqueItems": true },
+        "source_evidence": { "type": "array", "items": { "$ref": "#/$defs/sourceEvidence" }, "uniqueItems": true },
         "producer_id": { "$ref": "#/$defs/identifier" }, "producer_version": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "sourceEvidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "evidence_id", "repo_view", "fragment_id", "content_ref", "fragment_type", "fragment_schema"],
+      "properties": {
+        "schema": { "const": "bdb-vnext-source-evidence-ref-v1" }, "evidence_id": { "$ref": "#/$defs/sha256" },
+        "repo_view": { "$ref": "#/$defs/repoView" }, "fragment_id": { "$ref": "#/$defs/sha256" },
+        "content_ref": {
+          "type": "object", "additionalProperties": false,
+          "required": ["type", "schema", "semantic_digest", "raw_digest"],
+          "properties": { "type": { "$ref": "#/$defs/identifier" }, "schema": { "$ref": "#/$defs/identifier" }, "semantic_digest": { "$ref": "#/$defs/sha256" }, "raw_digest": { "$ref": "#/$defs/sha256" }
+        },
+        "fragment_type": { "$ref": "#/$defs/identifier" }, "fragment_schema": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "coverageBinding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "coverage_binding_id", "repo_view", "target_kind", "target", "supporting_claim_ids", "supporting_fragment_ids"],
+      "properties": {
+        "schema": { "const": "bdb-vnext-coverage-binding-v1" }, "coverage_binding_id": { "$ref": "#/$defs/sha256" },
+        "repo_view": { "$ref": "#/$defs/repoView" }, "target_kind": { "enum": ["DIMENSION", "MUST_SEE"] }, "target": { "$ref": "#/$defs/identifier" },
+        "supporting_claim_ids": { "type": "array", "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true },
+        "supporting_fragment_ids": { "type": "array", "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true }
       }
     },
     "unknown": {
@@ -101,4 +127,5 @@
       }
     }
   }
+}
 }

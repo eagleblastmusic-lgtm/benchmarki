@@ -43,6 +43,23 @@ intent/RepoView basis and producer/schema versions. Rebuilding the same inputs
 converges; changing a material basis or producer/schema identity changes the
 record identity and stale decision applicability is rejected.
 
+FACT claims require a typed `SourceEvidenceRef` constructed from an accepted
+M2b fragment. Its exact fragment ID, `ContentRef`, fragment type/schema and
+RepoView binding are re-resolved through `DurableBindingStore` when authority
+is asserted; parsing a serialized descriptor or supplying an arbitrary
+`sha256:` value is not source grounding. `CoverageBinding` records explicitly
+bind every covered dimension and must-see target to actual claim IDs and/or
+accepted fragment IDs, so `COMPLETE` cannot be self-attested.
+
+`ContextResolution` carries one explicit gap-to-evidence edge per resolved
+gap. It enforces `resulting_gap_ids = prior_gap_ids - resolved_gap_ids +
+introduced_gap_ids`, keeps unrelated gaps visible, and requires the edge to
+name resulting coverage for the resolved gap and the newly accepted evidence.
+Denial and unavailability preserve the complete prior gap set. An
+`EngineeringDecision` may classify only claim IDs present in the supplied
+Understanding basis and requires exact equality of the current RepoView set,
+ContextPackage set and opaque IntentBasis when applicability is checked.
+
 ## M2b boundary
 
 `publish_semantic_record()` creates canonical JSON bytes, an M2b `ContentRef`,
