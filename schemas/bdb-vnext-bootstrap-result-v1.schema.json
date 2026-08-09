@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:bdb:schema:vnext-bootstrap-result:v1",
+  "title": "BDB vNext external bootstrap result witness v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "runtime_id",
+    "attempt_id",
+    "status",
+    "error",
+    "required_control_schema",
+    "candidate",
+    "recovery",
+    "backup",
+    "restore",
+    "health",
+    "authority"
+  ],
+  "properties": {
+    "schema": {"const": "bdb-vnext-bootstrap-result-v1"},
+    "runtime_id": {"const": "devmaster.bdb.vnext.runtime"},
+    "attempt_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "status": {"enum": ["READY", "RECOVERED", "BLOCKED"]},
+    "error": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": {"type": "string", "minLength": 1},
+            "message": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    },
+    "required_control_schema": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2147483647
+    },
+    "candidate": {"oneOf": [{"$ref": "#/$defs/bundleIdentity"}, {"type": "null"}]},
+    "recovery": {"oneOf": [{"$ref": "#/$defs/bundleIdentity"}, {"type": "null"}]},
+    "backup": {"oneOf": [{"$ref": "#/$defs/backupIdentity"}, {"type": "null"}]},
+    "restore": {"oneOf": [{"$ref": "#/$defs/restoreReceipt"}, {"type": "null"}]},
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate", "recovery"],
+      "properties": {
+        "candidate": {"oneOf": [{"$ref": "#/$defs/healthWitness"}, {"type": "null"}]},
+        "recovery": {"oneOf": [{"$ref": "#/$defs/healthWitness"}, {"type": "null"}]}
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "boundary",
+        "candidate_may_write_final_pointer",
+        "final_activation_pointer",
+        "production_activation_performed"
+      ],
+      "properties": {
+        "boundary": {"const": "external_bootstrap_root"},
+        "candidate_may_write_final_pointer": {"const": false},
+        "final_activation_pointer": {"type": "null"},
+        "production_activation_performed": {"const": false}
+      }
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "schemaRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min", "max"],
+      "properties": {
+        "min": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+        "max": {"type": "integer", "minimum": 0, "maximum": 2147483647}
+      }
+    },
+    "bundleIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bundle_id",
+        "role",
+        "source_commit",
+        "supported_control_schema",
+        "known_good",
+        "sha256"
+      ],
+      "properties": {
+        "bundle_id": {"type": "string", "minLength": 1},
+        "role": {"enum": ["candidate", "recovery"]},
+        "source_commit": {"type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"},
+        "supported_control_schema": {"$ref": "#/$defs/schemaRange"},
+        "known_good": {"type": "boolean"},
+        "sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "backupIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "manifest_sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "manifest_sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "restoreReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "runtime_id",
+        "backup_manifest_sha256",
+        "target_root",
+        "restore_sha256",
+        "verified"
+      ],
+      "properties": {
+        "schema": {"const": "bdb-vnext-restore-receipt-v1"},
+        "runtime_id": {"const": "devmaster.bdb.vnext.runtime"},
+        "backup_manifest_sha256": {"$ref": "#/$defs/digest"},
+        "target_root": {"type": "string", "minLength": 1},
+        "restore_sha256": {"$ref": "#/$defs/digest"},
+        "verified": {"const": true}
+      }
+    },
+    "healthWitness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "status",
+        "runtime_id",
+        "bundle_id",
+        "observed_control_schema",
+        "witness_sha256"
+      ],
+      "properties": {
+        "schema": {"const": "bdb-vnext-health-v1"},
+        "status": {"const": "READY"},
+        "runtime_id": {"const": "devmaster.bdb.vnext.runtime"},
+        "bundle_id": {"type": "string", "minLength": 1},
+        "observed_control_schema": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "witness_sha256": {"$ref": "#/$defs/digest"}
+      }
+    }
+  }
+}

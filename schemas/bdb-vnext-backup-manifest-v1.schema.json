@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:bdb:schema:vnext-backup-manifest:v1",
+  "title": "BDB vNext coordinated backup manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "runtime_id",
+    "backup_id",
+    "source_root",
+    "required_control_schema",
+    "source_quiesced",
+    "subjects",
+    "sqlite_pair",
+    "manifest_sha256"
+  ],
+  "properties": {
+    "schema": {"const": "bdb-vnext-backup-manifest-v1"},
+    "runtime_id": {"const": "devmaster.bdb.vnext.runtime"},
+    "backup_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "source_root": {"type": "string", "minLength": 1},
+    "required_control_schema": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2147483647
+    },
+    "source_quiesced": {"const": true},
+    "subjects": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "prefixItems": [
+        {"$ref": "#/$defs/controlDb"},
+        {"$ref": "#/$defs/controlWal"},
+        {"$ref": "#/$defs/content"},
+        {"$ref": "#/$defs/config"}
+      ],
+      "items": false
+    },
+    "sqlite_pair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["database_state", "wal_state", "page_size"],
+      "properties": {
+        "database_state": {"enum": ["present", "declared_absent"]},
+        "wal_state": {"enum": ["present", "declared_absent"]},
+        "page_size": {
+          "oneOf": [
+            {"type": "integer", "minimum": 512, "maximum": 65536},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "manifest_sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  },
+  "$defs": {
+    "fileRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size_bytes", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 67108864
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "subjectBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kind", "relative_path", "required", "state", "files"],
+      "properties": {
+        "name": {"type": "string"},
+        "kind": {"enum": ["sqlite_db", "sqlite_wal", "directory", "file"]},
+        "relative_path": {"type": "string"},
+        "required": {"const": false},
+        "state": {"enum": ["present", "declared_absent"]},
+        "files": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {"$ref": "#/$defs/fileRecord"}
+        }
+      }
+    },
+    "controlDb": {
+      "allOf": [
+        {"$ref": "#/$defs/subjectBase"},
+        {"properties": {
+          "name": {"const": "control_db"},
+          "kind": {"const": "sqlite_db"},
+          "relative_path": {"const": "control/control.db"}
+        }}
+      ]
+    },
+    "controlWal": {
+      "allOf": [
+        {"$ref": "#/$defs/subjectBase"},
+        {"properties": {
+          "name": {"const": "control_wal"},
+          "kind": {"const": "sqlite_wal"},
+          "relative_path": {"const": "control/control.db-wal"}
+        }}
+      ]
+    },
+    "content": {
+      "allOf": [
+        {"$ref": "#/$defs/subjectBase"},
+        {"properties": {
+          "name": {"const": "content"},
+          "kind": {"const": "directory"},
+          "relative_path": {"const": "content"}
+        }}
+      ]
+    },
+    "config": {
+      "allOf": [
+        {"$ref": "#/$defs/subjectBase"},
+        {"properties": {
+          "name": {"const": "config"},
+          "kind": {"const": "file"},
+          "relative_path": {"const": "config/bdb-vnext.json"}
+        }}
+      ]
+    }
+  }
+}
