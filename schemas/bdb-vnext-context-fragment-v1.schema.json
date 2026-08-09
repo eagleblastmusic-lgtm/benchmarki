@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:bdb:schema:vnext-context-fragment:v1",
+  "title": "BDB vNext typed context fragment v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "fragment_id",
+    "fragment_type",
+    "fragment_schema",
+    "content_ref",
+    "repo_view",
+    "payload_size_bytes"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-vnext-context-fragment-v1" },
+    "fragment_id": { "$ref": "#/$defs/sha256" },
+    "fragment_type": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/+:-]{0,127}$" },
+    "fragment_schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/+:-]{0,127}$" },
+    "content_ref": { "$ref": "#/$defs/contentRef" },
+    "repo_view": { "$ref": "#/$defs/repoView" },
+    "payload_size_bytes": { "type": "integer", "minimum": 0, "maximum": 1048576 }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "sha40": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "sha256Oid": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "contentRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "schema", "semantic_digest", "raw_digest"],
+      "properties": {
+        "type": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/+:-]{0,127}$" },
+        "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/+:-]{0,127}$" },
+        "semantic_digest": { "$ref": "#/$defs/sha256" },
+        "raw_digest": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "repoView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository_id",
+        "repository_identity_digest",
+        "object_format",
+        "commit_oid",
+        "tree_oid",
+        "view_id"
+      ],
+      "properties": {
+        "repository_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "repository_identity_digest": { "$ref": "#/$defs/sha256" },
+        "object_format": { "enum": ["sha1", "sha256"] },
+        "commit_oid": { "oneOf": [{ "$ref": "#/$defs/sha40" }, { "$ref": "#/$defs/sha256Oid" }] },
+        "tree_oid": { "oneOf": [{ "$ref": "#/$defs/sha40" }, { "$ref": "#/$defs/sha256Oid" }] },
+        "view_id": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

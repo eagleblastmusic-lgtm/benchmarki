@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:bdb:schema:vnext-transport-envelope:v1",
+  "title": "BDB vNext typed context transport envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "protocol_generation",
+    "protocol_version",
+    "message_kind",
+    "message_id",
+    "fragment",
+    "payload_length_bytes",
+    "payload_base64"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-vnext-transport-envelope-v1" },
+    "protocol_generation": { "const": "bdb-vnext-protocol-v1" },
+    "protocol_version": { "const": 1 },
+    "message_kind": { "const": "typed_context_fragment" },
+    "message_id": { "$ref": "#/$defs/sha256" },
+    "fragment": { "$ref": "bdb-vnext-context-fragment-v1.schema.json" },
+    "payload_length_bytes": { "type": "integer", "minimum": 0, "maximum": 1048576 },
+    "payload_base64": { "type": "string", "pattern": "^[A-Za-z0-9+/]*={0,2}$" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  }
+}

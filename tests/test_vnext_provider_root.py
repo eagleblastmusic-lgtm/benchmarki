@@ -39,10 +39,9 @@ ROOT = Path(__file__).resolve().parents[1]
 BASIS = "e674aa5ae6c23f3b45012ebb5d234ed939f27f04"
 RESERVED_IDS = {
     CONTROL_PROVIDER_ID,
-    NATIVE_PROVIDER_ID,
-    BROWSER_PROVIDER_ID,
     CONTROL_CENTER_PROVIDER_ID,
 }
+BOUND_TRANSPORT_IDS = {BROWSER_PROVIDER_ID, NATIVE_PROVIDER_ID}
 
 
 def _manifest(tmp_path: Path) -> dict[str, object]:
@@ -103,7 +102,7 @@ def test_root_is_explicit_deterministic_and_build_only(tmp_path: Path) -> None:
         "manifest": first.manifest_identity,
         "providers": first.status()["providers"],
         "provider_ids": sorted(first.provider_ids),
-        "bound_provider_ids": sorted([COMPOSITION_PROVIDER_ID, REPO_VIEW_PROVIDER_ID]),
+        "bound_provider_ids": sorted([COMPOSITION_PROVIDER_ID, REPO_VIEW_PROVIDER_ID, *BOUND_TRANSPORT_IDS]),
         "unavailable_provider_ids": [],
         "reserved_provider_ids": sorted(RESERVED_IDS),
         "runtime_state": "OFF",
@@ -115,10 +114,15 @@ def test_root_is_explicit_deterministic_and_build_only(tmp_path: Path) -> None:
     assert set(first.provider_ids) == {
         COMPOSITION_PROVIDER_ID,
         REPO_VIEW_PROVIDER_ID,
+        *BOUND_TRANSPORT_IDS,
         *RESERVED_IDS,
     }
     assert isinstance(first.composition_diagnostic(), CompositionDiagnosticProvider)
     assert isinstance(first.repo_view_provider(), RepoViewProvider)
+    assert first.browser_transport_provider().provider_contract_version == 1
+    assert first.native_transport_provider().provider_contract_version == 1
+    assert first.browser_transport_provider().implementation_identity.startswith("sha256:")
+    assert first.native_transport_provider().implementation_identity.startswith("sha256:")
     assert "0x" not in repr(first)
     assert "bdb_bridge" not in json.dumps(first.status())
 
@@ -214,6 +218,17 @@ def test_provider_binding_validation_is_fail_closed(tmp_path: Path) -> None:
     assert (
         _failure(VNextCompositionRoot.from_manifest, manifest, bindings=wrong_repo_generation).code
         == "provider_generation_mismatch"
+    )
+
+    browser_index = next(index for index, item in enumerate(defaults) if item.provider_id == BROWSER_PROVIDER_ID)
+    wrong_transport_identity = [
+        *defaults[:browser_index],
+        replace(defaults[browser_index], provider_contract="bdb-vnext-wrong-contract-v1"),
+        *defaults[browser_index + 1 :],
+    ]
+    assert (
+        _failure(VNextCompositionRoot.from_manifest, manifest, bindings=wrong_transport_identity).code
+        == "provider_identity_mismatch"
     )
 
     diagnostic = defaults[0].implementation
@@ -324,7 +339,9 @@ def test_import_order_is_independent_in_fresh_subprocesses(tmp_path: Path) -> No
         results.append(json.loads(completed.stdout))
 
     assert results[0] == results[1]
-    assert results[0]["bound_provider_ids"] == sorted([COMPOSITION_PROVIDER_ID, REPO_VIEW_PROVIDER_ID])
+    assert results[0]["bound_provider_ids"] == sorted(
+        [COMPOSITION_PROVIDER_ID, REPO_VIEW_PROVIDER_ID, *BOUND_TRANSPORT_IDS]
+    )
 
 
 def test_import_and_constructor_are_side_effect_free_and_legacy_free(tmp_path: Path) -> None:

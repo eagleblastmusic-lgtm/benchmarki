@@ -12,10 +12,12 @@ from bdb_shared.evidence import canonical_json_bytes, semantic_digest
 from bdb_vnext.composition import (
     BROWSER_COMPONENT_ID,
     BROWSER_EXTENSION_ID,
+    BROWSER_PROVIDER_ID,
     COMPOSITION_PROVIDER_ID,
     COMPOSITION_SCHEMA,
     CONFIG_GENERATION,
     NATIVE_HOST_NAME,
+    NATIVE_PROVIDER_ID,
     PROTOCOL_GENERATION,
     REPO_VIEW_COMPONENT_ID,
     REPO_VIEW_PROVIDER_ID,
@@ -129,7 +131,12 @@ def test_provider_and_component_identities_are_explicit_and_disabled(tmp_path: P
     repo_view = next(provider for provider in providers if provider["provider_id"] == REPO_VIEW_PROVIDER_ID)
     assert repo_view["component_id"] == REPO_VIEW_COMPONENT_ID
     assert repo_view["kind"] == "repo_view"
-    assert repo_view["state"] == "reserved_disabled"
+    assert repo_view["state"] == "active_read_only"
+    assert {
+        provider["provider_id"]
+        for provider in providers
+        if provider["kind"] in {"browser_transport", "native_transport", "repo_view"}
+    } == {BROWSER_PROVIDER_ID, NATIVE_PROVIDER_ID, REPO_VIEW_PROVIDER_ID}
     assert manifest["identities"]["browser_extension"]["component_id"] == BROWSER_COMPONENT_ID
     assert manifest["identities"]["browser_extension"]["identity_state"] == "bound"
     assert manifest["identities"]["browser_extension"]["extension_id"] == BROWSER_EXTENSION_ID

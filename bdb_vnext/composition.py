@@ -505,15 +505,15 @@ def _provider_registry() -> list[dict[str, Any]]:
             "active_read_only",
         ),
         _provider(CONTROL_PROVIDER_ID, RUNTIME_ID, "control_store", "reserved_disabled"),
-        _provider(NATIVE_PROVIDER_ID, NATIVE_COMPONENT_ID, "native_transport", "reserved_disabled"),
-        _provider(BROWSER_PROVIDER_ID, BROWSER_COMPONENT_ID, "browser_transport", "reserved_disabled"),
+        _provider(NATIVE_PROVIDER_ID, NATIVE_COMPONENT_ID, "native_transport", "active_read_only"),
+        _provider(BROWSER_PROVIDER_ID, BROWSER_COMPONENT_ID, "browser_transport", "active_read_only"),
         _provider(
             CONTROL_CENTER_PROVIDER_ID,
             CONTROL_CENTER_COMPONENT_ID,
             "control_center_query",
             "reserved_disabled",
         ),
-        _provider(REPO_VIEW_PROVIDER_ID, REPO_VIEW_COMPONENT_ID, "repo_view", "reserved_disabled"),
+        _provider(REPO_VIEW_PROVIDER_ID, REPO_VIEW_COMPONENT_ID, "repo_view", "active_read_only"),
     ]
 
 

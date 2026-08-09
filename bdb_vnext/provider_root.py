@@ -16,6 +16,7 @@ from typing import Any
 
 from bdb_shared.evidence import semantic_digest
 from bdb_vnext import composition as _composition
+from bdb_vnext.context_transport import BrowserTransportProvider, NativeTransportProvider
 from bdb_vnext.repo_view import (
     DEFAULT_GIT_TIMEOUT_SECONDS,
     DEFAULT_MAX_BLOB_BYTES,
@@ -44,6 +45,8 @@ _KNOWN_PROVIDER_IDS = (
 _BOUND_PROVIDER_IDS = frozenset(
     {
         _composition.COMPOSITION_PROVIDER_ID,
+        _composition.BROWSER_PROVIDER_ID,
+        _composition.NATIVE_PROVIDER_ID,
         _composition.REPO_VIEW_PROVIDER_ID,
     }
 )
@@ -71,9 +74,12 @@ class ProviderBinding:
     kind: str
     state: str
     implementation: object | None = field(default=None, repr=False, compare=False)
+    provider_contract: str | None = None
+    provider_contract_version: int | None = None
+    implementation_identity: str | None = None
 
     def descriptor(self) -> dict[str, Any]:
-        return {
+        descriptor: dict[str, Any] = {
             "provider_id": self.provider_id,
             "generation": self.generation,
             "component_id": self.component_id,
@@ -82,6 +88,13 @@ class ProviderBinding:
             "implementation_bound": self.implementation is not None,
             "writer_enabled": False,
         }
+        if self.provider_contract is not None:
+            descriptor["provider_contract"] = self.provider_contract
+        if self.provider_contract_version is not None:
+            descriptor["provider_contract_version"] = self.provider_contract_version
+        if self.implementation_identity is not None:
+            descriptor["implementation_identity"] = self.implementation_identity
+        return descriptor
 
 
 @dataclass(frozen=True)
@@ -281,9 +294,18 @@ def default_provider_bindings(manifest: Mapping[str, Any]) -> tuple[ProviderBind
         elif provider_id == _composition.REPO_VIEW_PROVIDER_ID:
             implementation = RepoViewProvider()
             state = "BOUND"
+        elif provider_id == _composition.BROWSER_PROVIDER_ID:
+            implementation = BrowserTransportProvider()
+            state = "BOUND"
+        elif provider_id == _composition.NATIVE_PROVIDER_ID:
+            implementation = NativeTransportProvider()
+            state = "BOUND"
         else:
             implementation = None
             state = "RESERVED"
+        provider_contract = getattr(implementation, "provider_contract", None)
+        provider_contract_version = getattr(implementation, "provider_contract_version", None)
+        implementation_identity = getattr(implementation, "implementation_identity", None)
         result.append(
             ProviderBinding(
                 provider_id=provider_id,
@@ -292,6 +314,9 @@ def default_provider_bindings(manifest: Mapping[str, Any]) -> tuple[ProviderBind
                 kind=kind,
                 state=state,
                 implementation=implementation,
+                provider_contract=provider_contract,
+                provider_contract_version=provider_contract_version,
+                implementation_identity=implementation_identity,
             )
         )
     return tuple(result)
@@ -402,6 +427,12 @@ class VNextCompositionRoot:
                     "malformed_provider_declaration",
                     f"provider declaration is malformed for {provider_id}",
                 )
+            expected_state = "BOUND" if document.get("state") == "active_read_only" else "RESERVED"
+            if declaration.state != expected_state:
+                raise ProviderRootError(
+                    "provider_binding_mismatch",
+                    f"provider state differs from composition identity for {provider_id}",
+                )
             if declaration.state == "BOUND":
                 if declaration.implementation is None:
                     raise ProviderRootError(
@@ -443,12 +474,44 @@ class VNextCompositionRoot:
                             "provider_generation_mismatch",
                             f"RepoView implementation generation differs for {provider_id}",
                         )
+                if provider_id in {
+                    _composition.BROWSER_PROVIDER_ID,
+                    _composition.NATIVE_PROVIDER_ID,
+                }:
+                    expected_type = (
+                        BrowserTransportProvider
+                        if provider_id == _composition.BROWSER_PROVIDER_ID
+                        else NativeTransportProvider
+                    )
+                    if not isinstance(declaration.implementation, expected_type):
+                        raise ProviderRootError(
+                            "provider_binding_mismatch",
+                            f"wrong implementation for {provider_id}",
+                        )
+                    implementation = declaration.implementation
+                    assert isinstance(implementation, expected_type)
+                    if (
+                        declaration.provider_contract != implementation.provider_contract
+                        or declaration.provider_contract_version != implementation.provider_contract_version
+                        or declaration.implementation_identity != implementation.implementation_identity
+                    ):
+                        raise ProviderRootError(
+                            "provider_identity_mismatch",
+                            f"provider contract/implementation identity differs for {provider_id}",
+                        )
                 if provider_id not in _BOUND_PROVIDER_IDS:
                     raise ProviderRootError(
                         "provider_binding_mismatch",
                         f"reserved provider cannot be bound in M1c: {provider_id}",
                     )
-            elif declaration.implementation is not None:
+            elif declaration.implementation is not None or any(
+                value is not None
+                for value in (
+                    declaration.provider_contract,
+                    declaration.provider_contract_version,
+                    declaration.implementation_identity,
+                )
+            ):
                 raise ProviderRootError(
                     "malformed_provider_declaration",
                     f"non-bound provider carries an implementation: {provider_id}",
@@ -559,6 +622,18 @@ class VNextCompositionRoot:
             raise ProviderRootError("provider_binding_mismatch", "RepoView binding is invalid")
         return provider
 
+    def browser_transport_provider(self) -> BrowserTransportProvider:
+        provider = self.provider(_composition.BROWSER_PROVIDER_ID)
+        if not isinstance(provider, BrowserTransportProvider):
+            raise ProviderRootError("provider_binding_mismatch", "Browser transport binding is invalid")
+        return provider
+
+    def native_transport_provider(self) -> NativeTransportProvider:
+        provider = self.provider(_composition.NATIVE_PROVIDER_ID)
+        if not isinstance(provider, NativeTransportProvider):
+            raise ProviderRootError("provider_binding_mismatch", "Native transport binding is invalid")
+        return provider
+
     def repository_resource(
         self,
         repo_path: str | Path,
@@ -618,7 +693,9 @@ build_vnext_provider_root = create_vnext_provider_root
 
 __all__ = [
     "ACTIVATION_STATE",
+    "BrowserTransportProvider",
     "CompositionDiagnosticProvider",
+    "NativeTransportProvider",
     "PRODUCT_ID",
     "PRODUCT_TOPOLOGY",
     "PROVIDER_ROOT_SCHEMA",
