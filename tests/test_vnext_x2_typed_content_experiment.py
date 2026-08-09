@@ -96,14 +96,39 @@ def test_complete_x2_capsule_is_pass_with_exact_fault_matrix(tmp_path: Path) -> 
         "semantic_digest_equal": False,
         "both_exactly_resolved": True,
     }
-    assert evidence["semantic_and_concurrency"]["same_object_writers"]["publication_results"] == [
+    assert evidence["semantic_and_concurrency"]["independent_instances"]["publication_results"] == [
         "converged",
         "published",
     ]
+    assert evidence["semantic_and_concurrency"]["independent_instances"]["resolved_exactly"] is True
+    assert evidence["semantic_and_concurrency"]["independent_instances"]["orphan_temp"] == []
+    assert evidence["semantic_and_concurrency"]["independent_subprocesses"]["publication_results"] == [
+        "converged",
+        "published",
+    ]
+    assert evidence["semantic_and_concurrency"]["independent_subprocesses"]["resolved_exactly"] is True
+    assert evidence["semantic_and_concurrency"]["independent_subprocesses"]["orphan_temp"] == []
+    assert evidence["semantic_and_concurrency"]["independent_subprocesses"]["primitive"] == (
+        "atomic NTFS os.link(temp, target) publish-if-absent"
+    )
     assert sorted(evidence["semantic_and_concurrency"]["conflicting_writer"]["results"]) == [
         "committed",
         "content_ref_integrity_failure",
     ]
+    assert evidence["existing_target_cases"] == {
+        "different_bytes": {
+            "failure_code": "immutable_object_conflict",
+            "unchanged": True,
+        },
+        "wrong_file_type": {
+            "failure_code": "unexpected_file_type",
+            "unchanged": True,
+        },
+        "reparse_target": {
+            "failure_code": "reparse_point",
+            "unchanged": True,
+        },
+    }
     assert evidence["orphan_and_foreign"]["orphan"]["resolve_blocked"] is True
     assert evidence["orphan_and_foreign"]["foreign_file"]["resolve_authority_unchanged"] is True
     assert evidence["orphan_and_foreign"]["symlink_reparse"]["available"] is True

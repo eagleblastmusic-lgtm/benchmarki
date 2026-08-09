@@ -18,7 +18,6 @@ import sqlite3
 import stat
 import subprocess
 import sys
-import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping
@@ -256,7 +255,6 @@ class TypedContentStore:
         self.objects_root = self.content_root / "objects"
         self.refs_root = self.content_root / "refs"
         self.temp_root = self.content_root / "tmp"
-        self._publish_lock = threading.RLock()
         self._ensure_layout()
 
     def _ensure_layout(self) -> None:
@@ -287,20 +285,33 @@ class TypedContentStore:
         )
 
     def _publish_immutable(self, temporary: Path, target: Path, expected: bytes) -> Literal["published", "converged"]:
-        """Publish with an atomic same-volume replace and no overwrite of a committed value."""
+        """Atomically create an absent target without ever replacing it.
 
-        with self._publish_lock:
-            if os.path.lexists(target):
-                observed = _read_regular(target, field="existing_committed_file")
-                if observed != expected:
-                    _fail("immutable_object_conflict", f"{target} already contains different bytes")
-                temporary.unlink(missing_ok=True)
-                return "converged"
-            try:
-                os.replace(temporary, target)
-            except OSError as exc:
-                raise X2ExperimentError("atomic_publish_failed", "atomic os.replace publication failed") from exc
-            return "published"
+        On the supported Windows/NTFS subject, ``os.link`` maps to an atomic
+        hard-link create: exactly one independent writer can create the target
+        directory entry, while a racing existing target is observed and
+        verified. The fully fsynced temporary file is unlinked only after a
+        successful publication or exact convergence.
+        """
+
+        if os.path.lexists(target):
+            observed = _read_regular(target, field="existing_committed_file")
+            if observed != expected:
+                _fail("immutable_object_conflict", f"{target} already contains different bytes")
+            temporary.unlink(missing_ok=True)
+            return "converged"
+        try:
+            os.link(temporary, target)
+        except FileExistsError:
+            observed = _read_regular(target, field="racing_committed_file")
+            if observed != expected:
+                _fail("immutable_object_conflict", f"{target} won a race with different bytes")
+            temporary.unlink(missing_ok=True)
+            return "converged"
+        except OSError as exc:
+            raise X2ExperimentError("atomic_publish_failed", "atomic NTFS hard-link publication failed") from exc
+        temporary.unlink(missing_ok=True)
+        return "published"
 
     def _metadata(self, ref: ContentRef) -> bytes:
         document = {
@@ -567,6 +578,111 @@ def _run_integrity_faults(root: Path, ref: ContentRef, raw: bytes) -> dict[str, 
     return cases
 
 
+def _wait_for_signal(path: Path, *, timeout_seconds: float = 15.0) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while not path.exists():
+        if time.monotonic() >= deadline:
+            _fail("subprocess_barrier_timeout", f"timed out waiting for {path}")
+        time.sleep(0.01)
+
+
+def _subprocess_writer(
+    root: Path,
+    result_path: Path,
+    start_signal: Path,
+    ready_signal: Path,
+) -> int:
+    """Worker used only by the independent-process H4 capsule."""
+
+    store = TypedContentStore(root)
+    _write_fsync(ready_signal, b"ready")
+    _wait_for_signal(start_signal)
+    ref, raw = _fixture_ref()
+    try:
+        receipt = store.commit(ref, raw)
+        result: dict[str, Any] = {
+            "status": receipt.object_publication,
+            "ref_publication": receipt.ref_publication,
+        }
+        return_code = 0
+    except X2ExperimentError as exc:
+        result = {"status": "error", "code": exc.code}
+        return_code = 0
+    except Exception as exc:  # pragma: no cover - surfaced as capsule failure
+        result = {"status": "unexpected_error", "error": type(exc).__name__}
+        return_code = 2
+    _write_fsync(result_path, _canonical_json_bytes(result))
+    return return_code
+
+
+def _run_independent_subprocess_writers(root: Path, ref: ContentRef, raw: bytes) -> dict[str, Any]:
+    shared_root = root / "concurrent-subprocesses"
+    start_signal = root / "subprocess-start.signal"
+    processes: list[Any] = []
+    result_paths: list[Path] = []
+    ready_paths: list[Path] = []
+    checkout = Path(__file__).resolve().parents[1]
+    environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+    try:
+        for index in range(2):
+            result_path = root / f"subprocess-{index}.result.json"
+            ready_path = root / f"subprocess-{index}.ready"
+            result_paths.append(result_path)
+            ready_paths.append(ready_path)
+            processes.append(
+                subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-m",
+                        "bdb_vnext.x2_typed_content_experiment",
+                        "--worker",
+                        "--root",
+                        str(shared_root),
+                        "--result",
+                        str(result_path),
+                        "--start-signal",
+                        str(start_signal),
+                        "--ready-signal",
+                        str(ready_path),
+                    ],
+                    cwd=checkout,
+                    env=environment,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            )
+        for ready_path in ready_paths:
+            _wait_for_signal(ready_path)
+        _write_fsync(start_signal, b"start")
+        outputs = [process.communicate(timeout=30) for process in processes]
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=10)
+    _require(all(process.returncode == 0 for process in processes), "subprocess_writer_failed", str(outputs))
+    results = [json.loads(path.read_text(encoding="utf-8")) for path in result_paths]
+    statuses = sorted(str(result.get("status")) for result in results)
+    _require(
+        statuses == ["converged", "published"],
+        "independent_subprocess_publication_failure",
+        f"independent subprocess results were {results!r}",
+    )
+    resolved_store = TypedContentStore(shared_root)
+    resolved = resolved_store.resolve(ref)
+    _require(resolved == raw, "independent_subprocess_resolve_failure", "subprocess publication did not resolve exact bytes")
+    layout = resolved_store.classify_layout()
+    _require(not layout["orphan_temp"], "independent_subprocess_temp_leak", "converged subprocess left a temp file")
+    return {
+        "results": results,
+        "publication_results": statuses,
+        "resolved_exactly": True,
+        "orphan_temp": layout["orphan_temp"],
+        "primitive": "atomic NTFS os.link(temp, target) publish-if-absent",
+    }
+
+
 def _run_semantic_and_concurrency(root: Path, ref: ContentRef, raw: bytes) -> dict[str, Any]:
     binary_ref = make_content_ref("application/octet-stream", "x2-bytes-v1", raw)
     _require(binary_ref.raw_digest == ref.raw_digest, "raw_identity_failure", "same raw bytes did not share raw digest")
@@ -577,23 +693,31 @@ def _run_semantic_and_concurrency(root: Path, ref: ContentRef, raw: bytes) -> di
     _require(semantic_store.resolve(ref) == raw, "semantic_text_resolve_failure", "text ref did not resolve")
     _require(semantic_store.resolve(binary_ref) == raw, "semantic_binary_resolve_failure", "binary ref did not resolve")
 
-    concurrent_store = TypedContentStore(root / "concurrent-identical")
+    instance_root = root / "concurrent-independent-instances"
+    store_a = TypedContentStore(instance_root)
+    store_b = TypedContentStore(instance_root)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        receipts = list(pool.map(lambda _: concurrent_store.commit(ref, raw), range(2)))
+        receipts = list(pool.map(lambda store: store.commit(ref, raw), (store_a, store_b)))
     _require(
         sorted(receipt.object_publication for receipt in receipts) == ["converged", "published"],
         "concurrent_identical_publication_failure",
-        "same-object writers did not converge to one immutable publication",
+        "independent store instances did not converge to one immutable publication",
     )
-    _require(concurrent_store.resolve(ref) == raw, "concurrent_identical_resolve_failure", "concurrent ref did not resolve exactly")
+    _require(store_a.resolve(ref) == raw, "concurrent_identical_resolve_failure", "concurrent ref did not resolve exactly")
+    instance_layout = store_a.classify_layout()
+    _require(not instance_layout["orphan_temp"], "concurrent_instance_temp_leak", "converged instances left a temp file")
 
-    conflicting_store = TypedContentStore(root / "concurrent-conflict")
+    subprocess_evidence = _run_independent_subprocess_writers(root, ref, raw)
+
+    conflicting_root = root / "concurrent-conflict"
+    conflicting_a = TypedContentStore(conflicting_root)
+    conflicting_b = TypedContentStore(conflicting_root)
     conflicting_raw = b"conflicting writer bytes\n"
     invalid_ref = ref
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [
-            pool.submit(conflicting_store.commit, ref, raw),
-            pool.submit(conflicting_store.commit, invalid_ref, conflicting_raw),
+            pool.submit(conflicting_a.commit, ref, raw),
+            pool.submit(conflicting_b.commit, invalid_ref, conflicting_raw),
         ]
         results: list[str] = []
         for future in futures:
@@ -605,21 +729,78 @@ def _run_semantic_and_concurrency(root: Path, ref: ContentRef, raw: bytes) -> di
                 results.append("committed")
     _require(results.count("committed") == 1, "concurrent_conflict_ambiguity", f"conflicting writer results were {results!r}")
     _require("content_ref_integrity_failure" in results, "concurrent_conflict_not_blocked", f"conflicting writer results were {results!r}")
-    _require(conflicting_store.resolve(ref) == raw, "concurrent_conflict_corruption", "valid writer bytes were corrupted")
+    _require(conflicting_a.resolve(ref) == raw, "concurrent_conflict_corruption", "valid writer bytes were corrupted")
     return {
         "same_raw_different_semantic_domain": {
             "raw_digest_equal": True,
             "semantic_digest_equal": False,
             "both_exactly_resolved": True,
         },
-        "same_object_writers": {
+        "independent_instances": {
             "publication_results": sorted(receipt.object_publication for receipt in receipts),
             "resolved_exactly": True,
+            "orphan_temp": instance_layout["orphan_temp"],
         },
+        "independent_subprocesses": subprocess_evidence,
         "conflicting_writer": {
             "results": results,
             "failure_code": "content_ref_integrity_failure",
             "resolved_exactly": True,
+        },
+    }
+
+
+def _run_existing_target_cases(root: Path, ref: ContentRef, raw: bytes) -> dict[str, Any]:
+    different_store = TypedContentStore(root / "existing-different-bytes")
+    different_target = different_store._object_path(ref.raw_digest)
+    original = b"pre-existing incompatible bytes"
+    _write_fsync(different_target, original)
+    different_code = _expect_failure(
+        lambda: different_store.commit(ref, raw),
+        accepted={"immutable_object_conflict"},
+    )
+    _require(different_target.read_bytes() == original, "existing_bytes_overwritten", "incompatible bytes changed")
+
+    directory_store = TypedContentStore(root / "existing-directory")
+    directory_target = directory_store._object_path(ref.raw_digest)
+    directory_target.mkdir()
+    directory_code = _expect_failure(
+        lambda: directory_store.commit(ref, raw),
+        accepted={"unexpected_file_type"},
+    )
+    _require(directory_target.is_dir(), "existing_directory_overwritten", "existing directory target changed")
+    reparse_store = TypedContentStore(root / "existing-reparse")
+    reparse_target = reparse_store._object_path(ref.raw_digest)
+    reparse_destination = root / "existing-reparse-destination"
+    reparse_destination.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        _fail("reparse_boundary_unavailable", "existing-target reparse evidence requires supported Windows")
+    junction = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(reparse_target), str(reparse_destination)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if junction.returncode != 0:
+        _fail("reparse_boundary_unavailable", "could not create disposable NTFS junction target")
+    reparse_code = _expect_failure(
+        lambda: reparse_store.commit(ref, raw),
+        accepted={"reparse_point"},
+    )
+    reparse_unchanged = _is_reparse(os.lstat(reparse_target))
+    _require(reparse_unchanged, "existing_reparse_overwritten", "existing reparse target changed")
+    return {
+        "different_bytes": {
+            "failure_code": different_code,
+            "unchanged": different_target.read_bytes() == original,
+        },
+        "wrong_file_type": {
+            "failure_code": directory_code,
+            "unchanged": directory_target.is_dir(),
+        },
+        "reparse_target": {
+            "failure_code": reparse_code,
+            "unchanged": reparse_unchanged,
         },
     }
 
@@ -812,6 +993,7 @@ def run_experiment(root: str | Path) -> dict[str, Any]:
         publication_faults = _run_publication_faults(root_path, ref, raw)
         integrity_faults = _run_integrity_faults(root_path, ref, raw)
         semantic_concurrency = _run_semantic_and_concurrency(root_path, ref, raw)
+        existing_targets = _run_existing_target_cases(root_path, ref, raw)
         orphan_foreign = _run_orphan_and_foreign(root_path, ref, raw)
         backup = _run_backup_restore(root_path, ref, raw)
         symlink_available = orphan_foreign["symlink_reparse"]["available"]
@@ -838,13 +1020,13 @@ def run_experiment(root: str | Path) -> dict[str, Any]:
                 "object": "content/objects/<raw_digest_hex>.bin",
                 "ref": "content/refs/<semantic_digest_hex>.json",
                 "temporary": "content/tmp/*.partial",
-                "publication": "same-volume os.replace after fsync; existing committed bytes are never overwritten",
+                "publication": "same-volume NTFS os.link(temp, target) after fsync; existing committed bytes are never overwritten",
             },
             "environment": {
                 "platform": platform.platform(),
                 "os_name": os.name,
                 "python": platform.python_version(),
-                "filesystem_boundary": "real files, fsync, atomic os.replace, concurrent Windows fixture paths",
+                "filesystem_boundary": "real files, fsync, atomic NTFS hard-link create, concurrent Windows fixture paths",
             },
             "normal_commit": {
                 "first_publication": first.object_publication,
@@ -854,6 +1036,7 @@ def run_experiment(root: str | Path) -> dict[str, Any]:
             "publication_faults": publication_faults,
             "integrity_faults": integrity_faults,
             "semantic_and_concurrency": semantic_concurrency,
+            "existing_target_cases": existing_targets,
             "orphan_and_foreign": orphan_foreign,
             "m1b_backup_restore": backup,
             "authority": {
@@ -885,11 +1068,24 @@ def run_experiment(root: str | Path) -> dict[str, Any]:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the fixture-only BDB Next X2 experiment")
     parser.add_argument("--root", required=True, help="absolute disposable experiment root")
+    parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--result", help=argparse.SUPPRESS)
+    parser.add_argument("--start-signal", help=argparse.SUPPRESS)
+    parser.add_argument("--ready-signal", help=argparse.SUPPRESS)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    if args.worker:
+        if not args.result or not args.start_signal or not args.ready_signal:
+            raise SystemExit("--worker requires --result, --start-signal and --ready-signal")
+        return _subprocess_writer(
+            _absolute_path(args.root, field="worker_root"),
+            _absolute_path(args.result, field="worker_result"),
+            _absolute_path(args.start_signal, field="worker_start_signal"),
+            _absolute_path(args.ready_signal, field="worker_ready_signal"),
+        )
     evidence = run_experiment(args.root)
     print(json.dumps(evidence, ensure_ascii=False, sort_keys=True, indent=2))
     return 0 if evidence["status"] == "PASS" else 3

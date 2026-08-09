@@ -3,6 +3,8 @@
 **Status:** `PASS`
 **Execution basis:** `bdb-vnext` after accepted parent
 `7fe97f484b2009043d322e877e14442cb8d918be`
+**Independent-writer repair evidence basis:**
+`c35aec19117833c6d6644aded1288eec01a2a117`
 **Generation:** BDB Next 1.0 fixture-only, build-only
 
 This document preserves the hypotheses/falsifiers recorded before
@@ -17,7 +19,7 @@ Native components, add lifecycle/domain schema, or access BDB Legacy.
 | H1 — atomic publication | A ref becomes committed only after complete bytes are flushed, verified and published. | A pre-publication failure leaves a committed ref resolving to partial bytes, or the publication boundary is nondeterministic. | `PASS`: all injected pre-publication failures remained uncommitted; post-ref acknowledgement loss resolved exact bytes. |
 | H2 — raw integrity | Resolve verifies exact raw digest and rejects missing, truncated, mutated or mismatched bytes. | Any such bytes are returned as valid content. | `PASS`: exact failure matrix below. |
 | H3 — semantic type/schema integrity | Semantic identity is domain-separated by explicit type and schema; raw digest/path never infers semantic identity. | Same raw bytes under a wrong type/schema resolve successfully, or a malformed ref is accepted. | `PASS`: same raw digest had different semantic digests; wrong type/schema and malformed ref failed closed. |
-| H4 — concurrent writers | Same-object writers converge only on exact identical bytes; conflicting identity/write is fail-closed. | Corruption, two authoritative byte variants, or overwrite of a committed object occurs. | `PASS`: `published` + `converged`; conflicting writer returned `content_ref_integrity_failure`. |
+| H4 — concurrent writers | Independent instances/processes converge only on exact identical bytes; conflicting identity/write is fail-closed. | Corruption, two authoritative byte variants, or overwrite of a committed object occurs. | `PASS`: both independent races produced one `published` + one `converged`; conflicting writer returned `content_ref_integrity_failure`. |
 | H5 — orphan handling | Temp/orphan bytes after a pre-commit failure are deterministic non-committed evidence. | An orphan is returned as committed truth or classification is ambiguous. | `PASS`: temp/orphan classes were explicit and resolver was blocked. |
 | H6 — backup/restore | Existing M1b coordinated backup/restore preserves exact committed content identity and detects missing/tampered content. | Restore reports success while the ref resolves to missing/wrong bytes, or tampered backup content is accepted. | `PASS`: valid identity survived; all content tamper cases and post-publish restore tamper failed closed. |
 
@@ -55,10 +57,16 @@ config/bdb-vnext.json                 # fixture-only ref capsule for M1b
 ```
 
 Object and ref bytes are written to a flushed/fsynced temporary file and
-published on the same volume with atomic `os.replace`. A committed target is
-never replaced with different bytes; an exact duplicate converges. Temp files
-and an object published before its ref are classified, never treated as
-committed truth. No production GC or generic storage abstraction was added.
+published on the same volume with atomic NTFS `os.link(temp, target)`
+publish-if-absent semantics. A committed target is never replaced; an exact
+duplicate racing target converges after byte verification, while different
+bytes, wrong file type or reparse targets fail closed. Temp files and an object
+published before its ref are classified, never treated as committed truth. No
+production GC or generic storage abstraction was added.
+
+`_publish_immutable` has no correctness dependency on a Python lock. The
+filesystem create-if-absent operation is the publication authority; any local
+serialization aid would be non-authoritative and is not used by this repair.
 
 ## Windows/filesystem environment
 
@@ -67,7 +75,11 @@ The final CLI capsule used real disposable files on:
 - platform: `Windows-10-10.0.19045-SP0`;
 - OS: `nt`;
 - Python: `3.14.4`;
-- real `fsync`, same-volume atomic `os.replace`, concurrent fixture writers;
+- real `fsync`, same-volume atomic NTFS hard-link creation, concurrent fixture
+  writers;
+- two independent `TypedContentStore` instances targeting one root;
+- two independent Python subprocesses targeting one root and released by a
+  disposable start barrier;
 - NTFS directory junction reparse-point guard (`reparse_point`).
 
 File-symlink creation was unavailable under the current Windows privilege, so
@@ -99,20 +111,35 @@ deterministic injected failure boundaries were observed instead.
 
 ## Concurrency evidence
 
-- Two same-object writers produced exactly `published` and `converged`; the
-  resolved bytes were exact.
+- Two independent `TypedContentStore` instances, sharing no Python lock,
+  produced exactly one `published` and one `converged`; final object/ref bytes
+  and resolver output were exact; converged publication left no temp file.
+- Two independent Python subprocesses, each with its own store instance and
+  process memory, produced exactly one `published` and one `converged`; final
+  resolver output was exact and uncorrupted; converged publication left no temp
+  file.
+- The filesystem authority in both cases was atomic NTFS
+  `os.link(temp, target)` publish-if-absent, not a process-local lock.
 - A conflicting writer using different bytes against the same ref failed with
   `content_ref_integrity_failure`; the valid writer remained exact.
 - Same raw bytes committed under the two explicit semantic domains had equal
   raw digests, different semantic digests, and both exact typed resolutions.
+
+## Existing-target no-overwrite evidence
+
+| Existing derived target | Exact result | Existing target after attempt |
+|---|---|---|
+| different bytes | `immutable_object_conflict` | unchanged |
+| directory instead of file | `unexpected_file_type` | unchanged |
+| reparse/junction target | `reparse_point` | unchanged |
 
 ## M1b backup/restore integration
 
 The existing M1b `create_coordinated_backup`, `verify_backup` and
 `restore_backup` APIs were reused; no second backup authority was introduced.
 
-- backup manifest: `sha256:c46bcd13bdc1c483c5be8f36b2d8bb33cfc82d46235f410158e46582146c2dc9`;
-- restore receipt: `sha256:de6e49a47be3da5a1cede48129eae08a4d76fd2ccbebe4647ed3ff4cab96a16b`;
+- backup manifest: `sha256:ddabdd76de493dc50b966eb64d994d544c06994fbe97990402b1fa793442815a`;
+- restore receipt: `sha256:d91b2e9e83eb3fa23aca23917b1d08875aa8cf94cc426bf0a18964e7e57bcd93`;
 - valid restore: `verified=true`, exact `ContentRef=true`, exact raw digest
   `true`, exact semantic digest `true`;
 - content subject: `objects/9aa156948ee0a8c567c6f565430dc9abecdcea0f820c5fd072eab21e7e9e45b4.bin`;
