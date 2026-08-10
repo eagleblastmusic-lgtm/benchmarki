@@ -64,7 +64,7 @@
         "authority": { "enum": ["EXACT_SOURCE", "DERIVED"] }, "statement": { "$ref": "#/$defs/text" },
         "evidence_refs": { "type": "array", "items": { "$ref": "#/$defs/text" }, "uniqueItems": true },
         "basis_refs": { "type": "array", "items": { "$ref": "#/$defs/text" }, "uniqueItems": true },
-        "source_evidence": { "type": "array", "items": { "$ref": "#/$defs/sourceEvidence" }, "uniqueItems": true },
+        "source_evidence": { "type": "array", "items": { "oneOf": [{ "$ref": "#/$defs/sourceEvidence" }, { "$ref": "#/$defs/repoSourceEvidence" }] }, "uniqueItems": true },
         "producer_id": { "$ref": "#/$defs/identifier" }, "producer_version": { "$ref": "#/$defs/identifier" }
       }
     },
@@ -80,6 +80,24 @@
           "properties": { "type": { "$ref": "#/$defs/identifier" }, "schema": { "$ref": "#/$defs/identifier" }, "semantic_digest": { "$ref": "#/$defs/sha256" }, "raw_digest": { "$ref": "#/$defs/sha256" }
         },
         "fragment_type": { "$ref": "#/$defs/identifier" }, "fragment_schema": { "$ref": "#/$defs/identifier" }
+      }
+      }
+    },
+    "repoSourceEvidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "evidence_id", "repo_view", "source_path", "source_object_id", "fragment_id", "content_ref", "fragment_type", "fragment_schema"],
+      "properties": {
+        "schema": { "const": "bdb-vnext-repo-source-evidence-v1" }, "evidence_id": { "$ref": "#/$defs/sha256" },
+        "repo_view": { "$ref": "#/$defs/repoView" }, "source_path": { "$ref": "#/$defs/text" },
+        "source_object_id": { "oneOf": [{ "$ref": "#/$defs/sha40" }, { "$ref": "#/$defs/sha256Oid" }] },
+        "fragment_id": { "$ref": "#/$defs/sha256" },
+        "content_ref": {
+          "type": "object", "additionalProperties": false,
+          "required": ["type", "schema", "semantic_digest", "raw_digest"],
+          "properties": { "type": { "$ref": "#/$defs/identifier" }, "schema": { "$ref": "#/$defs/identifier" }, "semantic_digest": { "$ref": "#/$defs/sha256" }, "raw_digest": { "$ref": "#/$defs/sha256" }
+        },
+        "fragment_type": { "$ref": "#/$defs/identifier" }, "fragment_schema": { "$ref": "#/$defs/identifier" }
+      }
       }
     },
     "coverageBinding": {
@@ -127,5 +145,4 @@
       }
     }
   }
-}
 }

@@ -27,7 +27,7 @@ from bdb_vnext.content_store import (
     make_content_ref,
 )
 from bdb_vnext.context_transport import BrowserTransportProvider, NativeTransportProvider
-from bdb_vnext.repo_view import CommittedRepoView
+from bdb_vnext.repo_view import CommittedRepoView, RepoViewError
 
 
 UNDERSTANDING_SCHEMA = "bdb-vnext-repository-understanding-v1"
@@ -42,6 +42,7 @@ OMISSION_SCHEMA = "bdb-vnext-context-omission-v1"
 AFFORDANCE_SCHEMA = "bdb-vnext-context-affordance-v1"
 DECISION_OPTION_SCHEMA = "bdb-vnext-decision-option-v1"
 SOURCE_EVIDENCE_SCHEMA = "bdb-vnext-source-evidence-ref-v1"
+REPO_SOURCE_EVIDENCE_SCHEMA = "bdb-vnext-repo-source-evidence-v1"
 COVERAGE_BINDING_SCHEMA = "bdb-vnext-coverage-binding-v1"
 GAP_RESOLUTION_EVIDENCE_SCHEMA = "bdb-vnext-gap-resolution-evidence-v1"
 M2C_PRODUCER_ID = "bdb-vnext-engineering-intelligence"
@@ -151,6 +152,30 @@ def _binding_for_repo(repo_view: CommittedRepoView | RepoViewBinding) -> RepoVie
     if not isinstance(binding, RepoViewBinding):
         _fail("malformed_repo_view_basis", "an exact RepoView binding is required")
     return binding
+
+
+def _repository_source_path(value: object) -> str:
+    path = _text(value, field="source_evidence.source_path", max_length=4096)
+    if (
+        path.startswith("/")
+        or path.endswith("/")
+        or "\\" in path
+        or "\x00" in path
+        or any(ord(character) < 32 for character in path)
+        or re.match(r"^[A-Za-z]:", path) is not None
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+    ):
+        _fail("unsafe_source_path", "repository source paths must be relative POSIX paths without traversal")
+    return path
+
+
+def _repository_source_object_id(value: object, repo_view: RepoViewBinding) -> str:
+    if not isinstance(value, str):
+        _fail("malformed_source_evidence", "source_object_id must be a Git object ID")
+    expected_length = 40 if repo_view.object_format == "sha1" else 64
+    if len(value) != expected_length or any(character not in "0123456789abcdef" for character in value):
+        _fail("malformed_source_evidence", "source_object_id does not match the exact RepoView object format")
+    return value
 
 
 def _accepted_fragment(
@@ -339,6 +364,203 @@ class SourceEvidenceRef:
 
 
 @dataclass(frozen=True)
+class RepoSourceEvidence:
+    """Exact committed-repository source evidence, not a generic M2b claim."""
+
+    evidence_id: str
+    repo_view: RepoViewBinding
+    source_path: str
+    source_object_id: str
+    fragment_id: str
+    content_ref: ContentRef
+    fragment_type: str
+    fragment_schema: str
+
+    def __post_init__(self) -> None:
+        _digest(self.evidence_id, field="repo_source_evidence.evidence_id")
+        if not isinstance(self.repo_view, RepoViewBinding):
+            _fail("malformed_source_evidence", "repository source evidence requires a typed RepoView binding")
+        _repository_source_path(self.source_path)
+        _repository_source_object_id(self.source_object_id, self.repo_view)
+        _digest(self.fragment_id, field="repo_source_evidence.fragment_id")
+        if not isinstance(self.content_ref, ContentRef):
+            _fail("malformed_source_evidence", "repository source evidence requires a typed ContentRef")
+        _identifier(self.fragment_type, field="repo_source_evidence.fragment_type")
+        _identifier(self.fragment_schema, field="repo_source_evidence.fragment_schema")
+        if self.evidence_id != _record_digest(self._identity_payload()):
+            _fail("repo_source_evidence_integrity_failure", "evidence_id does not match exact repository-source identity")
+
+    def _identity_payload(self) -> dict[str, Any]:
+        return {
+            "schema": REPO_SOURCE_EVIDENCE_SCHEMA,
+            "repo_view": self.repo_view.as_dict(),
+            "source_path": self.source_path,
+            "source_object_id": self.source_object_id,
+            "fragment_id": self.fragment_id,
+            "content_ref": self.content_ref.as_dict(),
+            "fragment_type": self.fragment_type,
+            "fragment_schema": self.fragment_schema,
+        }
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"schema": REPO_SOURCE_EVIDENCE_SCHEMA, "evidence_id": self.evidence_id, **self._identity_payload()}
+
+    @classmethod
+    def from_fragment(
+        cls,
+        *,
+        view: CommittedRepoView,
+        source_path: str,
+        source_object_id: str,
+        fragment: TypedContextFragment,
+    ) -> "RepoSourceEvidence":
+        if not isinstance(view, CommittedRepoView) or not isinstance(fragment, TypedContextFragment):
+            _fail("malformed_source_evidence", "repository source evidence requires a CommittedRepoView and TypedContextFragment")
+        binding = RepoViewBinding.from_view(view)
+        identity = {
+            "schema": REPO_SOURCE_EVIDENCE_SCHEMA,
+            "repo_view": binding.as_dict(),
+            "source_path": _repository_source_path(source_path),
+            "source_object_id": _repository_source_object_id(source_object_id, binding),
+            "fragment_id": fragment.fragment_id,
+            "content_ref": fragment.content_ref.as_dict(),
+            "fragment_type": fragment.fragment_type,
+            "fragment_schema": fragment.fragment_schema,
+        }
+        if fragment.repo_view != binding:
+            _fail("repository_source_repo_mismatch", "source fragment is bound to a different exact RepoView")
+        return cls(
+            _record_digest(identity),
+            binding,
+            identity["source_path"],
+            identity["source_object_id"],
+            fragment.fragment_id,
+            fragment.content_ref,
+            fragment.fragment_type,
+            fragment.fragment_schema,
+        )
+
+    def validate(
+        self,
+        view: CommittedRepoView,
+        binding_store: DurableBindingStore,
+    ) -> TypedContextFragment:
+        if not isinstance(view, CommittedRepoView):
+            _fail("repository_source_authority_required", "repository source validation requires a CommittedRepoView")
+        if not isinstance(binding_store, DurableBindingStore):
+            _fail("repository_source_binding_failure", "repository source validation requires the live M2b binding store")
+        expected_binding = RepoViewBinding.from_view(view)
+        if self.repo_view != expected_binding:
+            _fail("repository_source_repo_mismatch", "source evidence RepoView differs from the exact committed reader")
+        try:
+            entry = view.query().get_entry(self.source_path)
+            if not entry.is_regular_file:
+                _fail("repository_source_not_found", "repository source path is not a committed regular file")
+            if entry.object_oid != self.source_object_id:
+                _fail("repository_source_mismatch", "source object identity differs from the committed RepoView tree")
+            source_bytes = view.query().read_bytes(self.source_path)
+        except RepoViewError as exc:
+            if exc.code in {"missing_path", "unsupported_path"}:
+                _fail("repository_source_not_found", "source path is absent from the exact committed RepoView", details={"cause": exc.code})
+            _fail("repository_source_mismatch", "exact committed RepoView source read failed", details={"cause": exc.code})
+        try:
+            accepted = binding_store.resolve_accepted(self.fragment_id, expected_view=view)
+        except Exception as exc:
+            code = getattr(exc, "code", "binding_failure")
+            _fail("repository_source_binding_failure", "source fragment is not an accepted exact M2b binding", details={"cause": code})
+        fragment = accepted.fragment
+        if (
+            fragment.repo_view != self.repo_view
+            or fragment.content_ref != self.content_ref
+            or fragment.fragment_type != self.fragment_type
+            or fragment.fragment_schema != self.fragment_schema
+        ):
+            _fail("repository_source_binding_failure", "accepted M2b fragment differs from repository-source evidence")
+        try:
+            resolved_bytes = accepted.raw
+            expected_ref = make_content_ref(self.content_ref.type, self.content_ref.schema, source_bytes)
+        except Exception as exc:
+            _fail("repository_source_mismatch", "source bytes could not be bound to ContentRef", details={"cause": type(exc).__name__})
+        if expected_ref != self.content_ref or resolved_bytes != source_bytes:
+            _fail("repository_source_mismatch", "committed source bytes differ from the accepted immutable M2b object")
+        if self.evidence_id != _record_digest(self._identity_payload()):
+            _fail("repo_source_evidence_integrity_failure", "repository-source evidence identity is not deterministic")
+        return fragment
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "RepoSourceEvidence":
+        _exact_fields(
+            value,
+            {"schema", "evidence_id", "repo_view", "source_path", "source_object_id", "fragment_id", "content_ref", "fragment_type", "fragment_schema"},
+            field="repo_source_evidence",
+        )
+        if value["schema"] != REPO_SOURCE_EVIDENCE_SCHEMA:
+            _fail("schema_mismatch", "unsupported repository-source evidence schema")
+        binding = _parse_repo_binding(value["repo_view"], field="repo_source_evidence.repo_view")
+        return cls(
+            value["evidence_id"],
+            binding,
+            value["source_path"],
+            value["source_object_id"],
+            value["fragment_id"],
+            ContentRef.from_mapping(_mapping(value["content_ref"], field="repo_source_evidence.content_ref")),
+            value["fragment_type"],
+            value["fragment_schema"],
+        )
+
+
+def publish_repo_source_evidence(
+    view: CommittedRepoView,
+    source_path: str,
+    content_store: ImmutableContentStore,
+    binding_store: DurableBindingStore,
+    *,
+    fragment_type: str,
+    fragment_schema: str,
+) -> RepoSourceEvidence:
+    """Read committed bytes through M2a, then publish/accept one M2c source edge."""
+
+    if not isinstance(view, CommittedRepoView):
+        _fail("repository_source_authority_required", "source publication requires a CommittedRepoView")
+    if not isinstance(content_store, ImmutableContentStore) or not isinstance(binding_store, DurableBindingStore):
+        _fail("repository_source_store_required", "source publication requires the M2b content and binding stores")
+    normalized_path = _repository_source_path(source_path)
+    query = view.query()
+    try:
+        entry = query.get_entry(normalized_path)
+    except RepoViewError as exc:
+        if exc.code in {"missing_path", "unsupported_path"}:
+            _fail("repository_source_not_found", "source path is absent from the exact committed RepoView", details={"cause": exc.code})
+        _fail("repository_source_mismatch", "exact committed RepoView source lookup failed", details={"cause": exc.code})
+    if not entry.is_regular_file:
+        _fail("repository_source_not_found", "only committed regular files may become source evidence")
+    try:
+        source_bytes = query.read_bytes(normalized_path)
+    except RepoViewError as exc:
+        if exc.code in {"missing_path", "unsupported_path"}:
+            _fail("repository_source_not_found", "source path is absent from the exact committed RepoView", details={"cause": exc.code})
+        _fail("repository_source_mismatch", "exact committed RepoView source read failed", details={"cause": exc.code})
+    content_ref = make_content_ref(fragment_type, fragment_schema, source_bytes)
+    content_store.publish(content_ref, source_bytes)
+    fragment = TypedContextFragment.create(
+        view,
+        content_ref,
+        fragment_type=fragment_type,
+        fragment_schema=fragment_schema,
+        payload_size_bytes=len(source_bytes),
+    )
+    binding_store.accept(fragment, view=view)
+    evidence = RepoSourceEvidence.from_fragment(
+        view=view,
+        source_path=normalized_path,
+        source_object_id=entry.object_oid,
+        fragment=fragment,
+    )
+    evidence.validate(view, binding_store)
+    return evidence
+
+
+@dataclass(frozen=True)
 class CoverageBinding:
     """Deterministic proof that one covered target has explicit support."""
 
@@ -438,7 +660,7 @@ class UnderstandingClaim:
     basis_refs: tuple[str, ...]
     producer_id: str = M2C_PRODUCER_ID
     producer_version: str = M2C_PRODUCER_VERSION
-    source_evidence: tuple[SourceEvidenceRef, ...] = ()
+    source_evidence: tuple[SourceEvidenceRef | RepoSourceEvidence, ...] = ()
 
     def __post_init__(self) -> None:
         _digest(self.claim_id, field="claim_id")
@@ -457,11 +679,11 @@ class UnderstandingClaim:
         _text(self.statement, field="claim.statement")
         if not self.evidence_refs and self.kind in {"FACT", "INFERENCE"}:
             _fail("claim_evidence_required", "FACT and INFERENCE claims require evidence references")
-        if any(not isinstance(item, SourceEvidenceRef) for item in self.source_evidence):
-            _fail("malformed_claim", "claim source_evidence must contain SourceEvidenceRef records")
+        if any(not isinstance(item, (SourceEvidenceRef, RepoSourceEvidence)) for item in self.source_evidence):
+            _fail("malformed_claim", "claim source_evidence must contain typed evidence records")
         if self.kind == "FACT":
             if not self.source_evidence:
-                _fail("source_evidence_required", "FACT claims require verified SourceEvidenceRef records")
+                _fail("repository_source_evidence_required", "FACT claims require repository-source evidence")
             expected_refs = tuple(item.evidence_id for item in self.source_evidence)
             if tuple(self.evidence_refs) != expected_refs:
                 _fail("source_evidence_binding_mismatch", "FACT evidence_refs must exactly name source_evidence IDs")
@@ -504,8 +726,8 @@ class UnderstandingClaim:
         statement: str,
         evidence_refs: Sequence[str] = (),
         basis_refs: Sequence[str] = (),
-        source_evidence: Sequence[SourceEvidenceRef] = (),
-        source_evidence_refs: Sequence[SourceEvidenceRef] | None = None,
+        source_evidence: Sequence[SourceEvidenceRef | RepoSourceEvidence] = (),
+        source_evidence_refs: Sequence[SourceEvidenceRef | RepoSourceEvidence] | None = None,
         binding_store: DurableBindingStore | None = None,
         producer_id: str = M2C_PRODUCER_ID,
         producer_version: str = M2C_PRODUCER_VERSION,
@@ -516,13 +738,15 @@ class UnderstandingClaim:
         evidence_items = tuple(source_evidence_refs if source_evidence_refs is not None else source_evidence)
         if kind == "FACT":
             if not evidence_items:
-                _fail("source_evidence_required", "FACT claims require SourceEvidenceRef records")
+                _fail("repository_source_evidence_required", "FACT claims require repository-source evidence")
             if binding_store is None:
-                _fail("source_evidence_store_required", "FACT claims require the M2b DurableBindingStore")
+                _fail("repository_source_store_required", "FACT claims require M2a and M2b source validation")
             for item in evidence_items:
-                if not isinstance(item, SourceEvidenceRef):
-                    _fail("malformed_source_evidence", "FACT source evidence must be typed")
-                item.validate(binding_store, repo_view)
+                if not isinstance(item, RepoSourceEvidence):
+                    _fail("repository_source_evidence_required", "generic M2b SourceEvidenceRef cannot become FACT authority")
+                if not isinstance(repo_view, CommittedRepoView):
+                    _fail("repository_source_authority_required", "FACT creation requires the exact CommittedRepoView reader")
+                item.validate(repo_view, binding_store)
             normalized_refs = tuple(item.evidence_id for item in evidence_items)
             if evidence_refs and tuple(evidence_refs) not in {normalized_refs, tuple(item.fragment_id for item in evidence_items)}:
                 _fail("source_evidence_binding_mismatch", "FACT evidence_refs must match verified source evidence IDs")
@@ -566,9 +790,11 @@ class UnderstandingClaim:
         if self.kind != "FACT":
             return
         if not self.source_evidence:
-            _fail("source_evidence_required", "FACT claims require SourceEvidenceRef records")
+            _fail("repository_source_evidence_required", "FACT claims require repository-source evidence")
         for item in self.source_evidence:
-            item.validate(binding_store, repo_view)
+            if not isinstance(item, RepoSourceEvidence) or not isinstance(repo_view, CommittedRepoView):
+                _fail("repository_source_authority_required", "FACT grounding requires RepoSourceEvidence and CommittedRepoView")
+            item.validate(repo_view, binding_store)
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "UnderstandingClaim":
@@ -605,7 +831,12 @@ class UnderstandingClaim:
             _sequence(value["basis_refs"], field="claim.basis_refs"),
             value["producer_id"],
             value["producer_version"],
-            tuple(SourceEvidenceRef.from_mapping(item) for item in value["source_evidence"]),
+            tuple(
+                RepoSourceEvidence.from_mapping(item)
+                if isinstance(item, Mapping) and item.get("schema") == REPO_SOURCE_EVIDENCE_SCHEMA
+                else SourceEvidenceRef.from_mapping(item)
+                for item in value["source_evidence"]
+            ),
         )
 
 
@@ -1496,6 +1727,56 @@ class ContextPackage:
     @property
     def gap_ids(self) -> tuple[str, ...]:
         return tuple(item.unknown_id for item in self.unknowns) + tuple(item.omission_id for item in self.omissions)
+
+    def validate_source_grounding(
+        self,
+        understanding: RepositoryUnderstandingView,
+        view: CommittedRepoView,
+        binding_store: DurableBindingStore,
+    ) -> None:
+        """Recheck package authority against live M2a and M2b authorities."""
+
+        if not isinstance(understanding, RepositoryUnderstandingView) or not isinstance(view, CommittedRepoView):
+            _fail("repository_source_authority_required", "ContextPackage grounding requires typed Understanding and CommittedRepoView")
+        expected_binding = RepoViewBinding.from_view(view)
+        if (
+            self.understanding_id != understanding.understanding_id
+            or self.intent_basis != understanding.intent_basis
+            or self.repo_view != expected_binding
+            or tuple(self.requested_dimensions) != understanding.requested_dimensions
+            or tuple(self.covered_dimensions) != understanding.covered_dimensions
+            or tuple(self.must_see_categories) != understanding.must_see_categories
+            or tuple(self.covered_must_see) != understanding.covered_must_see
+            or tuple(self.coverage_bindings) != understanding.coverage_bindings
+            or tuple(self.unknowns) != understanding.unknowns
+            or tuple(self.omissions) != understanding.omissions
+            or tuple(self.contradictions) != understanding.contradictions
+            or self.fact_claim_ids != tuple(claim.claim_id for claim in understanding.claims if claim.kind == "FACT")
+            or self.inference_claim_ids != tuple(claim.claim_id for claim in understanding.claims if claim.kind == "INFERENCE")
+            or self.assumption_claim_ids != tuple(claim.claim_id for claim in understanding.claims if claim.kind == "ASSUMPTION")
+            or self.hypothesis_claim_ids != tuple(claim.claim_id for claim in understanding.claims if claim.kind == "HYPOTHESIS")
+        ):
+            _fail("context_package_basis_mismatch", "ContextPackage does not match the exact Understanding basis")
+        understanding.validate_source_grounding(binding_store, view)
+        for fragment_id in self.included_fragment_ids:
+            try:
+                accepted = binding_store.resolve_accepted(fragment_id, expected_view=view)
+            except Exception as exc:
+                _fail("repository_source_binding_failure", "ContextPackage includes a non-accepted M2b fragment", details={"cause": getattr(exc, "code", "binding_failure")})
+            if accepted.fragment.repo_view != expected_binding:
+                _fail("repository_source_repo_mismatch", "ContextPackage fragment has a foreign RepoView")
+        _validate_coverage_bindings(
+            self.coverage_bindings,
+            repo_view=expected_binding,
+            claims=understanding.claims,
+            requested_dimensions=self.requested_dimensions,
+            covered_dimensions=self.covered_dimensions,
+            must_see_categories=self.must_see_categories,
+            covered_must_see=self.covered_must_see,
+            binding_store=binding_store,
+            committed_view=view,
+            included_fragment_ids=self.included_fragment_ids,
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -2436,6 +2717,9 @@ class EngineeringDecision:
         )
         if not bindings or any(not isinstance(item, RepoViewBinding) for item in bindings):
             _fail("malformed_repo_view_basis", "EngineeringDecision requires exact RepoView bindings")
+        committed_views = {
+            RepoViewBinding.from_view(view): view for view in repo_views if isinstance(view, CommittedRepoView)
+        }
         packages = tuple(context_packages)
         if not packages:
             _fail("decision_context_required", "EngineeringDecision requires at least one ContextPackage basis")
@@ -2464,7 +2748,31 @@ class EngineeringDecision:
             if understanding.intent_basis != intent_basis or understanding.repo_view not in bindings:
                 _fail("decision_basis_mismatch", "decision Understanding basis has a foreign intent or RepoView")
             if binding_store is not None:
-                understanding.validate_source_grounding(binding_store, understanding.repo_view)
+                committed_view = committed_views.get(understanding.repo_view)
+                needs_exact_view = any(claim.kind == "FACT" for claim in understanding.claims) or any(
+                    binding.supporting_fragment_ids for binding in understanding.coverage_bindings
+                )
+                package = next(
+                    (candidate for candidate in packages if candidate.understanding_id == understanding.understanding_id),
+                    None,
+                )
+                needs_exact_view = needs_exact_view or bool(package and package.included_fragment_ids)
+                if needs_exact_view and committed_view is None:
+                    _fail(
+                        "decision_source_authority_required",
+                        "source-grounded decision bases require the exact CommittedRepoView reader",
+                    )
+                understanding.validate_source_grounding(
+                    binding_store,
+                    committed_view if committed_view is not None else understanding.repo_view,
+                )
+                if package is not None and (needs_exact_view or package.included_fragment_ids):
+                    if committed_view is None:
+                        _fail(
+                            "decision_source_authority_required",
+                            "source-grounded ContextPackage bases require the exact CommittedRepoView reader",
+                        )
+                    package.validate_source_grounding(understanding, committed_view, binding_store)
             for claim in understanding.claims:
                 if claim.claim_id in actual_claims and actual_claims[claim.claim_id] != claim:
                     _fail("decision_claim_basis_mismatch", "decision claim ID has conflicting Understanding definitions")
@@ -2490,9 +2798,15 @@ class EngineeringDecision:
                 if claim is None or claim.kind != kind or package_claim_classes.get(claim_id) != kind:
                     _fail("decision_claim_basis_mismatch", "decision claim ID is not an exact member of its declared class")
                 if kind == "FACT":
-                    claim.validate_source_grounding(binding_store, claim.repo_view) if binding_store is not None else _fail(
-                        "decision_claim_basis_required", "FACT decision claims require source grounding"
-                    )
+                    if binding_store is None:
+                        _fail("decision_claim_basis_required", "FACT decision claims require source grounding")
+                    committed_view = committed_views.get(claim.repo_view)
+                    if committed_view is None:
+                        _fail(
+                            "decision_source_authority_required",
+                            "FACT decision claims require the exact CommittedRepoView reader",
+                        )
+                    claim.validate_source_grounding(binding_store, committed_view)
         identity = {
             "schema": ENGINEERING_DECISION_SCHEMA,
             "intent_basis": intent_basis.as_dict(),
@@ -2747,6 +3061,8 @@ __all__ = [
     "M2C_PRODUCER_VERSION",
     "OMISSION_SCHEMA",
     "RepositoryUnderstandingView",
+    "RepoSourceEvidence",
+    "REPO_SOURCE_EVIDENCE_SCHEMA",
     "SEMANTIC_RECORD_CONTENT_TYPE",
     "UNKNOWN_SCHEMA",
     "UnderstandingClaim",
@@ -2754,6 +3070,7 @@ __all__ = [
     "Unknown",
     "Omission",
     "publish_semantic_record",
+    "publish_repo_source_evidence",
     "reconstruct_semantic_record",
     "semantic_record_bytes",
     "semantic_record_content_ref",

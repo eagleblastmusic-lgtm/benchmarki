@@ -43,13 +43,20 @@ intent/RepoView basis and producer/schema versions. Rebuilding the same inputs
 converges; changing a material basis or producer/schema identity changes the
 record identity and stale decision applicability is rejected.
 
-FACT claims require a typed `SourceEvidenceRef` constructed from an accepted
-M2b fragment. Its exact fragment ID, `ContentRef`, fragment type/schema and
-RepoView binding are re-resolved through `DurableBindingStore` when authority
-is asserted; parsing a serialized descriptor or supplying an arbitrary
-`sha256:` value is not source grounding. `CoverageBinding` records explicitly
-bind every covered dimension and must-see target to actual claim IDs and/or
-accepted fragment IDs, so `COMPLETE` cannot be self-attested.
+FACT claims require `RepoSourceEvidence`, a distinct descriptor that binds a
+repo-relative source path and committed tree-entry object ID to an accepted M2b
+fragment. `publish_repo_source_evidence()` reads the bytes itself through the
+exact M2a `CommittedRepoView.query().get_entry()/read_bytes()` boundary, then
+publishes the immutable `ContentRef` and accepted fragment. Live validation
+proves the complete chain: exact RepoView and source object ID, M2a reread
+bytes, `ContentRef`, and accepted fragment raw bytes are all equal. A generic
+accepted `SourceEvidenceRef` remains useful for parser/negative cases but can
+never promote a claim to `FACT`; parsing a serialized descriptor is not
+authority verification. `ContextPackage` and `EngineeringDecision` source
+grounding likewise require the exact CommittedRepoView plus live M2b binding
+store. `CoverageBinding` records explicitly bind every covered dimension and
+must-see target to actual claim IDs and/or accepted fragment IDs, so
+`COMPLETE` cannot be self-attested.
 
 `ContextResolution` carries one explicit gap-to-evidence edge per resolved
 gap. It enforces `resulting_gap_ids = prior_gap_ids - resolved_gap_ids +
