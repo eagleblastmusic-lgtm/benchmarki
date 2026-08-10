@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:bdb:schema:vnext-m2d-run:v1",
+  "title": "BDB vNext M2d Browser arm run v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "scenario_id", "scenario_digest", "arm_id", "arm_type", "repo_view", "evidence_universe_digest", "model", "browser", "task_text_digest", "started_at", "finished_at", "answer_markdown", "answer_sha256", "context_request_used", "protocol_burden_visible", "run_digest"],
+  "properties": {
+    "schema": { "const": "bdb-vnext-m2d-run-v1" },
+    "scenario_id": { "pattern": "^S[1-5]$", "type": "string" },
+    "scenario_digest": { "$ref": "#/$defs/digest" },
+    "arm_id": { "enum": ["X", "Y"] },
+    "arm_type": { "enum": ["BASELINE_FLAT_CONTEXT_V1", "M2_VNEXT_CONTEXT_PACKAGE_V1"] },
+    "repo_view": { "$ref": "#/$defs/repoView" },
+    "evidence_universe_digest": { "$ref": "#/$defs/digest" },
+    "model": { "$ref": "#/$defs/model" },
+    "browser": { "$ref": "#/$defs/browser" },
+    "task_text_digest": { "$ref": "#/$defs/digest" },
+    "started_at": { "$ref": "#/$defs/timestamp" },
+    "finished_at": { "$ref": "#/$defs/timestamp" },
+    "answer_markdown": { "type": "string", "minLength": 1, "maxLength": 200000 },
+    "answer_sha256": { "$ref": "#/$defs/digest" },
+    "context_request_used": { "type": "boolean" },
+    "requested_source_paths": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "protocol_burden_visible": { "type": "boolean" },
+    "run_digest": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "timestamp": { "type": "string", "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[^ ]+Z$" },
+    "repoView": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repository_id", "repository_identity_digest", "object_format", "commit_oid", "tree_oid", "view_id"],
+      "properties": {
+        "repository_id": { "type": "string", "minLength": 1 }, "repository_identity_digest": { "$ref": "#/$defs/digest" },
+        "object_format": { "enum": ["sha1", "sha256"] }, "commit_oid": { "pattern": "^[0-9a-f]{40,64}$", "type": "string" },
+        "tree_oid": { "pattern": "^[0-9a-f]{40,64}$", "type": "string" }, "view_id": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "model": {
+      "type": "object", "additionalProperties": false,
+      "required": ["product", "model_id", "reasoning_setting"],
+      "properties": { "product": { "const": "ChatGPT" }, "model_id": { "type": "string", "minLength": 1 }, "reasoning_setting": { "type": "string", "minLength": 1 } }
+    },
+    "browser": {
+      "type": "object", "additionalProperties": false,
+      "required": ["surface", "fresh_conversation", "same_visible_capability_class", "api_used"],
+      "properties": {
+        "surface": { "const": "normal_chatgpt_browser" }, "fresh_conversation": { "type": "boolean" },
+        "same_visible_capability_class": { "type": "boolean" }, "api_used": { "const": false }
+      }
+    }
+  }
+}

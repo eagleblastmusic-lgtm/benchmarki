@@ -1,0 +1,11 @@
+{
+  "schema": "bdb-vnext-m2d-ground-truth-v1",
+  "scenario_id": "S2",
+  "scenario_digest": "sha256:ab8e39eeeb6d2cfe14b6641b214cd8713d81e09891565e216c6486a737c69ec1",
+  "evidence_universe_digest": "sha256:083c0da0b02333ce6475b4a672b2bda5c13ce658f0f2e1e766c76f2d13208ace",
+  "must_see_item_ids": ["S2-MS-01", "S2-MS-02", "S2-MS-03", "S2-MS-04"],
+  "hard_failure_vectors": ["stale_or_mixed_repo_view", "source_authority_violation", "material_safety_or_correctness_regression", "protocol_bookkeeping_required"],
+  "source_vs_inference_requirements": ["A dirty worktree is not a new committed RepoView.", "A binding mismatch is an authority failure, not evidence that retrying is safe."],
+  "arm_map": {"X": "BASELINE_FLAT_CONTEXT_V1", "Y": "M2_VNEXT_CONTEXT_PACKAGE_V1"},
+  "context_request": {"required": false, "seeded_scenario": false}
+}

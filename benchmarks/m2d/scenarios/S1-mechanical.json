@@ -1,0 +1,40 @@
+{
+  "schema": "bdb-vnext-m2d-scenario-v1",
+  "scenario_version": "m2d-scenario-v1",
+  "scenario_id": "S1",
+  "scenario_family": "MECHANICAL_CHANGE",
+  "task_text": "Prepare a read-only patch plan for adding an optional human-readable source_label to RepoSourceEvidence and its serialized UnderstandingClaim records. Do not edit the repository. Identify the exact code, schema, documentation, and test touch points, identity/hash consequences, and the smallest validation set. Preserve exact RepoView/M2b authority and keep runtime, writer, and activation OFF.",
+  "repo_view": {
+    "repository_id": "bdb-vnext-benchmark-subject",
+    "repository_identity_digest": "sha256:fe6decea9b8e31d869f515ed377ac395c4e5e613e666f886cc9e41ef7e089f70",
+    "object_format": "sha1",
+    "commit_oid": "4b724eda100345969eb236f877dd46f0bb91c0cb",
+    "tree_oid": "90ddd52fd997cb67a13767145fd387f7e0ad7141",
+    "view_id": "sha256:625e76129333136da65e642c91b52693a9e2f4bc8242ff89c3143e2b9e86518d"
+  },
+  "evidence_universe": [
+    { "path": "bdb_vnext/engineering_intelligence.py", "object_id": "b1ab8465d8e944cfac7719a5ade321b041c299c7", "size_bytes": 149421, "raw_sha256": "sha256:5bbe00eb63832185f15ccd0f295f3ed1f1ac71e2ce369221237503a4d10cbc91", "role": "RepoSourceEvidence and UnderstandingClaim implementation" },
+    { "path": "schemas/bdb-vnext-repository-understanding-v1.schema.json", "object_id": "fd5e2b5a69d01cc5c3b92d1a99ec4d8810d772b2", "size_bytes": 9903, "raw_sha256": "sha256:4ce617ea0a41587c7d05e3e95d94956bbe4de17a26e8d052a2963cb339245260", "role": "serialized claim/source evidence schema" },
+    { "path": "tests/test_vnext_engineering_intelligence.py", "object_id": "2b0cf718cc2d38edf76d8eafe0d18739fc2cb6ea", "size_bytes": 25942, "raw_sha256": "sha256:8acf23fef9d892b714bfd66b3745cece6e593f2e84a7f1d8a587a7bb4e92ca43", "role": "M2c authority and roundtrip tests" },
+    { "path": "docs/m2c-vnext-engineering-intelligence.md", "object_id": "2454a4ec9ff9c7469a656a7c44056f650db76b59", "size_bytes": 4620, "raw_sha256": "sha256:2c59a1000794f47b91974973a5f671296e3503ff2f3d841d3466d3dde535ac2b", "role": "M2c authority documentation" }
+  ],
+  "must_see_ground_truth": [
+    { "item_id": "S1-MS-01", "requirement": "RepoSourceEvidence identity, as_dict/from_mapping, and deterministic evidence_id must account for any new serialized field.", "source_paths": ["bdb_vnext/engineering_intelligence.py"], "criticality": "HARD" },
+    { "item_id": "S1-MS-02", "requirement": "UnderstandingClaim serialization and FACT creation/validation must remain aligned with the new field without weakening RepoSourceEvidence checks.", "source_paths": ["bdb_vnext/engineering_intelligence.py", "tests/test_vnext_engineering_intelligence.py"], "criticality": "HARD" },
+    { "item_id": "S1-MS-03", "requirement": "The closed repository-understanding schema must describe the new field in the typed RepoSourceEvidence branch and preserve strict top-level fields.", "source_paths": ["schemas/bdb-vnext-repository-understanding-v1.schema.json"], "criticality": "MATERIAL" },
+    { "item_id": "S1-MS-04", "requirement": "Tests must cover positive exact-source construction, fabricated bytes, generic SourceEvidenceRef rejection, parsing/roundtrip, and diff-check rather than only a snapshot update.", "source_paths": ["tests/test_vnext_engineering_intelligence.py"], "criticality": "MATERIAL" },
+    { "item_id": "S1-MS-05", "requirement": "Documentation must keep source authority separate from parser descriptors and must not introduce a writer, runtime activation, or Legacy fallback.", "source_paths": ["docs/m2c-vnext-engineering-intelligence.md"], "criticality": "MATERIAL" }
+  ],
+  "known_constraints": ["read-only benchmark task", "exact committed RepoView remains authoritative", "generic accepted fragments cannot become FACT authority", "no production store/writer/lifecycle change", "runtime/writer/activation remain OFF/OFF/OFF"],
+  "known_unknowns": ["Whether a future source_label should be included in the semantic identity or remain presentation-only is a design decision to state explicitly."],
+  "source_inference_distinctions": [
+    { "distinction_id": "S1-SI-01", "statement": "A source_label is metadata; it does not prove that payload bytes came from the committed repository." },
+    { "distinction_id": "S1-SI-02", "statement": "A parser roundtrip is not live source-authority validation." }
+  ],
+  "adjudication_vector_ids": ["semantic_correctness", "repository_understanding_must_see_coverage", "constraint_violations", "validation_relevance_missed_risks", "maintainability_simplicity", "rework_required", "browser_continuity", "protocol_burden_visible_to_gpt"],
+  "arm_construction": { "version": "m2d-arm-construction-v1", "baseline_type": "BASELINE_FLAT_CONTEXT_V1", "m2_type": "M2_VNEXT_CONTEXT_PACKAGE_V1", "initial_visible_paths": ["bdb_vnext/engineering_intelligence.py", "schemas/bdb-vnext-repository-understanding-v1.schema.json", "tests/test_vnext_engineering_intelligence.py", "docs/m2c-vnext-engineering-intelligence.md"] },
+  "context_seed": null,
+  "rubric_version": "m2d-rubric-v1",
+  "gate_policy_version": "m2d-gate-policy-v1",
+  "scenario_digest": "sha256:ed25a04c8d0aa4acf420b09cb6c73ef943ff4806d3ad17ee472b1d25cbbdf3a0"
+}

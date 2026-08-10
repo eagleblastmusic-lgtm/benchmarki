@@ -1,0 +1,40 @@
+{
+  "schema": "bdb-vnext-m2d-scenario-v1",
+  "scenario_version": "m2d-scenario-v1",
+  "scenario_id": "S3",
+  "scenario_family": "COMPONENT_FEATURE",
+  "task_text": "Design a read-only ContextPackage diagnostic view for a component feature. It should report requested versus covered dimensions, visible gaps, claim classifications, included accepted fragments, and the exact basis checks needed to trust the report. Identify cross-file contracts and focused tests. Do not add a writer, lifecycle state, runtime activation, or production telemetry.",
+  "repo_view": {
+    "repository_id": "bdb-vnext-benchmark-subject",
+    "repository_identity_digest": "sha256:fe6decea9b8e31d869f515ed377ac395c4e5e613e666f886cc9e41ef7e089f70",
+    "object_format": "sha1",
+    "commit_oid": "4b724eda100345969eb236f877dd46f0bb91c0cb",
+    "tree_oid": "90ddd52fd997cb67a13767145fd387f7e0ad7141",
+    "view_id": "sha256:625e76129333136da65e642c91b52693a9e2f4bc8242ff89c3143e2b9e86518d"
+  },
+  "evidence_universe": [
+    { "path": "bdb_vnext/engineering_intelligence.py", "object_id": "b1ab8465d8e944cfac7719a5ade321b041c299c7", "size_bytes": 149421, "raw_sha256": "sha256:5bbe00eb63832185f15ccd0f295f3ed1f1ac71e2ce369221237503a4d10cbc91", "role": "Understanding/ContextPackage/coverage contracts" },
+    { "path": "bdb_vnext/content_store.py", "object_id": "6fada01c12bfec5aaae1100455f8c0c12d04c147", "size_bytes": 31409, "raw_sha256": "sha256:7ccbfc24106d53b03d1af927d14d0d6b81921d6065cf156cfc7cafbb967eebbd", "role": "accepted fragment and immutable content authority" },
+    { "path": "bdb_vnext/context_transport.py", "object_id": "e0730a288ee02784fcc4c629beafc35936b41a25", "size_bytes": 10353, "raw_sha256": "sha256:45a00aca01654089725278083d5f174e236c5cdc6aff606f58bfbf601304f481", "role": "Browser/Native typed transport boundary" },
+    { "path": "tests/test_vnext_engineering_intelligence.py", "object_id": "2b0cf718cc2d38edf76d8eafe0d18739fc2cb6ea", "size_bytes": 25942, "raw_sha256": "sha256:8acf23fef9d892b714bfd66b3745cece6e593f2e84a7f1d8a587a7bb4e92ca43", "role": "coverage, package, resolution, decision tests" },
+    { "path": "docs/m2c-vnext-engineering-intelligence.md", "object_id": "2454a4ec9ff9c7469a656a7c44056f650db76b59", "size_bytes": 4620, "raw_sha256": "sha256:2c59a1000794f47b91974973a5f671296e3503ff2f3d841d3466d3dde535ac2b", "role": "semantic-layer authority boundaries" }
+  ],
+  "must_see_ground_truth": [
+    { "item_id": "S3-MS-01", "requirement": "ContextPackage must be tied to the exact Understanding intent, RepoView, classifications, coverage fields, unknowns, omissions, and contradictions.", "source_paths": ["bdb_vnext/engineering_intelligence.py"], "criticality": "HARD" },
+    { "item_id": "S3-MS-02", "requirement": "CoverageBinding and included fragment IDs must be checked against the live accepted M2b store; package diagnostics must not duplicate raw bytes.", "source_paths": ["bdb_vnext/engineering_intelligence.py", "bdb_vnext/content_store.py"], "criticality": "HARD" },
+    { "item_id": "S3-MS-03", "requirement": "Browser/Native transport remains a typed read-only adapter; protocol metadata is not a model-facing engineering concern.", "source_paths": ["bdb_vnext/context_transport.py", "docs/m2c-vnext-engineering-intelligence.md"], "criticality": "MATERIAL" },
+    { "item_id": "S3-MS-04", "requirement": "Focused tests must include coverage completeness, package grounding, gap resolution, decision membership, and semantic roundtrip rather than only a UI snapshot.", "source_paths": ["tests/test_vnext_engineering_intelligence.py"], "criticality": "MATERIAL" }
+  ],
+  "known_constraints": ["read-only/shadow feature", "no new mutable authority", "exact M2a/M2b live validation for authority claims", "no protocol bookkeeping exposed to GPT", "no production telemetry or lifecycle state"],
+  "known_unknowns": ["The diagnostic view's final presentation surface is not frozen; only its source and validation contract are in scope."],
+  "source_inference_distinctions": [
+    { "distinction_id": "S3-SI-01", "statement": "A coverage or quality status is a derived projection; it cannot replace source bytes or accepted binding authority." },
+    { "distinction_id": "S3-SI-02", "statement": "A claim classification is not evidence that a fragment is accepted unless live M2b validation succeeds." }
+  ],
+  "adjudication_vector_ids": ["semantic_correctness", "repository_understanding_must_see_coverage", "engineering_decision_quality_tradeoffs", "explicit_unknowns_uncertainty", "constraint_violations", "validation_relevance_missed_risks", "maintainability_simplicity", "rework_required", "browser_continuity", "protocol_burden_visible_to_gpt"],
+  "arm_construction": { "version": "m2d-arm-construction-v1", "baseline_type": "BASELINE_FLAT_CONTEXT_V1", "m2_type": "M2_VNEXT_CONTEXT_PACKAGE_V1", "initial_visible_paths": ["bdb_vnext/engineering_intelligence.py", "bdb_vnext/content_store.py", "bdb_vnext/context_transport.py", "tests/test_vnext_engineering_intelligence.py", "docs/m2c-vnext-engineering-intelligence.md"] },
+  "context_seed": null,
+  "rubric_version": "m2d-rubric-v1",
+  "gate_policy_version": "m2d-gate-policy-v1",
+  "scenario_digest": "sha256:558f25fb8dec03d767742f52fb9117116ca04dbf9edf122bac9df59ec92be37b"
+}

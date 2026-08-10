@@ -1,0 +1,43 @@
+{
+  "schema": "bdb-vnext-m2d-scenario-v1",
+  "scenario_version": "m2d-scenario-v1",
+  "scenario_id": "S4",
+  "scenario_family": "ARCHITECTURE_REDESIGN",
+  "task_text": "Assess three designs for supplying repository-source context to a model: A, a generic accepted fragment only; B, an exact RepoSourceEvidence chain; and C, direct filesystem reads. Recommend one under the frozen architecture, explain alternatives and trade-offs, identify constraints and unknowns, and state the migration boundary. Do not edit the repository and do not propose a cutover.",
+  "repo_view": {
+    "repository_id": "bdb-vnext-benchmark-subject",
+    "repository_identity_digest": "sha256:fe6decea9b8e31d869f515ed377ac395c4e5e613e666f886cc9e41ef7e089f70",
+    "object_format": "sha1",
+    "commit_oid": "4b724eda100345969eb236f877dd46f0bb91c0cb",
+    "tree_oid": "90ddd52fd997cb67a13767145fd387f7e0ad7141",
+    "view_id": "sha256:625e76129333136da65e642c91b52693a9e2f4bc8242ff89c3143e2b9e86518d"
+  },
+  "evidence_universe": [
+    { "path": "bdb_vnext/repo_view.py", "object_id": "ace7141837283be7257067dfa8127a27a6e359ed", "size_bytes": 31726, "raw_sha256": "sha256:e889fbee0a4d7ae195ddca1bc3c7e4f050a531b787554dcfa8e96308ea23f6a0", "role": "committed Git object authority" },
+    { "path": "bdb_vnext/content_store.py", "object_id": "6fada01c12bfec5aaae1100455f8c0c12d04c147", "size_bytes": 31409, "raw_sha256": "sha256:7ccbfc24106d53b03d1af927d14d0d6b81921d6065cf156cfc7cafbb967eebbd", "role": "immutable content and accepted binding authority" },
+    { "path": "bdb_vnext/context_transport.py", "object_id": "e0730a288ee02784fcc4c629beafc35936b41a25", "size_bytes": 10353, "raw_sha256": "sha256:45a00aca01654089725278083d5f174e236c5cdc6aff606f58bfbf601304f481", "role": "typed Browser/Native transport" },
+    { "path": "bdb_vnext/engineering_intelligence.py", "object_id": "b1ab8465d8e944cfac7719a5ade321b041c299c7", "size_bytes": 149421, "raw_sha256": "sha256:5bbe00eb63832185f15ccd0f295f3ed1f1ac71e2ce369221237503a4d10cbc91", "role": "RepoSourceEvidence and semantic authority" },
+    { "path": "bdb_vnext/composition.py", "object_id": "e537abd96419846bd102fd6a4afb2799605294ae", "size_bytes": 42779, "raw_sha256": "sha256:1d729dc8baefbf073b6e935f9f3f276af33fdf0d9c3135b98c524301405db9d4", "role": "runtime/writer/activation isolation" },
+    { "path": "docs/m2b-vnext-typed-context-transport.md", "object_id": "f4b2045dd91102c2df0cc8ee1001934478a29422", "size_bytes": 5287, "raw_sha256": "sha256:8f6e22ebb3bc6f6d08155363dabffe602023d48ed5e56dea102357e01a0010d1", "role": "M2b boundary and transport governance" },
+    { "path": "docs/m2c-vnext-engineering-intelligence.md", "object_id": "2454a4ec9ff9c7469a656a7c44056f650db76b59", "size_bytes": 4620, "raw_sha256": "sha256:2c59a1000794f47b91974973a5f671296e3503ff2f3d841d3466d3dde535ac2b", "role": "M2c source/inference boundary" }
+  ],
+  "must_see_ground_truth": [
+    { "item_id": "S4-MS-01", "requirement": "The selected design must preserve exact repository/commit/tree/view binding and Git-object reads as source authority.", "source_paths": ["bdb_vnext/repo_view.py"], "criticality": "HARD" },
+    { "item_id": "S4-MS-02", "requirement": "The selected design must prove M2a bytes equal ContentRef and accepted M2b raw bytes; a generic accepted fragment is insufficient.", "source_paths": ["bdb_vnext/engineering_intelligence.py", "bdb_vnext/content_store.py"], "criticality": "HARD" },
+    { "item_id": "S4-MS-03", "requirement": "Direct filesystem reads would introduce moving/dirty source authority and must be rejected or explicitly bounded as non-authoritative observation.", "source_paths": ["bdb_vnext/repo_view.py", "bdb_vnext/engineering_intelligence.py"], "criticality": "HARD" },
+    { "item_id": "S4-MS-04", "requirement": "Transport is a read-only typed adapter and must not expose protocol/chunk bookkeeping to GPT or create a second writer.", "source_paths": ["bdb_vnext/context_transport.py", "docs/m2b-vnext-typed-context-transport.md"], "criticality": "MATERIAL" },
+    { "item_id": "S4-MS-05", "requirement": "Runtime/writer/activation and migration/cutover boundaries remain isolated and OFF in this benchmark.", "source_paths": ["bdb_vnext/composition.py", "docs/m2c-vnext-engineering-intelligence.md"], "criticality": "MATERIAL" }
+  ],
+  "known_constraints": ["Architecture Freeze is unchanged", "read-only/shadow benchmark", "no new mutable authority", "no Legacy repair or fallback registration", "no filesystem source authority", "runtime/writer/activation OFF/OFF/OFF", "no cutover"],
+  "known_unknowns": ["Future Browser admission and restart continuity are outside M2d; the design must not claim those later guarantees now.", "The benchmark does not decide a future production API surface beyond the accepted M2 contracts."],
+  "source_inference_distinctions": [
+    { "distinction_id": "S4-SI-01", "statement": "A design recommendation is derived reasoning; only exact M2a/M2b evidence establishes repository source authority." },
+    { "distinction_id": "S4-SI-02", "statement": "A frozen architecture constraint is not proof that a future runtime feature already exists." }
+  ],
+  "adjudication_vector_ids": ["semantic_correctness", "repository_understanding_must_see_coverage", "engineering_decision_quality_tradeoffs", "explicit_unknowns_uncertainty", "constraint_violations", "validation_relevance_missed_risks", "maintainability_simplicity", "rework_required", "browser_continuity", "protocol_burden_visible_to_gpt", "operator_explainability"],
+  "arm_construction": { "version": "m2d-arm-construction-v1", "baseline_type": "BASELINE_FLAT_CONTEXT_V1", "m2_type": "M2_VNEXT_CONTEXT_PACKAGE_V1", "initial_visible_paths": ["bdb_vnext/repo_view.py", "bdb_vnext/content_store.py", "bdb_vnext/context_transport.py", "bdb_vnext/engineering_intelligence.py", "bdb_vnext/composition.py", "docs/m2b-vnext-typed-context-transport.md", "docs/m2c-vnext-engineering-intelligence.md"] },
+  "context_seed": null,
+  "rubric_version": "m2d-rubric-v1",
+  "gate_policy_version": "m2d-gate-policy-v1",
+  "scenario_digest": "sha256:a9668623bb5078c663feebf15302e37cfdad2bcc352f62ea019a511cc64d752a"
+}

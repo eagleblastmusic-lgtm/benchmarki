@@ -1,0 +1,11 @@
+{
+  "schema": "bdb-vnext-m2d-ground-truth-v1",
+  "scenario_id": "S3",
+  "scenario_digest": "sha256:558f25fb8dec03d767742f52fb9117116ca04dbf9edf122bac9df59ec92be37b",
+  "evidence_universe_digest": "sha256:90028ae119f421f4958d11efd5c7ea550708a81f1802a6ca91ed766d6fbc40f4",
+  "must_see_item_ids": ["S3-MS-01", "S3-MS-02", "S3-MS-03", "S3-MS-04"],
+  "hard_failure_vectors": ["source_authority_violation", "fabricated_fact_treated_as_source", "hidden_material_must_see_omission", "protocol_bookkeeping_required"],
+  "source_vs_inference_requirements": ["Diagnostic coverage must be derived from typed understanding and accepted fragments, not parser presence.", "Transport visibility is not a new model-facing protocol."],
+  "arm_map": {"X": "BASELINE_FLAT_CONTEXT_V1", "Y": "M2_VNEXT_CONTEXT_PACKAGE_V1"},
+  "context_request": {"required": false, "seeded_scenario": false}
+}

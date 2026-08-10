@@ -1,0 +1,41 @@
+{
+  "schema": "bdb-vnext-m2d-scenario-v1",
+  "scenario_version": "m2d-scenario-v1",
+  "scenario_id": "S5",
+  "scenario_family": "DIAGNOSTIC_BUG",
+  "task_text": "An initial engineering answer is PARTIAL: it can discuss RepoSourceEvidence, but cannot determine whether a ContextPackage reconstructed from a serialized Understanding still has authoritative coverage. Diagnose the missing context, request the smallest exact source context needed, and after that context is supplied state what can be validated and what remains unknown. Do not infer authority from parsing and do not edit the repository.",
+  "repo_view": {
+    "repository_id": "bdb-vnext-benchmark-subject",
+    "repository_identity_digest": "sha256:fe6decea9b8e31d869f515ed377ac395c4e5e613e666f886cc9e41ef7e089f70",
+    "object_format": "sha1",
+    "commit_oid": "4b724eda100345969eb236f877dd46f0bb91c0cb",
+    "tree_oid": "90ddd52fd997cb67a13767145fd387f7e0ad7141",
+    "view_id": "sha256:625e76129333136da65e642c91b52693a9e2f4bc8242ff89c3143e2b9e86518d"
+  },
+  "evidence_universe": [
+    { "path": "bdb_vnext/engineering_intelligence.py", "object_id": "b1ab8465d8e944cfac7719a5ade321b041c299c7", "size_bytes": 149421, "raw_sha256": "sha256:5bbe00eb63832185f15ccd0f295f3ed1f1ac71e2ce369221237503a4d10cbc91", "role": "RepoSourceEvidence, Understanding, ContextPackage, Request/Resolution" },
+    { "path": "bdb_vnext/content_store.py", "object_id": "6fada01c12bfec5aaae1100455f8c0c12d04c147", "size_bytes": 31409, "raw_sha256": "sha256:7ccbfc24106d53b03d1af927d14d0d6b81921d6065cf156cfc7cafbb967eebbd", "role": "live accepted M2b binding store" },
+    { "path": "schemas/bdb-vnext-context-package-v1.schema.json", "object_id": "a00bf1d5b8194838961f403f2ab05162f493018c", "size_bytes": 7747, "raw_sha256": "sha256:ca21c12300d4021a2652688ecf318546c2048a14810a74fc3bc3e3971f4415e9", "role": "closed ContextPackage serialization contract" },
+    { "path": "tests/test_vnext_engineering_intelligence.py", "object_id": "2b0cf718cc2d38edf76d8eafe0d18739fc2cb6ea", "size_bytes": 25942, "raw_sha256": "sha256:8acf23fef9d892b714bfd66b3745cece6e593f2e84a7f1d8a587a7bb4e92ca43", "role": "package grounding, resolution, and roundtrip tests" },
+    { "path": "docs/m2c-vnext-engineering-intelligence.md", "object_id": "2454a4ec9ff9c7469a656a7c44056f650db76b59", "size_bytes": 4620, "raw_sha256": "sha256:2c59a1000794f47b91974973a5f671296e3503ff2f3d841d3466d3dde535ac2b", "role": "source authority and parser boundary" }
+  ],
+  "must_see_ground_truth": [
+    { "item_id": "S5-MS-01", "requirement": "The initial gap remains visible and PARTIAL; parsing a serialized Understanding or ContextPackage does not perform live source/binding validation.", "source_paths": ["bdb_vnext/engineering_intelligence.py", "docs/m2c-vnext-engineering-intelligence.md"], "criticality": "HARD" },
+    { "item_id": "S5-MS-02", "requirement": "The exact follow-up context must include the ContextPackage contract, live M2b binding behavior, and focused package/roundtrip tests.", "source_paths": ["schemas/bdb-vnext-context-package-v1.schema.json", "bdb_vnext/content_store.py", "tests/test_vnext_engineering_intelligence.py"], "criticality": "HARD" },
+    { "item_id": "S5-MS-03", "requirement": "A valid repair path calls explicit package/Understanding source-grounding with the exact CommittedRepoView and live binding store; it does not infer authority from a parsed record.", "source_paths": ["bdb_vnext/engineering_intelligence.py", "bdb_vnext/content_store.py"], "criticality": "HARD" },
+    { "item_id": "S5-MS-04", "requirement": "ContextResolution repairs the requested gap while preserving unrelated visible gaps, and the answer must keep any remaining uncertainty explicit.", "source_paths": ["bdb_vnext/engineering_intelligence.py", "tests/test_vnext_engineering_intelligence.py"], "criticality": "MATERIAL" },
+    { "item_id": "S5-MS-05", "requirement": "The model-facing request must use natural-language source requests and never require fragment IDs, envelopes, retries, or protocol generations.", "source_paths": ["docs/m2c-vnext-engineering-intelligence.md"], "criticality": "MATERIAL" }
+  ],
+  "known_constraints": ["initial ARM Y package is intentionally partial", "missing context belongs to the same evidence universe", "ContextRequest is read-only and does not create lifecycle state", "unrelated gaps must remain visible", "no API/protocol bookkeeping in the model-facing flow"],
+  "known_unknowns": ["Whether a future operator presentation will show every package field is not part of this diagnostic; only live grounding and gap semantics are frozen."],
+  "source_inference_distinctions": [
+    { "distinction_id": "S5-SI-01", "statement": "A parsed FACT descriptor is a record reconstruction, not proof that its M2a bytes and accepted M2b fragment still match." },
+    { "distinction_id": "S5-SI-02", "statement": "A narrowed uncertainty after a ContextRequest is not the same as a complete repository understanding." }
+  ],
+  "adjudication_vector_ids": ["semantic_correctness", "repository_understanding_must_see_coverage", "root_cause_or_ownership_accuracy", "explicit_unknowns_uncertainty", "constraint_violations", "validation_relevance_missed_risks", "rework_required", "browser_continuity", "protocol_burden_visible_to_gpt", "operator_explainability"],
+  "arm_construction": { "version": "m2d-arm-construction-v1", "baseline_type": "BASELINE_FLAT_CONTEXT_V1", "m2_type": "M2_VNEXT_CONTEXT_PACKAGE_V1", "initial_visible_paths": ["bdb_vnext/engineering_intelligence.py", "docs/m2c-vnext-engineering-intelligence.md"] },
+  "context_seed": { "gap_id": "S5-GAP-PACKAGE-GROUNDING", "gap_dimension": "package-grounding", "gap_reason": "Serialized Understanding and ContextPackage records are present, but exact package source grounding cannot be established from parsing alone.", "requested_source_paths": ["bdb_vnext/content_store.py", "schemas/bdb-vnext-context-package-v1.schema.json", "tests/test_vnext_engineering_intelligence.py"], "unrelated_gap_dimension": "decision-applicability", "unrelated_gap_reason": "Current decision applicability basis is not part of the supplied diagnostic context." },
+  "rubric_version": "m2d-rubric-v1",
+  "gate_policy_version": "m2d-gate-policy-v1",
+  "scenario_digest": "sha256:b9a467e7a110c6391cfe26a442160a476512f58d7de940f6397718e53bf21e8e"
+}

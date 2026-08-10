@@ -1,0 +1,11 @@
+{
+  "schema": "bdb-vnext-m2d-ground-truth-v1",
+  "scenario_id": "S4",
+  "scenario_digest": "sha256:a9668623bb5078c663feebf15302e37cfdad2bcc352f62ea019a511cc64d752a",
+  "evidence_universe_digest": "sha256:21e40044223ca58e6914293f2942507df3148217f52dde4bba55bdf2a9bdd424",
+  "must_see_item_ids": ["S4-MS-01", "S4-MS-02", "S4-MS-03", "S4-MS-04", "S4-MS-05"],
+  "hard_failure_vectors": ["source_authority_violation", "stale_or_mixed_repo_view", "fabricated_fact_treated_as_source", "hidden_material_must_see_omission", "protocol_bookkeeping_required"],
+  "source_vs_inference_requirements": ["The exact RepoSourceEvidence chain is the authority-preserving recommendation.", "Direct filesystem reads are not committed-source authority."],
+  "arm_map": {"X": "BASELINE_FLAT_CONTEXT_V1", "Y": "M2_VNEXT_CONTEXT_PACKAGE_V1"},
+  "context_request": {"required": false, "seeded_scenario": false}
+}

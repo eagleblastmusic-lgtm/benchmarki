@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:bdb:schema:vnext-m2d-evaluation:v1",
+  "title": "BDB vNext M2d paired evaluation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "scenario_id", "scenario_digest", "arm_x_run_digest", "arm_y_run_digest", "fairness", "vector_evaluations", "hard_failures", "context_request", "material_improvement", "evaluation_digest"],
+  "properties": {
+    "schema": { "const": "bdb-vnext-m2d-evaluation-v1" },
+    "scenario_id": { "pattern": "^S[1-5]$", "type": "string" },
+    "scenario_digest": { "$ref": "#/$defs/digest" },
+    "arm_x_run_digest": { "$ref": "#/$defs/digest" },
+    "arm_y_run_digest": { "$ref": "#/$defs/digest" },
+    "fairness": { "$ref": "#/$defs/fairness" },
+    "vector_evaluations": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/vector" }, "uniqueItems": true },
+    "hard_failures": { "type": "array", "items": { "$ref": "#/$defs/text" }, "uniqueItems": true },
+    "context_request": { "$ref": "#/$defs/contextRequest" },
+    "material_improvement": { "type": "boolean" },
+    "evaluation_digest": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "text": { "type": "string", "minLength": 1, "maxLength": 8192 },
+    "fairness": {
+      "type": "object", "additionalProperties": false,
+      "required": ["same_model", "same_settings", "same_repo_view", "same_evidence_universe", "same_task", "browser_parity"],
+      "properties": { "same_model": { "type": "boolean" }, "same_settings": { "type": "boolean" }, "same_repo_view": { "type": "boolean" }, "same_evidence_universe": { "type": "boolean" }, "same_task": { "type": "boolean" }, "browser_parity": { "type": "boolean" } }
+    },
+    "vector": {
+      "type": "object", "additionalProperties": false,
+      "required": ["vector_id", "judgment", "evidence", "raw_counts"],
+      "properties": {
+        "vector_id": { "type": "string", "minLength": 1 },
+        "judgment": { "enum": ["BETTER", "EQUIVALENT", "WORSE", "INCONCLUSIVE", "N/A"] },
+        "evidence": { "$ref": "#/$defs/text" },
+        "raw_counts": { "type": "object", "additionalProperties": { "type": ["integer", "string", "array", "null"] } }
+      }
+    },
+    "contextRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["required", "outcome", "gap_visible", "requested_exact_evidence", "unrelated_gaps_preserved", "answer_improved_or_narrowed", "protocol_bookkeeping_required"],
+      "properties": {
+        "required": { "type": "boolean" }, "outcome": { "enum": ["NOT_APPLICABLE", "NOT_REQUESTED", "RESOLVED", "DENIED", "UNAVAILABLE", "INCONCLUSIVE"] },
+        "gap_visible": { "type": "boolean" }, "requested_exact_evidence": { "type": "boolean" }, "unrelated_gaps_preserved": { "type": "boolean" },
+        "answer_improved_or_narrowed": { "type": "boolean" }, "protocol_bookkeeping_required": { "type": "boolean" }
+      }
+    }
+  }
+}

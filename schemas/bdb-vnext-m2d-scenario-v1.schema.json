@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:bdb:schema:vnext-m2d-scenario:v1",
+  "title": "BDB vNext M2d frozen benchmark scenario v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "scenario_version", "scenario_id", "scenario_family", "task_text", "repo_view", "evidence_universe", "must_see_ground_truth", "known_constraints", "known_unknowns", "source_inference_distinctions", "adjudication_vector_ids", "arm_construction", "context_seed", "rubric_version", "gate_policy_version", "scenario_digest"],
+  "properties": {
+    "schema": { "const": "bdb-vnext-m2d-scenario-v1" },
+    "scenario_version": { "$ref": "#/$defs/identifier" },
+    "scenario_id": { "pattern": "^S[1-5]$", "type": "string" },
+    "scenario_family": { "enum": ["MECHANICAL_CHANGE", "LOCAL_BUG", "COMPONENT_FEATURE", "ARCHITECTURE_REDESIGN", "DIAGNOSTIC_BUG"] },
+    "task_text": { "$ref": "#/$defs/text" },
+    "repo_view": { "$ref": "#/$defs/repoView" },
+    "evidence_universe": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/evidence" }, "uniqueItems": true },
+    "must_see_ground_truth": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/mustSee" }, "uniqueItems": true },
+    "known_constraints": { "type": "array", "items": { "$ref": "#/$defs/text" }, "uniqueItems": true },
+    "known_unknowns": { "type": "array", "items": { "$ref": "#/$defs/text" }, "uniqueItems": true },
+    "source_inference_distinctions": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/distinction" }, "uniqueItems": true },
+    "adjudication_vector_ids": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/identifier" }, "uniqueItems": true },
+    "arm_construction": { "$ref": "#/$defs/armConstruction" },
+    "context_seed": { "oneOf": [{ "$ref": "#/$defs/contextSeed" }, { "type": "null" }] },
+    "rubric_version": { "$ref": "#/$defs/identifier" },
+    "gate_policy_version": { "$ref": "#/$defs/identifier" },
+    "scenario_digest": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "identifier": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+    "text": { "type": "string", "minLength": 1, "maxLength": 8192 },
+    "repoView": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repository_id", "repository_identity_digest", "object_format", "commit_oid", "tree_oid", "view_id"],
+      "properties": {
+        "repository_id": { "$ref": "#/$defs/text" },
+        "repository_identity_digest": { "$ref": "#/$defs/digest" },
+        "object_format": { "enum": ["sha1", "sha256"] },
+        "commit_oid": { "oneOf": [{ "pattern": "^[0-9a-f]{40}$", "type": "string" }, { "pattern": "^[0-9a-f]{64}$", "type": "string" }] },
+        "tree_oid": { "oneOf": [{ "pattern": "^[0-9a-f]{40}$", "type": "string" }, { "pattern": "^[0-9a-f]{64}$", "type": "string" }] },
+        "view_id": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "evidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "object_id", "size_bytes", "raw_sha256", "role"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$)).+$", "maxLength": 4096 },
+        "object_id": { "pattern": "^[0-9a-f]{40,64}$", "type": "string" },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "raw_sha256": { "$ref": "#/$defs/digest" },
+        "role": { "$ref": "#/$defs/text" }
+      }
+    },
+    "mustSee": {
+      "type": "object", "additionalProperties": false,
+      "required": ["item_id", "requirement", "source_paths", "criticality"],
+      "properties": {
+        "item_id": { "$ref": "#/$defs/identifier" },
+        "requirement": { "$ref": "#/$defs/text" },
+        "source_paths": { "type": "array", "minItems": 1, "items": { "type": "string" }, "uniqueItems": true },
+        "criticality": { "enum": ["HARD", "MATERIAL", "SUPPORTING"] }
+      }
+    },
+    "distinction": {
+      "type": "object", "additionalProperties": false,
+      "required": ["distinction_id", "statement"],
+      "properties": { "distinction_id": { "$ref": "#/$defs/identifier" }, "statement": { "$ref": "#/$defs/text" } }
+    },
+    "armConstruction": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "baseline_type", "m2_type", "initial_visible_paths"],
+      "properties": {
+        "version": { "$ref": "#/$defs/identifier" },
+        "baseline_type": { "const": "BASELINE_FLAT_CONTEXT_V1" },
+        "m2_type": { "const": "M2_VNEXT_CONTEXT_PACKAGE_V1" },
+        "initial_visible_paths": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+      }
+    },
+    "contextSeed": {
+      "type": "object", "additionalProperties": false,
+      "required": ["gap_id", "gap_dimension", "gap_reason", "requested_source_paths", "unrelated_gap_dimension", "unrelated_gap_reason"],
+      "properties": {
+        "gap_id": { "$ref": "#/$defs/identifier" },
+        "gap_dimension": { "$ref": "#/$defs/identifier" },
+        "gap_reason": { "$ref": "#/$defs/text" },
+        "requested_source_paths": { "type": "array", "minItems": 1, "items": { "type": "string" }, "uniqueItems": true },
+        "unrelated_gap_dimension": { "$ref": "#/$defs/identifier" },
+        "unrelated_gap_reason": { "$ref": "#/$defs/text" }
+      }
+    }
+  }
+}

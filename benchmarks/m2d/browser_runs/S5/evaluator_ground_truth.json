@@ -1,0 +1,11 @@
+{
+  "schema": "bdb-vnext-m2d-ground-truth-v1",
+  "scenario_id": "S5",
+  "scenario_digest": "sha256:b9a467e7a110c6391cfe26a442160a476512f58d7de940f6397718e53bf21e8e",
+  "evidence_universe_digest": "sha256:549930e27fbbbb896243bde9999099fa66a9ed1934944601f3a543471dfee2c0",
+  "must_see_item_ids": ["S5-MS-01", "S5-MS-02", "S5-MS-03", "S5-MS-04", "S5-MS-05"],
+  "hard_failure_vectors": ["source_authority_violation", "fabricated_fact_treated_as_source", "hidden_material_must_see_omission", "silent_unknown_suppression", "protocol_bookkeeping_required"],
+  "source_vs_inference_requirements": ["A parsed FACT descriptor is not proof that committed bytes and accepted bindings still match.", "A narrowed uncertainty is not a complete repository understanding."],
+  "arm_map": {"X": "BASELINE_FLAT_CONTEXT_V1", "Y": "M2_VNEXT_CONTEXT_PACKAGE_V1"},
+  "context_request": {"required": true, "seeded_scenario": true, "gap_id": "S5-GAP-PACKAGE-GROUNDING", "requested_exact_paths": ["bdb_vnext/content_store.py", "schemas/bdb-vnext-context-package-v1.schema.json", "tests/test_vnext_engineering_intelligence.py"], "unrelated_gap_dimension": "decision-applicability"}
+}
