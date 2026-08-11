@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-m3c-admission-v1",
+  "title": "BDB vNext canonical admission query v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "authority",
+    "protocol_generation",
+    "submission_key",
+    "request_digest",
+    "status",
+    "disposition",
+    "task_id",
+    "intent_revision_id",
+    "outcome"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-vnext-m3c-admission-v1" },
+    "authority": { "const": "canonical_submission_task" },
+    "protocol_generation": { "const": "bdb-vnext-protocol-v1" },
+    "submission_key": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,191}$" },
+    "request_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "status": { "enum": ["ACCEPTED", "TOMBSTONED"] },
+    "disposition": { "enum": ["ACCEPTED", "REJECTED"] },
+    "task_id": { "type": ["string", "null"] },
+    "intent_revision_id": {
+      "type": ["string", "null"],
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "outcome": { "enum": ["published", "replay"] }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "ACCEPTED" } } },
+      "then": {
+        "properties": {
+          "disposition": { "const": "ACCEPTED" },
+          "task_id": { "type": "string" },
+          "intent_revision_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "const": "TOMBSTONED" } } },
+      "then": {
+        "properties": {
+          "disposition": { "const": "REJECTED" },
+          "task_id": { "type": "null" },
+          "intent_revision_id": { "type": "null" }
+        }
+      }
+    }
+  ]
+}

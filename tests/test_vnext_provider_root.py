@@ -13,6 +13,7 @@ import pytest
 
 from bdb_shared.evidence import canonical_json_bytes
 from bdb_vnext.composition import (
+    ADMISSION_PROVIDER_ID,
     BROWSER_PROVIDER_ID,
     COMPOSITION_PROVIDER_ID,
     CONTROL_CENTER_PROVIDER_ID,
@@ -45,6 +46,7 @@ from bdb_vnext.provider_root import (
 ROOT = Path(__file__).resolve().parents[1]
 BASIS = "e674aa5ae6c23f3b45012ebb5d234ed939f27f04"
 RESERVED_IDS = {
+    ADMISSION_PROVIDER_ID,
     CONTROL_PROVIDER_ID,
     CONTROL_CENTER_PROVIDER_ID,
 }
