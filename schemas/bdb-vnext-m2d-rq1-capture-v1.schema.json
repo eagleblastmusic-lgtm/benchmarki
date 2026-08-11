@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-m2d-rq1-capture-v1.schema.json",
+  "title": "BDB vNext M2D-RQ1 normal Browser capture",
+  "description": "Immutable evidence wrapper around the existing bdb-vnext-m2d-run-v2 evaluator input. It is test evidence, not runtime or Browser authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "run_id",
+    "attempt_id",
+    "scenario_id",
+    "scenario_digest",
+    "arm_id",
+    "plan_digest",
+    "repo_view",
+    "context_package",
+    "browser_capture",
+    "attestation",
+    "timing",
+    "raw_answer_identity",
+    "evaluation_linkage",
+    "run_record",
+    "validated_run",
+    "failure",
+    "record_digest"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-vnext-m2d-rq1-capture-v1" },
+    "status": { "enum": ["FINALIZED", "ABORTED"] },
+    "run_id": { "type": "string", "minLength": 1 },
+    "attempt_id": { "type": "string", "minLength": 1 },
+    "scenario_id": { "enum": ["S1", "S2", "S3", "S4", "S5"] },
+    "scenario_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "arm_id": { "enum": ["X", "Y"] },
+    "plan_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "repo_view": { "$ref": "#/$defs/repoView" },
+    "context_package": {
+      "type": ["object", "null"],
+      "description": "BOUND M2 ContextPackage projection for ARM Y, or NOT_APPLICABLE for ARM X.",
+      "additionalProperties": true
+    },
+    "browser_capture": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["conversation_id", "surface", "capture_identity", "answer_source", "synthetic"],
+      "properties": {
+        "conversation_id": { "type": "string", "minLength": 1 },
+        "surface": { "const": "normal_chatgpt_browser" },
+        "capture_identity": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "answer_source": { "const": "normal_chatgpt_browser" },
+        "synthetic": { "const": false }
+      }
+    },
+    "attestation": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["product", "model_id", "reasoning_setting", "fresh_conversation", "same_visible_capability_class"],
+      "properties": {
+        "product": { "const": "ChatGPT" },
+        "model_id": { "$ref": "#/$defs/attestation" },
+        "reasoning_setting": { "$ref": "#/$defs/attestation" },
+        "fresh_conversation": { "const": true },
+        "same_visible_capability_class": { "const": true }
+      }
+    },
+    "timing": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["run_started_at", "prompt_submitted_at", "answer_completed_at", "capture_finalized_at", "source"],
+      "properties": {
+        "run_started_at": { "type": "string", "format": "date-time" },
+        "prompt_submitted_at": { "type": "string", "format": "date-time" },
+        "answer_completed_at": { "type": "string", "format": "date-time" },
+        "capture_finalized_at": { "type": "string", "format": "date-time" },
+        "source": { "const": "browser_observed_utc" }
+      }
+    },
+    "raw_answer_identity": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["steps", "preservation"],
+      "properties": {
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["phase", "sha256"],
+            "properties": {
+              "phase": { "enum": ["INITIAL", "FOLLOWUP"] },
+              "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+            }
+          }
+        },
+        "preservation": { "const": "exact_utf8_markdown_in_run_record" }
+      }
+    },
+    "evaluation_linkage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "evaluator_schema"],
+      "properties": {
+        "status": { "enum": ["PENDING", "NOT_ELIGIBLE", "LINKED"] },
+        "evaluator_schema": { "const": "bdb-vnext-m2d-evaluation-v1" },
+        "scenario_id": { "type": "string" },
+        "run_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "gate_input": { "const": "embedded_run_record" }
+      }
+    },
+    "run_record": { "type": ["object", "null"] },
+    "validated_run": { "type": ["object", "null"] },
+    "failure": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["reason", "observed_failure"],
+      "properties": {
+        "reason": { "type": "string", "minLength": 1 },
+        "observed_failure": { "type": "string", "minLength": 1 }
+      }
+    },
+    "record_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  },
+  "$defs": {
+    "repoView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository_id", "repository_identity_digest", "object_format", "commit_oid", "tree_oid", "view_id"],
+      "properties": {
+        "repository_id": { "type": "string", "minLength": 1 },
+        "repository_identity_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "object_format": { "const": "sha1" },
+        "commit_oid": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "tree_oid": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "view_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    },
+    "attestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "observability", "source"],
+      "properties": {
+        "value": { "type": "string", "minLength": 1 },
+        "observability": { "enum": ["VISIBLE", "UNKNOWN_NOT_OBSERVABLE"] },
+        "source": { "enum": ["browser_visible", "not_observable"] }
+      }
+    }
+  }
+}
