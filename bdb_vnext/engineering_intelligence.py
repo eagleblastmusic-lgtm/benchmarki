@@ -48,6 +48,9 @@ GAP_RESOLUTION_EVIDENCE_SCHEMA = "bdb-vnext-gap-resolution-evidence-v1"
 M2C_PRODUCER_ID = "bdb-vnext-engineering-intelligence"
 M2C_PRODUCER_VERSION = "m2c-v1"
 M2C_POLICY_VERSION = "m2c-context-policy-v1"
+AFFORDANCE_CONTRACT_VERSION = "m2c-affordance-v2"
+CONTEXT_PACKAGE_CONTRACT_VERSION = "m2c-context-package-v2"
+CONTEXT_REQUEST_CONTRACT_VERSION = "m2c-context-request-v2"
 SEMANTIC_RECORD_CONTENT_TYPE = "application/vnd.bdb-vnext.semantic+json"
 HORIZONS = frozenset({"LOCAL", "COMPONENT", "REPOSITORY"})
 CLAIM_KINDS = frozenset({"FACT", "INFERENCE", "ASSUMPTION", "HYPOTHESIS"})
@@ -1140,6 +1143,9 @@ class ContextAffordance:
     horizon: str
     evidence_type: str
     reason: str
+    gap_ids: tuple[str, ...] = ()
+    evidence_requirements: tuple[str, ...] = ()
+    contract_version: str = AFFORDANCE_CONTRACT_VERSION
     producer_id: str = M2C_PRODUCER_ID
     producer_version: str = M2C_PRODUCER_VERSION
 
@@ -1150,6 +1156,16 @@ class ContextAffordance:
             _fail("horizon_invalid", f"unsupported affordance horizon: {self.horizon}")
         _identifier(self.evidence_type, field="affordance.evidence_type")
         _text(self.reason, field="affordance.reason")
+        _digest_sequence(self.gap_ids, field="affordance.gap_ids")
+        _identifier_sequence(self.evidence_requirements, field="affordance.evidence_requirements")
+        _identifier(self.contract_version, field="affordance.contract_version")
+        if self.contract_version != AFFORDANCE_CONTRACT_VERSION:
+            _fail("contract_version_mismatch", "unsupported ContextAffordance contract version")
+        if bool(self.gap_ids) != bool(self.evidence_requirements):
+            _fail(
+                "affordance_binding_incomplete",
+                "a gap-bound affordance must declare semantic evidence requirements",
+            )
         _identifier(self.producer_id, field="affordance.producer_id")
         _identifier(self.producer_version, field="affordance.producer_version")
         if self.affordance_id != _record_digest(self._identity_payload()):
@@ -1162,6 +1178,9 @@ class ContextAffordance:
             "horizon": self.horizon,
             "evidence_type": self.evidence_type,
             "reason": self.reason,
+            "gap_ids": list(self.gap_ids),
+            "evidence_requirements": list(self.evidence_requirements),
+            "contract_version": self.contract_version,
             "producer_id": self.producer_id,
             "producer_version": self.producer_version,
         }
@@ -1170,23 +1189,57 @@ class ContextAffordance:
         return {"schema": AFFORDANCE_SCHEMA, "affordance_id": self.affordance_id, **self._identity_payload()}
 
     @classmethod
-    def create(cls, *, dimension: str, horizon: str, evidence_type: str, reason: str) -> "ContextAffordance":
+    def create(
+        cls,
+        *,
+        dimension: str,
+        horizon: str,
+        evidence_type: str,
+        reason: str,
+        gap_ids: Sequence[str] = (),
+        evidence_requirements: Sequence[str] = (),
+        contract_version: str = AFFORDANCE_CONTRACT_VERSION,
+    ) -> "ContextAffordance":
         identity = {
             "schema": AFFORDANCE_SCHEMA,
             "dimension": dimension,
             "horizon": horizon,
             "evidence_type": evidence_type,
             "reason": reason,
+            "gap_ids": list(gap_ids),
+            "evidence_requirements": list(evidence_requirements),
+            "contract_version": contract_version,
             "producer_id": M2C_PRODUCER_ID,
             "producer_version": M2C_PRODUCER_VERSION,
         }
-        return cls(_record_digest(identity), dimension, horizon, evidence_type, reason)
+        return cls(
+            _record_digest(identity),
+            dimension,
+            horizon,
+            evidence_type,
+            reason,
+            tuple(gap_ids),
+            tuple(evidence_requirements),
+            contract_version,
+        )
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "ContextAffordance":
         _exact_fields(
             value,
-            {"schema", "affordance_id", "dimension", "horizon", "evidence_type", "reason", "producer_id", "producer_version"},
+            {
+                "schema",
+                "affordance_id",
+                "dimension",
+                "horizon",
+                "evidence_type",
+                "reason",
+                "gap_ids",
+                "evidence_requirements",
+                "contract_version",
+                "producer_id",
+                "producer_version",
+            },
             field="affordance",
         )
         if value["schema"] != AFFORDANCE_SCHEMA:
@@ -1197,6 +1250,9 @@ class ContextAffordance:
             value["horizon"],
             value["evidence_type"],
             value["reason"],
+            _digest_sequence(value["gap_ids"], field="affordance.gap_ids"),
+            _identifier_sequence(value["evidence_requirements"], field="affordance.evidence_requirements"),
+            value["contract_version"],
             value["producer_id"],
             value["producer_version"],
         )
@@ -1612,6 +1668,7 @@ class ContextPackage:
     inference_claim_ids: tuple[str, ...] = ()
     assumption_claim_ids: tuple[str, ...] = ()
     hypothesis_claim_ids: tuple[str, ...] = ()
+    contract_version: str = CONTEXT_PACKAGE_CONTRACT_VERSION
 
     def __post_init__(self) -> None:
         _digest(self.package_id, field="package_id")
@@ -1628,18 +1685,42 @@ class ContextPackage:
         )
         if any(not isinstance(item, CoverageBinding) for item in self.coverage_bindings):
             _fail("malformed_coverage_binding", "package coverage_bindings must be typed")
+        for unknown in self.unknowns:
+            if not isinstance(unknown, Unknown):
+                _fail("malformed_context_unknown", "package unknowns must be typed")
+        for omission in self.omissions:
+            if not isinstance(omission, Omission):
+                _fail("malformed_context_omission", "package omissions must be typed")
+        for contradiction in self.contradictions:
+            if not isinstance(contradiction, ClaimContradiction):
+                _fail("malformed_claim_contradiction", "package contradictions must be typed")
+        for affordance in self.affordances:
+            if not isinstance(affordance, ContextAffordance):
+                _fail("malformed_context_affordance", "package affordances must be typed")
         _validate_unique_records(self.unknowns, "unknown_id", field="package.unknowns")
         _validate_unique_records(self.omissions, "omission_id", field="package.omissions")
         _validate_unique_records(self.contradictions, "contradiction_id", field="package.contradictions")
         _validate_unique_records(self.affordances, "affordance_id", field="package.affordances")
+        gap_by_id = {
+            item.unknown_id: item for item in self.unknowns
+        } | {
+            item.omission_id: item for item in self.omissions
+        }
+        for affordance in self.affordances:
+            if affordance.gap_ids:
+                if not set(affordance.gap_ids).issubset(gap_by_id):
+                    _fail("affordance_gap_not_visible", "affordance must target only visible package gaps")
+                dimensions = {gap_by_id[gap_id].dimension for gap_id in affordance.gap_ids}
+                if dimensions != {affordance.dimension}:
+                    _fail("affordance_dimension_mismatch", "affordance dimension must match every selected gap")
         for unknown in self.unknowns:
-            if not isinstance(unknown, Unknown) or not _same_repo(unknown.repo_view, self.repo_view):
+            if not _same_repo(unknown.repo_view, self.repo_view):
                 _fail("context_package_basis_mismatch", "package unknowns must bind the package RepoView")
         for omission in self.omissions:
-            if not isinstance(omission, Omission) or not _same_repo(omission.repo_view, self.repo_view):
+            if not _same_repo(omission.repo_view, self.repo_view):
                 _fail("context_package_basis_mismatch", "package omissions must bind the package RepoView")
         for contradiction in self.contradictions:
-            if not isinstance(contradiction, ClaimContradiction) or not _same_repo(contradiction.repo_view, self.repo_view):
+            if not _same_repo(contradiction.repo_view, self.repo_view):
                 _fail("context_package_basis_mismatch", "package contradictions must bind the package RepoView")
         claim_ids = {
             claim_id
@@ -1669,6 +1750,9 @@ class ContextPackage:
         _identifier(self.policy_version, field="package.policy_version")
         _identifier(self.producer_id, field="package.producer_id")
         _identifier(self.producer_version, field="package.producer_version")
+        _identifier(self.contract_version, field="package.contract_version")
+        if self.contract_version != CONTEXT_PACKAGE_CONTRACT_VERSION:
+            _fail("contract_version_mismatch", "unsupported ContextPackage contract version")
         for field, values in (
             ("package.fact_claim_ids", self.fact_claim_ids),
             ("package.inference_claim_ids", self.inference_claim_ids),
@@ -1709,6 +1793,7 @@ class ContextPackage:
             "inference_claim_ids": list(self.inference_claim_ids),
             "assumption_claim_ids": list(self.assumption_claim_ids),
             "hypothesis_claim_ids": list(self.hypothesis_claim_ids),
+            "contract_version": self.contract_version,
         }
 
     @property
@@ -1806,6 +1891,7 @@ class ContextPackage:
             "inference_claim_ids": list(self.inference_claim_ids),
             "assumption_claim_ids": list(self.assumption_claim_ids),
             "hypothesis_claim_ids": list(self.hypothesis_claim_ids),
+            "contract_version": self.contract_version,
         }
 
     def to_json_bytes(self) -> bytes:
@@ -1842,6 +1928,7 @@ class ContextPackage:
         inference_claim_ids: Sequence[str] = (),
         assumption_claim_ids: Sequence[str] = (),
         hypothesis_claim_ids: Sequence[str] = (),
+        contract_version: str = CONTEXT_PACKAGE_CONTRACT_VERSION,
         understanding: RepositoryUnderstandingView | None = None,
         binding_store: DurableBindingStore | None = None,
     ) -> "ContextPackage":
@@ -1935,6 +2022,7 @@ class ContextPackage:
             "inference_claim_ids": list(inference_claim_ids),
             "assumption_claim_ids": list(assumption_claim_ids),
             "hypothesis_claim_ids": list(hypothesis_claim_ids),
+            "contract_version": contract_version,
         }
         return cls(
             _record_digest(identity),
@@ -1961,6 +2049,7 @@ class ContextPackage:
             tuple(inference_claim_ids),
             tuple(assumption_claim_ids),
             tuple(hypothesis_claim_ids),
+            contract_version,
         )
 
     @classmethod
@@ -2032,6 +2121,7 @@ class ContextPackage:
                 "inference_claim_ids",
                 "assumption_claim_ids",
                 "hypothesis_claim_ids",
+                "contract_version",
             },
             field="context_package",
         )
@@ -2062,12 +2152,74 @@ class ContextPackage:
             inference_claim_ids=_digest_sequence(value["inference_claim_ids"], field="package.inference_claim_ids"),
             assumption_claim_ids=_digest_sequence(value["assumption_claim_ids"], field="package.assumption_claim_ids"),
             hypothesis_claim_ids=_digest_sequence(value["hypothesis_claim_ids"], field="package.hypothesis_claim_ids"),
+            contract_version=value["contract_version"],
         )
         if value["coverage_status"] != result.coverage_status:
             _fail("coverage_status_mismatch", "package coverage_status must be mechanically derived")
         if value["package_id"] != result.package_id:
             _fail("context_package_integrity_failure", "package_id differs from exact record identity")
         return result
+
+
+_HORIZON_RANK = {"LOCAL": 0, "COMPONENT": 1, "REPOSITORY": 2}
+
+
+def _validate_request_affordance_selection(
+    package: ContextPackage,
+    *,
+    gap_ids: Sequence[str],
+    horizon: str,
+    requested_dimensions: Sequence[str],
+    selected_affordance_ids: Sequence[str],
+    requested_evidence_requirements: Sequence[str],
+) -> None:
+    """Check the explicit gap → affordance → evidence edge on a request."""
+
+    gap_set = set(gap_ids)
+    selected_ids = tuple(selected_affordance_ids)
+    selected_requirements = set(requested_evidence_requirements)
+    available = {
+        affordance.affordance_id
+        for affordance in package.affordances
+        if set(affordance.gap_ids) & gap_set
+    }
+    if not selected_ids:
+        if available or selected_requirements:
+            _fail(
+                "affordance_selection_required",
+                "a request for a gap with applicable affordances must select them explicitly",
+            )
+        return
+    affordances_by_id = {item.affordance_id: item for item in package.affordances}
+    selected = []
+    for affordance_id in selected_ids:
+        affordance = affordances_by_id.get(affordance_id)
+        if affordance is None:
+            _fail("affordance_not_in_source_package", "selected affordance is not part of the exact source package")
+        if not affordance.gap_ids:
+            _fail("affordance_unbound", "selected affordance is not bound to a visible gap")
+        if not set(affordance.gap_ids).issubset(gap_set):
+            _fail("affordance_gap_mismatch", "selected affordance would broaden beyond the requested visible gaps")
+        if affordance.dimension not in set(requested_dimensions):
+            _fail("affordance_dimension_mismatch", "selected affordance dimension is not requested for the target gap")
+        if _HORIZON_RANK[affordance.horizon] > _HORIZON_RANK[horizon]:
+            _fail("affordance_horizon_mismatch", "request horizon is narrower than the selected affordance horizon")
+        selected.append(affordance)
+    selected_gap_ids = {gap_id for affordance in selected for gap_id in affordance.gap_ids}
+    if not gap_set.issubset(selected_gap_ids):
+        _fail("affordance_gap_uncovered", "every requested visible gap needs a selected applicable affordance")
+    selected_dimensions = {affordance.dimension for affordance in selected}
+    if not set(requested_dimensions).issubset(selected_dimensions):
+        _fail("affordance_dimension_mismatch", "requested dimensions must be represented by selected affordances")
+    offered_requirements = {
+        requirement
+        for affordance in selected
+        for requirement in affordance.evidence_requirements
+    }
+    if not selected_requirements:
+        _fail("requested_evidence_requirements_missing", "selected affordances require explicit semantic evidence requirements")
+    if not selected_requirements.issubset(offered_requirements):
+        _fail("requested_evidence_not_afforded", "requested semantic evidence is not represented by selected affordances")
 
 
 @dataclass(frozen=True)
@@ -2079,14 +2231,17 @@ class ContextRequest:
     repo_view: RepoViewBinding
     source_package_id: str
     gap_ids: tuple[str, ...]
+    selected_affordance_ids: tuple[str, ...]
     horizon: str
     requested_dimensions: tuple[str, ...]
+    requested_evidence_requirements: tuple[str, ...]
     requested_evidence: tuple[str, ...]
     question: str
     counterexample: str | None
     reason: str
     producer_id: str = M2C_PRODUCER_ID
     producer_version: str = M2C_PRODUCER_VERSION
+    contract_version: str = CONTEXT_REQUEST_CONTRACT_VERSION
 
     def __post_init__(self) -> None:
         _digest(self.request_id, field="request_id")
@@ -2094,9 +2249,11 @@ class ContextRequest:
             _fail("malformed_context_request", "ContextRequest requires typed intent and RepoView basis")
         _digest(self.source_package_id, field="source_package_id")
         _digest_sequence(self.gap_ids, field="request.gap_ids", allow_empty=False)
+        _digest_sequence(self.selected_affordance_ids, field="request.selected_affordance_ids")
         if self.horizon not in HORIZONS:
             _fail("horizon_invalid", f"unsupported request horizon: {self.horizon}")
         _identifier_sequence(self.requested_dimensions, field="request.requested_dimensions", allow_empty=False)
+        _identifier_sequence(self.requested_evidence_requirements, field="request.requested_evidence_requirements")
         _sequence(self.requested_evidence, field="request.requested_evidence", allow_empty=False)
         _text(self.question, field="request.question")
         if self.counterexample is not None:
@@ -2104,6 +2261,9 @@ class ContextRequest:
         _text(self.reason, field="request.reason")
         _identifier(self.producer_id, field="request.producer_id")
         _identifier(self.producer_version, field="request.producer_version")
+        _identifier(self.contract_version, field="request.contract_version")
+        if self.contract_version != CONTEXT_REQUEST_CONTRACT_VERSION:
+            _fail("contract_version_mismatch", "unsupported ContextRequest contract version")
         if self.request_id != _record_digest(self._identity_payload()):
             _fail("context_request_integrity_failure", "request_id does not match its semantic identity")
 
@@ -2114,14 +2274,17 @@ class ContextRequest:
             "repo_view": self.repo_view.as_dict(),
             "source_package_id": self.source_package_id,
             "gap_ids": list(self.gap_ids),
+            "selected_affordance_ids": list(self.selected_affordance_ids),
             "horizon": self.horizon,
             "requested_dimensions": list(self.requested_dimensions),
+            "requested_evidence_requirements": list(self.requested_evidence_requirements),
             "requested_evidence": list(self.requested_evidence),
             "question": self.question,
             "counterexample": self.counterexample,
             "reason": self.reason,
             "producer_id": self.producer_id,
             "producer_version": self.producer_version,
+            "contract_version": self.contract_version,
         }
 
     def as_dict(self) -> dict[str, Any]:
@@ -2140,6 +2303,14 @@ class ContextRequest:
             or not set(self.gap_ids).issubset(package.gap_ids)
         ):
             _fail("stale_request_basis", "ContextRequest is not bound to the exact source ContextPackage")
+        _validate_request_affordance_selection(
+            package,
+            gap_ids=self.gap_ids,
+            horizon=self.horizon,
+            requested_dimensions=self.requested_dimensions,
+            selected_affordance_ids=self.selected_affordance_ids,
+            requested_evidence_requirements=self.requested_evidence_requirements,
+        )
 
     @classmethod
     def create(
@@ -2147,32 +2318,61 @@ class ContextRequest:
         package: ContextPackage,
         *,
         gap_ids: Sequence[str],
+        selected_affordance_ids: Sequence[str] = (),
         horizon: str,
         requested_dimensions: Sequence[str],
+        requested_evidence_requirements: Sequence[str] = (),
         requested_evidence: Sequence[str],
         question: str,
         reason: str,
         counterexample: str | None = None,
+        contract_version: str = CONTEXT_REQUEST_CONTRACT_VERSION,
     ) -> "ContextRequest":
         if not isinstance(package, ContextPackage):
             _fail("malformed_context_request", "ContextRequest requires a source ContextPackage")
-        gaps = tuple(gap_ids)
+        gaps = _digest_sequence(gap_ids, field="request.gap_ids", allow_empty=False)
         if not set(gaps).issubset(package.gap_ids) or not gaps:
             _fail("gap_not_visible", "ContextRequest must target visible source-package gaps")
+        selected_ids = _digest_sequence(selected_affordance_ids, field="request.selected_affordance_ids")
+        if horizon not in HORIZONS:
+            _fail("horizon_invalid", f"unsupported request horizon: {horizon}")
+        dimensions = _identifier_sequence(requested_dimensions, field="request.requested_dimensions", allow_empty=False)
+        evidence_requirements = _identifier_sequence(
+            requested_evidence_requirements,
+            field="request.requested_evidence_requirements",
+        )
+        evidence = _sequence(requested_evidence, field="request.requested_evidence", allow_empty=False)
+        _text(question, field="request.question")
+        if counterexample is not None:
+            _text(counterexample, field="request.counterexample")
+        _text(reason, field="request.reason")
+        if contract_version != CONTEXT_REQUEST_CONTRACT_VERSION:
+            _fail("contract_version_mismatch", "unsupported ContextRequest contract version")
+        _validate_request_affordance_selection(
+            package,
+            gap_ids=gaps,
+            horizon=horizon,
+            requested_dimensions=dimensions,
+            selected_affordance_ids=selected_ids,
+            requested_evidence_requirements=evidence_requirements,
+        )
         identity = {
             "schema": CONTEXT_REQUEST_SCHEMA,
             "intent_basis": package.intent_basis.as_dict(),
             "repo_view": package.repo_view.as_dict(),
             "source_package_id": package.package_id,
             "gap_ids": list(gaps),
+            "selected_affordance_ids": list(selected_ids),
             "horizon": horizon,
-            "requested_dimensions": list(requested_dimensions),
-            "requested_evidence": list(requested_evidence),
+            "requested_dimensions": list(dimensions),
+            "requested_evidence_requirements": list(evidence_requirements),
+            "requested_evidence": list(evidence),
             "question": question,
             "counterexample": counterexample,
             "reason": reason,
             "producer_id": M2C_PRODUCER_ID,
             "producer_version": M2C_PRODUCER_VERSION,
+            "contract_version": contract_version,
         }
         return cls(
             _record_digest(identity),
@@ -2180,12 +2380,17 @@ class ContextRequest:
             package.repo_view,
             package.package_id,
             gaps,
+            selected_ids,
             horizon,
-            tuple(requested_dimensions),
-            tuple(requested_evidence),
+            dimensions,
+            evidence_requirements,
+            evidence,
             question,
             counterexample,
             reason,
+            M2C_PRODUCER_ID,
+            M2C_PRODUCER_VERSION,
+            contract_version,
         )
 
     @classmethod
@@ -2199,14 +2404,17 @@ class ContextRequest:
                 "repo_view",
                 "source_package_id",
                 "gap_ids",
+                "selected_affordance_ids",
                 "horizon",
                 "requested_dimensions",
+                "requested_evidence_requirements",
                 "requested_evidence",
                 "question",
                 "counterexample",
                 "reason",
                 "producer_id",
                 "producer_version",
+                "contract_version",
             },
             field="context_request",
         )
@@ -2218,14 +2426,17 @@ class ContextRequest:
             _parse_repo_binding(value["repo_view"]),
             value["source_package_id"],
             _digest_sequence(value["gap_ids"], field="request.gap_ids", allow_empty=False),
+            _digest_sequence(value["selected_affordance_ids"], field="request.selected_affordance_ids"),
             value["horizon"],
             _identifier_sequence(value["requested_dimensions"], field="request.requested_dimensions", allow_empty=False),
+            _identifier_sequence(value["requested_evidence_requirements"], field="request.requested_evidence_requirements"),
             _sequence(value["requested_evidence"], field="request.requested_evidence", allow_empty=False),
             value["question"],
             value["counterexample"],
             value["reason"],
             value["producer_id"],
             value["producer_version"],
+            value["contract_version"],
         )
 
 
@@ -3050,6 +3261,9 @@ __all__ = [
     "ContextPackage",
     "ContextRequest",
     "ContextResolution",
+    "AFFORDANCE_CONTRACT_VERSION",
+    "CONTEXT_PACKAGE_CONTRACT_VERSION",
+    "CONTEXT_REQUEST_CONTRACT_VERSION",
     "DecisionOption",
     "ENGINEERING_DECISION_SCHEMA",
     "EngineeringDecision",

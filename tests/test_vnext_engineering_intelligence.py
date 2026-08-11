@@ -10,6 +10,7 @@ from bdb_shared.evidence import semantic_digest
 from bdb_vnext.content_store import DurableBindingStore, ImmutableContentStore, TypedContextFragment, make_content_ref
 from bdb_vnext.engineering_intelligence import (
     ClaimContradiction,
+    ContextAffordance,
     ContextPackage,
     ContextRequest,
     ContextResolution,
@@ -449,11 +450,35 @@ def test_context_resolution_preserves_unrelated_gaps_and_denial_keeps_all_visibl
         recovery_gap,
         unrelated_gap,
     ) = _seeded(tmp_path)
+    recovery_affordance = ContextAffordance.create(
+        gap_ids=[recovery_gap.unknown_id],
+        dimension="recovery",
+        horizon="COMPONENT",
+        evidence_type="repository-source",
+        evidence_requirements=["live-binding-authority", "focused-validation"],
+        reason="repair only the visible recovery gap with declared semantic evidence",
+    )
+    unrelated_affordance = ContextAffordance.create(
+        gap_ids=[unrelated_gap.unknown_id],
+        dimension="dependencies",
+        horizon="COMPONENT",
+        evidence_type="repository-source",
+        evidence_requirements=["dependency-contract"],
+        reason="dependency evidence is separate from recovery evidence",
+    )
+    prior_package = ContextPackage.from_understanding(
+        seeded,
+        horizon="COMPONENT",
+        included_fragment_ids=[ownership_fragment.fragment_id],
+        affordances=[recovery_affordance, unrelated_affordance],
+    )
     request = ContextRequest.create(
         prior_package,
         gap_ids=[recovery_gap.unknown_id],
+        selected_affordance_ids=[recovery_affordance.affordance_id],
         horizon="COMPONENT",
         requested_dimensions=["recovery"],
+        requested_evidence_requirements=["live-binding-authority", "focused-validation"],
         requested_evidence=["committed recovery boundary"],
         question="Which exact committed component owns recovery?",
         reason="repair only the visible recovery gap",
@@ -504,6 +529,7 @@ def test_context_resolution_preserves_unrelated_gaps_and_denial_keeps_all_visibl
         expanded,
         horizon="COMPONENT",
         included_fragment_ids=[ownership_fragment.fragment_id, recovery_fragment.fragment_id],
+        affordances=[unrelated_affordance],
     )
     evidence = GapResolutionEvidence.create(
         gap_id=recovery_gap.unknown_id,
@@ -527,7 +553,7 @@ def test_context_resolution_preserves_unrelated_gaps_and_denial_keeps_all_visibl
         ContextResolution.create(
             request,
             prior_package,
-            resulting_package=ContextPackage.from_understanding(expanded, horizon="COMPONENT", included_fragment_ids=[ownership_fragment.fragment_id, recovery_fragment.fragment_id]),
+            resulting_package=repaired_package,
             added_fragments=[recovery_fragment],
             binding_store=bindings,
             resolved_gap_ids=[recovery_gap.unknown_id],
@@ -538,6 +564,203 @@ def test_context_resolution_preserves_unrelated_gaps_and_denial_keeps_all_visibl
     denied = ContextResolution.create(request, prior_package, outcome="DENIED", denial_reason="policy denied")
     assert denied.unresolved_gap_ids == prior_package.gap_ids
     assert ContextResolution.from_mapping(resolution.as_dict()) == resolution
+    bindings.close()
+
+
+def test_context_affordance_request_precision_is_generic_and_fail_closed(tmp_path: Path) -> None:
+    (
+        _repo,
+        _resource,
+        view,
+        _intent,
+        _content,
+        bindings,
+        ownership_fragment,
+        _ownership,
+        understanding,
+        package,
+        recovery_gap,
+        unrelated_gap,
+    ) = _seeded(tmp_path)
+    recovery_affordance = ContextAffordance.create(
+        gap_ids=[recovery_gap.unknown_id],
+        dimension="recovery",
+        horizon="COMPONENT",
+        evidence_type="repository-source",
+        evidence_requirements=["live-binding-authority", "focused-validation"],
+        reason="the visible recovery gap has a declared source-backed evidence policy",
+    )
+    unrelated_affordance = ContextAffordance.create(
+        gap_ids=[unrelated_gap.unknown_id],
+        dimension="dependencies",
+        horizon="COMPONENT",
+        evidence_type="repository-source",
+        evidence_requirements=["dependency-contract"],
+        reason="dependency evidence is a separate visible gap",
+    )
+    precise_package = ContextPackage.from_understanding(
+        understanding,
+        horizon="COMPONENT",
+        included_fragment_ids=[ownership_fragment.fragment_id],
+        affordances=[recovery_affordance, unrelated_affordance],
+    )
+    assert set(precise_package.gap_ids) == {recovery_gap.unknown_id, unrelated_gap.unknown_id}
+    request = ContextRequest.create(
+        precise_package,
+        gap_ids=[recovery_gap.unknown_id],
+        selected_affordance_ids=[recovery_affordance.affordance_id],
+        horizon="COMPONENT",
+        requested_dimensions=["recovery"],
+        requested_evidence_requirements=["live-binding-authority", "focused-validation"],
+        requested_evidence=["exact committed recovery evidence"],
+        question="Which accepted source evidence establishes recovery?",
+        reason="repair only the selected visible recovery gap",
+    )
+    assert request.selected_affordance_ids == (recovery_affordance.affordance_id,)
+    assert request.requested_evidence_requirements == ("live-binding-authority", "focused-validation")
+    assert ContextRequest.from_mapping(request.as_dict()) == request
+
+    foreign_gap_affordance = ContextAffordance.create(
+        gap_ids=[_digest("foreign-gap")],
+        dimension="recovery",
+        horizon="COMPONENT",
+        evidence_type="repository-source",
+        evidence_requirements=["live-binding-authority"],
+        reason="foreign gap must not enter this package",
+    )
+    with pytest.raises(EngineeringIntelligenceError) as foreign_gap:
+        ContextPackage.from_understanding(
+            understanding,
+            horizon="COMPONENT",
+            included_fragment_ids=[ownership_fragment.fragment_id],
+            affordances=[foreign_gap_affordance],
+        )
+    assert foreign_gap.value.code == "affordance_gap_not_visible"
+
+    wrong_dimension_affordance = ContextAffordance.create(
+        gap_ids=[recovery_gap.unknown_id],
+        dimension="dependencies",
+        horizon="COMPONENT",
+        evidence_type="repository-source",
+        evidence_requirements=["dependency-contract"],
+        reason="a dimension mismatch must fail closed",
+    )
+    with pytest.raises(EngineeringIntelligenceError) as wrong_dimension:
+        ContextPackage.from_understanding(
+            understanding,
+            horizon="COMPONENT",
+            included_fragment_ids=[ownership_fragment.fragment_id],
+            affordances=[wrong_dimension_affordance],
+        )
+    assert wrong_dimension.value.code == "affordance_dimension_mismatch"
+
+    with pytest.raises(EngineeringIntelligenceError) as foreign_selection:
+        ContextRequest.create(
+            precise_package,
+            gap_ids=[recovery_gap.unknown_id],
+            selected_affordance_ids=[_digest("foreign-affordance")],
+            horizon="COMPONENT",
+            requested_dimensions=["recovery"],
+            requested_evidence_requirements=["live-binding-authority"],
+            requested_evidence=["exact committed recovery evidence"],
+            question="Which accepted source evidence establishes recovery?",
+            reason="foreign affordance must not broaden the request",
+        )
+    assert foreign_selection.value.code == "affordance_not_in_source_package"
+
+    with pytest.raises(EngineeringIntelligenceError) as wrong_gap:
+        ContextRequest.create(
+            precise_package,
+            gap_ids=[recovery_gap.unknown_id],
+            selected_affordance_ids=[unrelated_affordance.affordance_id],
+            horizon="COMPONENT",
+            requested_dimensions=["dependencies"],
+            requested_evidence_requirements=["dependency-contract"],
+            requested_evidence=["dependency evidence"],
+            question="Which dependency evidence is relevant?",
+            reason="an unrelated affordance cannot repair recovery",
+        )
+    assert wrong_gap.value.code == "affordance_gap_mismatch"
+
+    with pytest.raises(EngineeringIntelligenceError) as not_afforded:
+        ContextRequest.create(
+            precise_package,
+            gap_ids=[recovery_gap.unknown_id],
+            selected_affordance_ids=[recovery_affordance.affordance_id],
+            horizon="COMPONENT",
+            requested_dimensions=["recovery"],
+            requested_evidence_requirements=["serialization-contract"],
+            requested_evidence=["serialization evidence"],
+            question="Which serialization evidence is relevant?",
+            reason="unrepresented evidence must not be silently accepted",
+        )
+    assert not_afforded.value.code == "requested_evidence_not_afforded"
+
+    with pytest.raises(EngineeringIntelligenceError) as duplicate_affordance:
+        ContextRequest.create(
+            precise_package,
+            gap_ids=[recovery_gap.unknown_id],
+            selected_affordance_ids=[recovery_affordance.affordance_id, recovery_affordance.affordance_id],
+            horizon="COMPONENT",
+            requested_dimensions=["recovery"],
+            requested_evidence_requirements=["live-binding-authority"],
+            requested_evidence=["exact committed recovery evidence"],
+            question="Which accepted source evidence establishes recovery?",
+            reason="duplicate selection must fail closed",
+        )
+    assert duplicate_affordance.value.code == "duplicate_m2c_value"
+
+    with pytest.raises(EngineeringIntelligenceError) as duplicate_requirement:
+        ContextRequest.create(
+            precise_package,
+            gap_ids=[recovery_gap.unknown_id],
+            selected_affordance_ids=[recovery_affordance.affordance_id],
+            horizon="COMPONENT",
+            requested_dimensions=["recovery"],
+            requested_evidence_requirements=["live-binding-authority", "live-binding-authority"],
+            requested_evidence=["exact committed recovery evidence"],
+            question="Which accepted source evidence establishes recovery?",
+            reason="duplicate evidence selection must fail closed",
+        )
+    assert duplicate_requirement.value.code == "duplicate_m2c_value"
+
+    with pytest.raises(EngineeringIntelligenceError) as stale_package:
+        request.validate_source_package(package)
+    assert stale_package.value.code == "stale_request_basis"
+    foreign_root = tmp_path / "foreign-repo"
+    foreign_root.mkdir()
+    _foreign_repo, _foreign_resource, foreign_view, foreign_intent = _fixture(foreign_root)
+    foreign_gap = Unknown.create(foreign_view, subject="recovery", dimension="recovery", reason="foreign basis")
+    foreign_understanding = RepositoryUnderstandingView.create(
+        foreign_intent,
+        foreign_view,
+        requested_dimensions=["recovery"],
+        unknowns=[foreign_gap],
+    )
+    foreign_package = ContextPackage.from_understanding(foreign_understanding, horizon="COMPONENT")
+    with pytest.raises(EngineeringIntelligenceError) as stale:
+        request.validate_source_package(foreign_package)
+    assert stale.value.code == "stale_request_basis"
+
+    legacy_affordance = recovery_affordance.as_dict()
+    for field in ("gap_ids", "evidence_requirements", "contract_version"):
+        legacy_affordance.pop(field)
+    with pytest.raises(EngineeringIntelligenceError) as legacy_affordance_error:
+        ContextAffordance.from_mapping(legacy_affordance)
+    assert legacy_affordance_error.value.code == "malformed_m2c_record"
+
+    legacy_package = precise_package.as_dict()
+    legacy_package.pop("contract_version")
+    with pytest.raises(EngineeringIntelligenceError) as legacy_package_error:
+        ContextPackage.from_mapping(legacy_package)
+    assert legacy_package_error.value.code == "malformed_m2c_record"
+
+    legacy_request = request.as_dict()
+    for field in ("selected_affordance_ids", "requested_evidence_requirements", "contract_version"):
+        legacy_request.pop(field)
+    with pytest.raises(EngineeringIntelligenceError) as legacy_request_error:
+        ContextRequest.from_mapping(legacy_request)
+    assert legacy_request_error.value.code == "malformed_m2c_record"
     bindings.close()
 
 
@@ -612,3 +835,7 @@ def test_semantic_record_roundtrip_and_import_side_effect_contract(tmp_path: Pat
     raw = request.to_json_bytes()
     assert reconstruct_semantic_record(raw) == request
     assert raw == request.to_json_bytes()
+    content_store = ImmutableContentStore(tmp_path / "request-transport-runtime")
+    with DurableBindingStore(tmp_path / "request-transport-runtime", content_store=content_store) as bindings:
+        _fragment, transported = transport_semantic_record(request, view, content_store, bindings)
+    assert transported == request

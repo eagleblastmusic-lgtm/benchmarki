@@ -4,19 +4,19 @@
   "title": "BDB vNext ContextRequest v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "request_id", "intent_basis", "repo_view", "source_package_id", "gap_ids", "horizon", "requested_dimensions", "requested_evidence", "question", "counterexample", "reason", "producer_id", "producer_version"],
+  "required": ["schema", "request_id", "intent_basis", "repo_view", "source_package_id", "gap_ids", "selected_affordance_ids", "horizon", "requested_dimensions", "requested_evidence_requirements", "requested_evidence", "question", "counterexample", "reason", "producer_id", "producer_version", "contract_version"],
   "properties": {
     "schema": { "const": "bdb-vnext-context-request-v1" }, "request_id": { "$ref": "#/$defs/sha256" },
     "intent_basis": { "$ref": "#/$defs/intent" }, "repo_view": { "$ref": "#/$defs/repoView" },
-    "source_package_id": { "$ref": "#/$defs/sha256" }, "gap_ids": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true },
-    "horizon": { "enum": ["LOCAL", "COMPONENT", "REPOSITORY"] }, "requested_dimensions": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/identifier" }, "uniqueItems": true },
+    "source_package_id": { "$ref": "#/$defs/sha256" }, "gap_ids": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true }, "selected_affordance_ids": { "$ref": "#/$defs/digests" },
+    "horizon": { "enum": ["LOCAL", "COMPONENT", "REPOSITORY"] }, "requested_dimensions": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/identifier" }, "uniqueItems": true }, "requested_evidence_requirements": { "$ref": "#/$defs/identifiers" },
     "requested_evidence": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/text" }, "uniqueItems": true },
     "question": { "$ref": "#/$defs/text" }, "counterexample": { "type": ["string", "null"], "maxLength": 4096 }, "reason": { "$ref": "#/$defs/text" },
-    "producer_id": { "$ref": "#/$defs/identifier" }, "producer_version": { "$ref": "#/$defs/identifier" }
+    "producer_id": { "$ref": "#/$defs/identifier" }, "producer_version": { "$ref": "#/$defs/identifier" }, "contract_version": { "const": "m2c-context-request-v2" }
   },
   "$defs": {
     "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }, "sha40": { "type": "string", "pattern": "^[0-9a-f]{40}$" }, "sha256Oid": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-    "identifier": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/+:-]{0,127}$" }, "text": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "identifier": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/+:-]{0,127}$" }, "identifiers": { "type": "array", "items": { "$ref": "#/$defs/identifier" }, "uniqueItems": true }, "digests": { "type": "array", "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true }, "text": { "type": "string", "minLength": 1, "maxLength": 4096 },
     "intent": { "type": "object", "additionalProperties": false, "required": ["task_id", "intent_revision", "intent_digest"], "properties": { "task_id": { "$ref": "#/$defs/text" }, "intent_revision": { "$ref": "#/$defs/identifier" }, "intent_digest": { "$ref": "#/$defs/sha256" } } },
     "repoView": { "type": "object", "additionalProperties": false, "required": ["repository_id", "repository_identity_digest", "object_format", "commit_oid", "tree_oid", "view_id"], "properties": { "repository_id": { "$ref": "#/$defs/text" }, "repository_identity_digest": { "$ref": "#/$defs/sha256" }, "object_format": { "enum": ["sha1", "sha256"] }, "commit_oid": { "oneOf": [{ "$ref": "#/$defs/sha40" }, { "$ref": "#/$defs/sha256Oid" }] }, "tree_oid": { "oneOf": [{ "$ref": "#/$defs/sha40" }, { "$ref": "#/$defs/sha256Oid" }] }, "view_id": { "$ref": "#/$defs/sha256" } } }
   }

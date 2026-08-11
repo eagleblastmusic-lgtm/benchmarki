@@ -16,8 +16,10 @@ typed content/transport without creating a new mutable authority.
   and `BLOCKED` are mechanically derived; no token count or quality score is
   authoritative.
 - `ContextRequest` — immutable request for a visible gap, bound to the exact
-  intent, RepoView and source package. It is not a Task, WorkItem, effect,
-  retry, capability grant or lifecycle record.
+  intent, RepoView and source package. It carries the selected package
+  affordance IDs and semantic evidence requirements for the requested gaps.
+  It is not a Task, WorkItem, effect, retry, capability grant or lifecycle
+  record.
 - `ContextResolution` — immutable linkage from request and prior package to a
   resulting package, added accepted fragments, resolved gaps and remaining
   gaps. Denial/unavailability keeps the gap visible.
@@ -28,6 +30,24 @@ typed content/transport without creating a new mutable authority.
 `IntentBasis.task_id` is opaque caller input. M2c consumes
 `task_id`/`intent_revision`/`intent_digest` and never allocates Task IDs,
 creates Task tables or owns lifecycle/admission.
+
+## Gap-to-evidence guidance
+
+`ContextAffordance` is selection guidance, not authority. A gap-bound
+affordance names the visible gap IDs, its semantic dimension and horizon, and
+the declared evidence requirements that can be requested for that gap. A
+`ContextRequest` may select only affordances from its exact source package;
+selected gaps, dimensions, horizons and requested evidence requirements are
+checked fail-closed. Repository paths may be supplied by a provider/catalog
+when needed, but the model-facing contract does not require transport or
+fragment bookkeeping.
+
+The `contract_version` fields on affordances, packages and requests make this
+precision contract explicit. Records without the current contract fields are
+not reinterpreted as the new semantics. An affordance or request never closes
+a gap: a visible gap remains visible until a `ContextResolution` is backed by
+accepted M2b source evidence and the exact RepoView grounding checks succeed.
+Unrelated gaps remain in the resulting package.
 
 ## Authority and epistemics
 
@@ -74,6 +94,11 @@ an exact RepoView-bound `TypedContextFragment`, and a durable accepted binding.
 `transport_semantic_record()` exercises Browser encode → Native decode with the
 binding store and reconstructs the exact record. Semantic records contain no
 protocol/chunk bookkeeping.
+
+Requested semantic evidence is distinct from transport bookkeeping. Parsing a
+serialized affordance, package or request does not establish live source
+authority; exact `CommittedRepoView` bytes and accepted M2b bindings remain
+required before FACT claims or coverage repair can be asserted.
 
 No daemon, database, writer, scheduler, API requirement, Browser UI,
 production activation or Control Center authority is introduced. Runtime,

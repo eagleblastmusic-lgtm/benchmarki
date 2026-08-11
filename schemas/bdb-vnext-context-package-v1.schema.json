@@ -4,7 +4,7 @@
   "title": "BDB vNext ContextPackage v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "package_id", "intent_basis", "repo_view", "understanding_id", "horizon", "requested_dimensions", "covered_dimensions", "must_see_categories", "covered_must_see", "coverage_bindings", "unknowns", "omissions", "contradictions", "included_fragment_ids", "affordances", "architecture_constraints_included", "invalidation_predicates", "coverage_status", "policy_version", "producer_id", "producer_version", "fact_claim_ids", "inference_claim_ids", "assumption_claim_ids", "hypothesis_claim_ids"],
+  "required": ["schema", "package_id", "intent_basis", "repo_view", "understanding_id", "horizon", "requested_dimensions", "covered_dimensions", "must_see_categories", "covered_must_see", "coverage_bindings", "unknowns", "omissions", "contradictions", "included_fragment_ids", "affordances", "architecture_constraints_included", "invalidation_predicates", "coverage_status", "policy_version", "producer_id", "producer_version", "fact_claim_ids", "inference_claim_ids", "assumption_claim_ids", "hypothesis_claim_ids", "contract_version"],
   "properties": {
     "schema": { "const": "bdb-vnext-context-package-v1" }, "package_id": { "$ref": "#/$defs/sha256" },
     "intent_basis": { "$ref": "#/$defs/intent" }, "repo_view": { "$ref": "#/$defs/repoView" },
@@ -20,7 +20,7 @@
     "architecture_constraints_included": { "$ref": "#/$defs/identifiers" },
     "invalidation_predicates": { "$ref": "#/$defs/nonEmptyIdentifiers" },
     "coverage_status": { "enum": ["COMPLETE", "PARTIAL", "BLOCKED"] },
-    "policy_version": { "$ref": "#/$defs/identifier" }, "producer_id": { "$ref": "#/$defs/identifier" }, "producer_version": { "$ref": "#/$defs/identifier" },
+    "policy_version": { "$ref": "#/$defs/identifier" }, "producer_id": { "$ref": "#/$defs/identifier" }, "producer_version": { "$ref": "#/$defs/identifier" }, "contract_version": { "const": "m2c-context-package-v2" },
     "fact_claim_ids": { "$ref": "#/$defs/digests" }, "inference_claim_ids": { "$ref": "#/$defs/digests" }, "assumption_claim_ids": { "$ref": "#/$defs/digests" }, "hypothesis_claim_ids": { "$ref": "#/$defs/digests" }
   },
   "$defs": {
@@ -69,9 +69,9 @@
       }
     },
     "affordance": {
-      "type": "object", "additionalProperties": false, "required": ["schema", "affordance_id", "dimension", "horizon", "evidence_type", "reason", "producer_id", "producer_version"],
+      "type": "object", "additionalProperties": false, "required": ["schema", "affordance_id", "dimension", "horizon", "evidence_type", "reason", "gap_ids", "evidence_requirements", "contract_version", "producer_id", "producer_version"],
       "properties": {
-        "schema": { "const": "bdb-vnext-context-affordance-v1" }, "affordance_id": { "$ref": "#/$defs/sha256" }, "dimension": { "$ref": "#/$defs/identifier" }, "horizon": { "enum": ["LOCAL", "COMPONENT", "REPOSITORY"] }, "evidence_type": { "$ref": "#/$defs/identifier" }, "reason": { "$ref": "#/$defs/text" }, "producer_id": { "$ref": "#/$defs/identifier" }, "producer_version": { "$ref": "#/$defs/identifier" }
+        "schema": { "const": "bdb-vnext-context-affordance-v1" }, "affordance_id": { "$ref": "#/$defs/sha256" }, "dimension": { "$ref": "#/$defs/identifier" }, "horizon": { "enum": ["LOCAL", "COMPONENT", "REPOSITORY"] }, "evidence_type": { "$ref": "#/$defs/identifier" }, "reason": { "$ref": "#/$defs/text" }, "gap_ids": { "$ref": "#/$defs/digests" }, "evidence_requirements": { "$ref": "#/$defs/identifiers" }, "contract_version": { "const": "m2c-affordance-v2" }, "producer_id": { "$ref": "#/$defs/identifier" }, "producer_version": { "$ref": "#/$defs/identifier" }
       }
     }
   }
