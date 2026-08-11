@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bartosz.dev/schemas/bdb-vnext-m3b-browser-admission-v1.schema.json",
+  "title": "BDB vNext M3b Browser admission envelope and capability",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "protocol_generation", "submission_key", "request_digest", "request"],
+  "properties": {
+    "schema": {"const": "bdb-vnext-m3b-browser-admission-v1"},
+    "protocol_generation": {"const": "bdb-vnext-protocol-v1"},
+    "submission_key": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,191}$"},
+    "request_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "request": {"type": "object", "required": ["schema", "canonicalization_version", "submission_key", "intent_revision", "intent", "conversation_binding", "consumer_binding", "request_digest"]}
+  }
+}
