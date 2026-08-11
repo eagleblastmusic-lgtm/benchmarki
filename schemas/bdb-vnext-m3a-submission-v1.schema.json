@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bartosz.dev/schemas/bdb-vnext-m3a-submission-v1.schema.json",
+  "title": "BDB vNext M3a shadow submission and admission records",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "submission_key", "request_digest", "status", "disposition", "task_id", "intent_revision_id", "outcome", "tombstone_reason"],
+  "properties": {
+    "schema": {"const": "bdb-vnext-m3a-submission-v1"},
+    "submission_key": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,191}$"},
+    "request_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "status": {"enum": ["ACCEPTED", "TOMBSTONED"]},
+    "disposition": {"enum": ["ACCEPTED", "REJECTED"]},
+    "task_id": {"type": ["string", "null"]},
+    "intent_revision_id": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+    "outcome": {"enum": ["published", "replay"]},
+    "tombstone_reason": {"type": ["string", "null"], "maxLength": 256}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "ACCEPTED"}}},
+      "then": {
+        "properties": {
+          "disposition": {"const": "ACCEPTED"},
+          "task_id": {"type": "string"},
+          "intent_revision_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "tombstone_reason": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "TOMBSTONED"}}},
+      "then": {
+        "properties": {
+          "disposition": {"const": "REJECTED"},
+          "task_id": {"type": "null"},
+          "intent_revision_id": {"type": "null"},
+          "tombstone_reason": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  ]
+}
