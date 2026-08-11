@@ -1,0 +1,27 @@
+{
+  "schema": "bdb-vnext-m2d-rubric-v1",
+  "rubric_version": "m2d-rubric-v1",
+  "vectors": [
+    { "vector_id": "semantic_correctness", "description": "Answer is materially correct for the frozen task." },
+    { "vector_id": "repository_understanding_must_see_coverage", "description": "Required source subjects and hard constraints are surfaced." },
+    { "vector_id": "root_cause_or_ownership_accuracy", "description": "Root cause, ownership, or boundary is exact where applicable." },
+    { "vector_id": "engineering_decision_quality_tradeoffs", "description": "Alternatives, trade-offs, and chosen consequences are visible where applicable." },
+    { "vector_id": "explicit_unknowns_uncertainty", "description": "Material unknowns and uncertainty remain explicit." },
+    { "vector_id": "constraint_violations", "description": "Frozen architecture and safety constraints are preserved." },
+    { "vector_id": "validation_relevance_missed_risks", "description": "Proposed checks are relevant and material risks are not silently missed." },
+    { "vector_id": "maintainability_simplicity", "description": "The proposed engineering path is minimal and maintainable." },
+    { "vector_id": "rework_required", "description": "Avoidable rework caused by omitted context is recorded." },
+    { "vector_id": "browser_continuity", "description": "The answer remains usable in a fresh normal ChatGPT Browser conversation." },
+    { "vector_id": "protocol_burden_visible_to_gpt", "description": "Model-facing reasoning does not require fragment or transport bookkeeping." },
+    { "vector_id": "operator_explainability", "description": "The result is explainable to an operator where relevant." },
+    { "vector_id": "latency_cost_observation", "description": "Latency/cost observation only; never a primary quality score." }
+  ],
+  "judgments": ["BETTER", "EQUIVALENT", "WORSE", "INCONCLUSIVE", "N/A"],
+  "raw_count_examples": [
+    "must-see items correctly surfaced: 4/5",
+    "missed hard constraint IDs: []",
+    "unsupported factual assertions: 0",
+    "explicit relevant unknowns: 2",
+    "rework steps caused by omitted context: 1"
+  ]
+}

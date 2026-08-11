@@ -1,0 +1,20 @@
+{
+  "schema": "bdb-vnext-m2d-evaluator-sheet-v1",
+  "scenario_id": "S4",
+  "scenario_digest": "sha256:f52ab9ca57dde07dd7d938ce58f0b118624a8e0adebf2cd15c98b18d1aeadeae",
+  "arm_x_run_digest": "",
+  "arm_y_run_digest": "",
+  "vector_judgments": {},
+  "hard_failures": [],
+  "context_request": {
+    "required": false,
+    "outcome": "NOT_APPLICABLE",
+    "gap_visible": false,
+    "requested_exact_evidence": false,
+    "unrelated_gaps_preserved": false,
+    "answer_improved_or_narrowed": false,
+    "protocol_bookkeeping_required": false
+  },
+  "material_improvement": false,
+  "reviewer_notes": ""
+}

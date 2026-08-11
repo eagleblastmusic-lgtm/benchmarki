@@ -1,0 +1,4869 @@
+# BDB vNext M2d benchmark context
+
+BENCHMARK_ONLY
+M2 context package presentation
+ARM Y — typed read-only engineering context
+
+Task: Design a read-only ContextPackage diagnostic view for a component feature. It should report requested versus covered dimensions, visible gaps, claim classifications, included accepted fragments, and the exact basis checks needed to trust the report. Identify cross-file contracts and focused tests. Do not add a writer, lifecycle state, runtime activation, or production telemetry.
+Phase: INITIAL
+Repository: bdb-vnext-benchmark-subject
+Committed commit: 4b724eda100345969eb236f877dd46f0bb91c0cb
+Committed tree: 90ddd52fd997cb67a13767145fd387f7e0ad7141
+RepoView: sha256:625e76129333136da65e642c91b52693a9e2f4bc8242ff89c3143e2b9e86518d
+Source authority: exact Git object database through RepoSourceEvidence and accepted M2b bindings.
+
+## ContextPackage semantic projection
+coverage_status: PARTIAL
+requested_dimensions: source-context
+covered_dimensions: source-context
+visible_unknowns: 0
+visible_omissions: 1
+claim_classes: FACT=5, INFERENCE=0, ASSUMPTION=0, HYPOTHESIS=0
+included source subjects: 5
+
+### Visible unknowns
+- none
+
+### Visible omissions
+- task-boundary: This read-only benchmark context does not authorize implementation or outcome claims.
+
+### Source-backed claim classes
+- FACT / EXACT_SOURCE: committed source evidence for bdb_vnext/engineering_intelligence.py
+- FACT / EXACT_SOURCE: committed source evidence for bdb_vnext/content_store.py
+- FACT / EXACT_SOURCE: committed source evidence for bdb_vnext/context_transport.py
+- FACT / EXACT_SOURCE: committed source evidence for tests/test_vnext_engineering_intelligence.py
+- FACT / EXACT_SOURCE: committed source evidence for docs/m2c-vnext-engineering-intelligence.md
+
+### Context affordances
+- source-context (COMPONENT): Request exact committed source context if a task gap remains.
+
+### Source-vs-inference boundary
+FACT claims above are limited to exact committed source evidence. Any engineering conclusion beyond those records remains an inference or an explicit unknown.
+
+## Exact committed source subjects
+
+## SOURCE bdb_vnext/engineering_intelligence.py
+object: b1ab8465d8e944cfac7719a5ade321b041c299c7
+size_bytes: 149421
+raw_sha256: sha256:5bbe00eb63832185f15ccd0f295f3ed1f1ac71e2ce369221237503a4d10cbc91
+```text
+"""Build-only M2c engineering-intelligence semantic contracts.
+
+M2c is deliberately a set of immutable, rebuildable records.  It does not
+own Task identity, lifecycle state, a writer, a daemon, or repository bytes.
+Exact committed RepoView and accepted M2b typed fragments remain the source
+and transport authorities respectively.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, Literal, NoReturn
+
+from bdb_shared.evidence import canonical_json_bytes, semantic_digest
+from bdb_vnext.content_store import (
+    AcceptedBinding,
+    ContentRef,
+    ContentStoreError,
+    DurableBindingStore,
+    ImmutableContentStore,
+    RepoViewBinding,
+    TypedContextFragment,
+    make_content_ref,
+)
+from bdb_vnext.context_transport import BrowserTransportProvider, NativeTransportProvider
+from bdb_vnext.repo_view import CommittedRepoView, RepoViewError
+
+
+UNDERSTANDING_SCHEMA = "bdb-vnext-repository-understanding-v1"
+CONTEXT_PACKAGE_SCHEMA = "bdb-vnext-context-package-v1"
+CONTEXT_REQUEST_SCHEMA = "bdb-vnext-context-request-v1"
+CONTEXT_RESOLUTION_SCHEMA = "bdb-vnext-context-resolution-v1"
+ENGINEERING_DECISION_SCHEMA = "bdb-vnext-engineering-decision-v1"
+CLAIM_SCHEMA = "bdb-vnext-understanding-claim-v1"
+CONTRADICTION_SCHEMA = "bdb-vnext-understanding-contradiction-v1"
+UNKNOWN_SCHEMA = "bdb-vnext-understanding-unknown-v1"
+OMISSION_SCHEMA = "bdb-vnext-context-omission-v1"
+AFFORDANCE_SCHEMA = "bdb-vnext-context-affordance-v1"
+DECISION_OPTION_SCHEMA = "bdb-vnext-decision-option-v1"
+SOURCE_EVIDENCE_SCHEMA = "bdb-vnext-source-evidence-ref-v1"
+REPO_SOURCE_EVIDENCE_SCHEMA = "bdb-vnext-repo-source-evidence-v1"
+COVERAGE_BINDING_SCHEMA = "bdb-vnext-coverage-binding-v1"
+GAP_RESOLUTION_EVIDENCE_SCHEMA = "bdb-vnext-gap-resolution-evidence-v1"
+M2C_PRODUCER_ID = "bdb-vnext-engineering-intelligence"
+M2C_PRODUCER_VERSION = "m2c-v1"
+M2C_POLICY_VERSION = "m2c-context-policy-v1"
+SEMANTIC_RECORD_CONTENT_TYPE = "application/vnd.bdb-vnext.semantic+json"
+HORIZONS = frozenset({"LOCAL", "COMPONENT", "REPOSITORY"})
+CLAIM_KINDS = frozenset({"FACT", "INFERENCE", "ASSUMPTION", "HYPOTHESIS"})
+CLAIM_AUTHORITIES = frozenset({"EXACT_SOURCE", "DERIVED"})
+RESOLUTION_OUTCOMES = frozenset({"RESOLVED", "DENIED", "UNAVAILABLE"})
+_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+:-]{0,127}$")
+_MAX_TEXT = 4096
+
+
+class EngineeringIntelligenceError(ValueError):
+    """Typed fail-closed error for M2c semantic contracts."""
+
+    def __init__(self, code: str, message: str, *, details: Mapping[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = dict(details or {})
+
+
+def _fail(code: str, message: str, *, details: Mapping[str, Any] | None = None) -> NoReturn:
+    raise EngineeringIntelligenceError(code, message, details=details)
+
+
+def _text(value: object, *, field: str, max_length: int = _MAX_TEXT) -> str:
+    if not isinstance(value, str) or not value or len(value) > max_length:
+        _fail("malformed_m2c_record", f"{field} must be a bounded non-empty string")
+    return value
+
+
+def _identifier(value: object, *, field: str) -> str:
+    if not isinstance(value, str) or _IDENTIFIER.fullmatch(value) is None:
+        _fail("malformed_m2c_record", f"{field} must be a bounded identifier")
+    return value
+
+
+def _digest(value: object, *, field: str) -> str:
+    if not isinstance(value, str) or _DIGEST.fullmatch(value) is None:
+        _fail("malformed_m2c_record", f"{field} must be a lowercase sha256 digest")
+    return value
+
+
+def _sequence(value: object, *, field: str, allow_empty: bool = True) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        _fail("malformed_m2c_record", f"{field} must be an array")
+    result = tuple(_text(item, field=f"{field}[]") for item in value)
+    if not allow_empty and not result:
+        _fail("malformed_m2c_record", f"{field} must not be empty")
+    if len(set(result)) != len(result):
+        _fail("duplicate_m2c_value", f"{field} must contain unique values")
+    return result
+
+
+def _identifier_sequence(value: object, *, field: str, allow_empty: bool = True) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        _fail("malformed_m2c_record", f"{field} must be an array")
+    result = tuple(_identifier(item, field=f"{field}[]") for item in value)
+    if not allow_empty and not result:
+        _fail("malformed_m2c_record", f"{field} must not be empty")
+    if len(set(result)) != len(result):
+        _fail("duplicate_m2c_value", f"{field} must contain unique values")
+    return result
+
+
+def _mapping(value: object, *, field: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        _fail("malformed_m2c_record", f"{field} must be an object")
+    return value
+
+
+def _exact_fields(value: Mapping[str, Any], required: set[str], *, field: str) -> None:
+    if set(value) != required:
+        _fail("malformed_m2c_record", f"{field} has an unexpected field set")
+
+
+def _record_digest(identity: Mapping[str, Any]) -> str:
+    return semantic_digest(identity)
+
+
+def _parse_repo_binding(value: object, *, field: str = "repo_view") -> RepoViewBinding:
+    if isinstance(value, RepoViewBinding):
+        return value
+    try:
+        return RepoViewBinding.from_mapping(_mapping(value, field=field))
+    except ValueError as exc:
+        if isinstance(exc, EngineeringIntelligenceError):
+            raise
+        _fail("malformed_repo_view_basis", f"{field} is not an exact RepoView binding")
+
+
+def _parse_intent(value: object) -> "IntentBasis":
+    if isinstance(value, IntentBasis):
+        return value
+    return IntentBasis.from_mapping(_mapping(value, field="intent_basis"))
+
+
+def _same_repo(left: RepoViewBinding, right: RepoViewBinding) -> bool:
+    return left == right
+
+
+def _binding_for_repo(repo_view: CommittedRepoView | RepoViewBinding) -> RepoViewBinding:
+    binding = RepoViewBinding.from_view(repo_view) if isinstance(repo_view, CommittedRepoView) else repo_view
+    if not isinstance(binding, RepoViewBinding):
+        _fail("malformed_repo_view_basis", "an exact RepoView binding is required")
+    return binding
+
+
+def _repository_source_path(value: object) -> str:
+    path = _text(value, field="source_evidence.source_path", max_length=4096)
+    if (
+        path.startswith("/")
+        or path.endswith("/")
+        or "\\" in path
+        or "\x00" in path
+        or any(ord(character) < 32 for character in path)
+        or re.match(r"^[A-Za-z]:", path) is not None
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+    ):
+        _fail("unsafe_source_path", "repository source paths must be relative POSIX paths without traversal")
+    return path
+
+
+def _repository_source_object_id(value: object, repo_view: RepoViewBinding) -> str:
+    if not isinstance(value, str):
+        _fail("malformed_source_evidence", "source_object_id must be a Git object ID")
+    expected_length = 40 if repo_view.object_format == "sha1" else 64
+    if len(value) != expected_length or any(character not in "0123456789abcdef" for character in value):
+        _fail("malformed_source_evidence", "source_object_id does not match the exact RepoView object format")
+    return value
+
+
+def _accepted_fragment(
+    evidence: "SourceEvidenceRef",
+    binding_store: DurableBindingStore,
+    repo_view: CommittedRepoView | RepoViewBinding,
+) -> TypedContextFragment:
+    if not isinstance(binding_store, DurableBindingStore):
+        _fail("source_evidence_store_required", "source evidence requires the M2b DurableBindingStore")
+    expected_view = repo_view if isinstance(repo_view, CommittedRepoView) else None
+    try:
+        accepted = binding_store.resolve_accepted(evidence.fragment_id, expected_view=expected_view)
+    except ContentStoreError as exc:
+        _fail("source_evidence_unaccepted", "source evidence is not an accepted durable M2b fragment", details={"cause": exc.code})
+    fragment = accepted.fragment
+    if fragment.repo_view != evidence.repo_view or fragment.content_ref != evidence.content_ref:
+        _fail("source_evidence_binding_mismatch", "source evidence does not match the accepted fragment ContentRef/RepoView")
+    if fragment.fragment_type != evidence.fragment_type or fragment.fragment_schema != evidence.fragment_schema:
+        _fail("source_evidence_binding_mismatch", "source evidence does not match the accepted fragment type/schema")
+    if evidence.evidence_id != SourceEvidenceRef.from_fragment(fragment).evidence_id:
+        _fail("source_evidence_integrity_failure", "source evidence identity differs from the accepted fragment")
+    if fragment.repo_view != _binding_for_repo(repo_view):
+        _fail("source_evidence_repo_mismatch", "source evidence is bound to a different exact RepoView")
+    return fragment
+
+
+def _coverage_state(
+    requested_dimensions: Sequence[str],
+    covered_dimensions: Sequence[str],
+    must_see_categories: Sequence[str],
+    covered_must_see: Sequence[str],
+    unknowns: Sequence[object],
+    omissions: Sequence[object],
+    contradictions: Sequence[object],
+    coverage_bindings: Sequence[CoverageBinding] = (),
+) -> Literal["COMPLETE", "PARTIAL", "BLOCKED"]:
+    missing_requested = set(requested_dimensions) - set(covered_dimensions)
+    missing_must_see = set(must_see_categories) - set(covered_must_see)
+    if missing_requested or missing_must_see:
+        return "BLOCKED"
+    if (set(covered_dimensions) or set(covered_must_see)) and not coverage_bindings:
+        return "BLOCKED"
+    if any(getattr(item, "policy_denied", False) for item in omissions):
+        return "BLOCKED"
+    if unknowns or omissions or contradictions:
+        return "PARTIAL"
+    return "COMPLETE"
+
+
+@dataclass(frozen=True)
+class IntentBasis:
+    """Opaque caller-supplied intent identity; M2c never allocates Task IDs."""
+
+    task_id: str
+    intent_revision: str
+    intent_digest: str
+
+    def __post_init__(self) -> None:
+        _text(self.task_id, field="task_id")
+        _identifier(self.intent_revision, field="intent_revision")
+        _digest(self.intent_digest, field="intent_digest")
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "task_id": self.task_id,
+            "intent_revision": self.intent_revision,
+            "intent_digest": self.intent_digest,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "IntentBasis":
+        _exact_fields(value, {"task_id", "intent_revision", "intent_digest"}, field="intent_basis")
+        return cls(value["task_id"], value["intent_revision"], value["intent_digest"])
+
+
+@dataclass(frozen=True)
+class SourceEvidenceRef:
+    """A non-authoritative descriptor for one accepted M2b typed fragment.
+
+    Parsing this descriptor is intentionally pure.  Only ``create_verified``
+    (or ``validate`` against a live DurableBindingStore) establishes that the
+    descriptor still names the exact accepted fragment for the exact RepoView.
+    """
+
+    evidence_id: str
+    repo_view: RepoViewBinding
+    fragment_id: str
+    content_ref: ContentRef
+    fragment_type: str
+    fragment_schema: str
+
+    def __post_init__(self) -> None:
+        _digest(self.evidence_id, field="source_evidence.evidence_id")
+        if not isinstance(self.repo_view, RepoViewBinding):
+            _fail("malformed_source_evidence", "source evidence requires a typed RepoView binding")
+        _digest(self.fragment_id, field="source_evidence.fragment_id")
+        if not isinstance(self.content_ref, ContentRef):
+            _fail("malformed_source_evidence", "source evidence requires a typed ContentRef")
+        _identifier(self.fragment_type, field="source_evidence.fragment_type")
+        _identifier(self.fragment_schema, field="source_evidence.fragment_schema")
+        if self.evidence_id != _record_digest(self._identity_payload()):
+            _fail("source_evidence_integrity_failure", "evidence_id does not match the exact fragment descriptor")
+
+    def _identity_payload(self) -> dict[str, Any]:
+        return {
+            "schema": SOURCE_EVIDENCE_SCHEMA,
+            "repo_view": self.repo_view.as_dict(),
+            "fragment_id": self.fragment_id,
+            "content_ref": self.content_ref.as_dict(),
+            "fragment_type": self.fragment_type,
+            "fragment_schema": self.fragment_schema,
+        }
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"schema": SOURCE_EVIDENCE_SCHEMA, "evidence_id": self.evidence_id, **self._identity_payload()}
+
+    @classmethod
+    def from_fragment(cls, fragment: TypedContextFragment) -> "SourceEvidenceRef":
+        if not isinstance(fragment, TypedContextFragment):
+            _fail("malformed_source_evidence", "source evidence descriptor requires TypedContextFragment")
+        identity = {
+            "schema": SOURCE_EVIDENCE_SCHEMA,
+            "repo_view": fragment.repo_view.as_dict(),
+            "fragment_id": fragment.fragment_id,
+            "content_ref": fragment.content_ref.as_dict(),
+            "fragment_type": fragment.fragment_type,
+            "fragment_schema": fragment.fragment_schema,
+        }
+        result = cls(
+            _record_digest(identity),
+            fragment.repo_view,
+            fragment.fragment_id,
+            fragment.content_ref,
+            fragment.fragment_type,
+            fragment.fragment_schema,
+        )
+        return result
+
+    @classmethod
+    def create_verified(
+        cls,
+        view: CommittedRepoView | RepoViewBinding,
+        fragment: TypedContextFragment,
+        binding_store: DurableBindingStore,
+    ) -> "SourceEvidenceRef":
+        descriptor = cls.from_fragment(fragment)
+        _accepted_fragment(descriptor, binding_store, view)
+        return descriptor
+
+    @classmethod
+    def from_accepted(
+        cls,
+        accepted: AcceptedBinding,
+        *,
+        view: CommittedRepoView | RepoViewBinding,
+        binding_store: DurableBindingStore,
+    ) -> "SourceEvidenceRef":
+        if not isinstance(accepted, AcceptedBinding):
+            _fail("malformed_source_evidence", "from_accepted requires an M2b AcceptedBinding")
+        return cls.create_verified(view, accepted.fragment, binding_store)
+
+    def validate(
+        self,
+        binding_store: DurableBindingStore,
+        view: CommittedRepoView | RepoViewBinding,
+    ) -> TypedContextFragment:
+        return _accepted_fragment(self, binding_store, view)
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "SourceEvidenceRef":
+        _exact_fields(
+            value,
+            {"schema", "evidence_id", "repo_view", "fragment_id", "content_ref", "fragment_type", "fragment_schema"},
+            field="source_evidence",
+        )
+        if value["schema"] != SOURCE_EVIDENCE_SCHEMA:
+            _fail("schema_mismatch", "unsupported source evidence schema")
+        return cls(
+            value["evidence_id"],
+            _parse_repo_binding(value["repo_view"], field="source_evidence.repo_view"),
+            value["fragment_id"],
+            ContentRef.from_mapping(_mapping(value["content_ref"], field="source_evidence.content_ref")),
+            value["fragment_type"],
+            value["fragment_schema"],
+        )
+
+
+@dataclass(frozen=True)
+class RepoSourceEvidence:
+    """Exact committed-repository source evidence, not a generic M2b claim."""
+
+    evidence_id: str
+    repo_view: RepoViewBinding
+    source_path: str
+    source_object_id: str
+    fragment_id: str
+    content_ref: ContentRef
+    fragment_type: str
+    fragment_schema: str
+
+    def __post_init__(self) -> None:
+        _digest(self.evidence_id, field="repo_source_evidence.evidence_id")
+        if not isinstance(self.repo_view, RepoViewBinding):
+            _fail("malformed_source_evidence", "repository source evidence requires a typed RepoView binding")
+        _repository_source_path(self.source_path)
+        _repository_source_object_id(self.source_object_id, self.repo_view)
+        _digest(self.fragment_id, field="repo_source_evidence.fragment_id")
+        if not isinstance(self.content_ref, ContentRef):
+            _fail("malformed_source_evidence", "repository source evidence requires a typed ContentRef")
+        _identifier(self.fragment_type, field="repo_source_evidence.fragment_type")
+        _identifier(self.fragment_schema, field="repo_source_evidence.fragment_schema")
+        if self.evidence_id != _record_digest(self._identity_payload()):
+            _fail("repo_source_evidence_integrity_failure", "evidence_id does not match exact repository-source identity")
+
+    def _identity_payload(self) -> dict[str, Any]:
+        return {
+            "schema": REPO_SOURCE_EVIDENCE_SCHEMA,
+            "repo_view": self.repo_view.as_dict(),
+            "source_path": self.source_path,
+            "source_object_id": self.source_object_id,
+            "fragment_id": self.fragment_id,
+            "content_ref": self.content_ref.as_dict(),
+            "fragment_type": self.fragment_type,
+            "fragment_schema": self.fragment_schema,
+        }
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"schema": REPO_SOURCE_EVIDENCE_SCHEMA, "evidence_id": self.evidence_id, **self._identity_payload()}
+
+    @classmethod
+    def from_fragment(
+        cls,
+        *,
+        view: CommittedRepoView,
+        source_path: str,
+        source_object_id: str,
+        fragment: TypedContextFragment,
+    ) -> "RepoSourceEvidence":
+        if not isinstance(view, CommittedRepoView) or not isinstance(fragment, TypedContextFragment):
+            _fail("malformed_source_evidence", "repository source evidence requires a CommittedRepoView and TypedContextFragment")
+        binding = RepoViewBinding.from_view(view)
+        identity = {
+            "schema": REPO_SOURCE_EVIDENCE_SCHEMA,
+            "repo_view": binding.as_dict(),
+            "source_path": _repository_source_path(source_path),
+            "source_object_id": _repository_source_object_id(source_object_id, binding),
+            "fragment_id": fragment.fragment_id,
+            "content_ref": fragment.content_ref.as_dict(),
+            "fragment_type": fragment.fragment_type,
+            "fragment_schema": fragment.fragment_schema,
+        }
+        if fragment.repo_view != binding:
+            _fail("repository_source_repo_mismatch", "source fragment is bound to a different exact RepoView")
+        return cls(
+            _record_digest(identity),
+            binding,
+            identity["source_path"],
+            identity["source_object_id"],
+            fragment.fragment_id,
+            fragment.content_ref,
+            fragment.fragment_type,
+            fragment.fragment_schema,
+        )
+
+    def validate(
+        self,
+        view: CommittedRepoView,
+        binding_store: DurableBindingStore,
+    ) -> TypedContextFragment:
+        if not isinstance(view, CommittedRepoView):
+            _fail("repository_source_authority_required", "repository source validation requires a CommittedRepoView")
+        if not isinstance(binding_store, DurableBindingStore):
+            _fail("repository_source_binding_failure", "repository source validation requires the live M2b binding store")
+        expected_binding = RepoViewBinding.from_view(view)
+        if self.repo_view != expected_binding:
+            _fail("repository_source_repo_mismatch", "source evidence RepoView differs from the exact committed reader")
+        try:
+            entry = view.query().get_entry(self.source_path)
+            if not entry.is_regular_file:
+                _fail("repository_source_not_found", "repository source path is not a committed regular file")
+            if entry.object_oid != self.source_object_id:
+                _fail("repository_source_mismatch", "source object identity differs from the committed RepoView tree")
+            source_bytes = view.query().read_bytes(self.source_path)
+        except RepoViewError as exc:
+            if exc.code in {"missing_path", "unsupported_path"}:
+                _fail("repository_source_not_found", "source path is absent from the exact committed RepoView", details={"cause": exc.code})
+            _fail("repository_source_mismatch", "exact committed RepoView source read failed", details={"cause": exc.code})
+        try:
+            accepted = binding_store.resolve_accepted(self.fragment_id, expected_view=view)
+        except Exception as exc:
+            code = getattr(exc, "code", "binding_failure")
+            _fail("repository_source_binding_failure", "source fragment is not an accepted exact M2b binding", details={"cause": code})
+        fragment = accepted.fragment
+        if (
+            fragment.repo_view != self.repo_view
+            or fragment.content_ref != self.content_ref
+            or fragment.fragment_type != self.fragment_type
+            or fragment.fragment_schema != self.fragment_schema
+        ):
+            _fail("repository_source_binding_failure", "accepted M2b fragment differs from repository-source evidence")
+        try:
+            resolved_bytes = accepted.raw
+            expected_ref = make_content_ref(self.content_ref.type, self.content_ref.schema, source_bytes)
+        except Exception as exc:
+            _fail("repository_source_mismatch", "source bytes could not be bound to ContentRef", details={"cause": type(exc).__name__})
+        if expected_ref != self.content_ref or resolved_bytes != source_bytes:
+            _fail("repository_source_mismatch", "committed source bytes differ from the accepted immutable M2b object")
+        if self.evidence_id != _record_digest(self._identity_payload()):
+            _fail("repo_source_evidence_integrity_failure", "repository-source evidence identity is not deterministic")
+        return fragment
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "RepoSourceEvidence":
+        _exact_fields(
+            value,
+            {"schema", "evidence_id", "repo_view", "source_path", "source_object_id", "fragment_id", "content_ref", "fragment_type", "fragment_schema"},
+            field="repo_source_evidence",
+        )
+        if value["schema"] != REPO_SOURCE_EVIDENCE_SCHEMA:
+            _fail("schema_mismatch", "unsupported repository-source evidence schema")
+        binding = _parse_repo_binding(value["repo_view"], field="repo_source_evidence.repo_view")
+        return cls(
+            value["evidence_id"],
+            binding,
+            value["source_path"],
+            value["source_object_id"],
+            value["fragment_id"],
+            ContentRef.from_mapping(_mapping(value["content_ref"], field="repo_source_evidence.content_ref")),
+            value["fragment_type"],
+            value["fragment_schema"],
+        )
+
+
+def publish_repo_source_evidence(
+    view: CommittedRepoView,
+    source_path: str,
+    content_store: ImmutableContentStore,
+    binding_store: DurableBindingStore,
+    *,
+    fragment_type: str,
+    fragment_schema: str,
+) -> RepoSourceEvidence:
+    """Read committed bytes through M2a, then publish/accept one M2c source edge."""
+
+    if not isinstance(view, CommittedRepoView):
+        _fail("repository_source_authority_required", "source publication requires a CommittedRepoView")
+    if not isinstance(content_store, ImmutableContentStore) or not isinstance(binding_store, DurableBindingStore):
+        _fail("repository_source_store_required", "source publication requires the M2b content and binding stores")
+    normalized_path = _repository_source_path(source_path)
+    query = view.query()
+    try:
+        entry = query.get_entry(normalized_path)
+    except RepoViewError as exc:
+        if exc.code in {"missing_path", "unsupported_path"}:
+            _fail("repository_source_not_found", "source path is absent from the exact committed RepoView", details={"cause": exc.code})
+        _fail("repository_source_mismatch", "exact committed RepoView source lookup failed", details={"cause": exc.code})
+    if not entry.is_regular_file:
+        _fail("repository_source_not_found", "only committed regular files may become source evidence")
+    try:
+        source_bytes = query.read_bytes(normalized_path)
+    except RepoViewError as exc:
+        if exc.code in {"missing_path", "unsupported_path"}:
+            _fail("repository_source_not_found", "source path is absent from the exact committed RepoView", details={"cause": exc.code})
+        _fail("repository_source_mismatch", "exact committed RepoView source read failed", details={"cause": exc.code})
+    content_ref = make_content_ref(fragment_type, fragment_schema, source_bytes)
+    content_store.publish(content_ref, source_bytes)
+    fragment = TypedContextFragment.create(
+        view,
+        content_ref,
+        fragment_type=fragment_type,
+        fragment_schema=fragment_schema,
+        payload_size_bytes=len(source_bytes),
+    )
+    binding_store.accept(fragment, view=view)
+    evidence = RepoSourceEvidence.from_fragment(
+        view=view,
+        source_path=normalized_path,
+        source_object_id=entry.object_oid,
+        fragment=fragment,
+    )
+    evidence.validate(view, binding_store)
+    return evidence
+
+
+@dataclass(frozen=True)
+class CoverageBinding:
+    """Deterministic proof that one covered target has explicit support."""
+
+    coverage_binding_id: str
+    repo_view: RepoViewBinding
+    target_kind: str
+    target: str
+    supporting_claim_ids: tuple[str, ...]
+    supporting_fragment_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _digest(self.coverage_binding_id, field="coverage_binding.coverage_binding_id")
+        if not isinstance(self.repo_view, RepoViewBinding):
+            _fail("malformed_coverage_binding", "coverage binding requires a typed RepoView")
+        if self.target_kind not in {"DIMENSION", "MUST_SEE"}:
+            _fail("coverage_target_invalid", "coverage binding target_kind must be DIMENSION or MUST_SEE")
+        _identifier(self.target, field="coverage_binding.target")
+        _digest_sequence(self.supporting_claim_ids, field="coverage_binding.supporting_claim_ids")
+        _digest_sequence(self.supporting_fragment_ids, field="coverage_binding.supporting_fragment_ids")
+        if not self.supporting_claim_ids and not self.supporting_fragment_ids:
+            _fail("coverage_grounding_required", "every covered target requires explicit claim or fragment support")
+        if self.coverage_binding_id != _record_digest(self._identity_payload()):
+            _fail("coverage_binding_integrity_failure", "coverage_binding_id does not match exact binding identity")
+
+    def _identity_payload(self) -> dict[str, Any]:
+        return {
+            "schema": COVERAGE_BINDING_SCHEMA,
+            "repo_view": self.repo_view.as_dict(),
+            "target_kind": self.target_kind,
+            "target": self.target,
+            "supporting_claim_ids": list(self.supporting_claim_ids),
+            "supporting_fragment_ids": list(self.supporting_fragment_ids),
+        }
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"schema": COVERAGE_BINDING_SCHEMA, "coverage_binding_id": self.coverage_binding_id, **self._identity_payload()}
+
+    @classmethod
+    def create(
+        cls,
+        repo_view: CommittedRepoView | RepoViewBinding,
+        *,
+        target_kind: str,
+        target: str,
+        supporting_claim_ids: Sequence[str] = (),
+        supporting_fragment_ids: Sequence[str] = (),
+    ) -> "CoverageBinding":
+        binding = _binding_for_repo(repo_view)
+        identity = {
+            "schema": COVERAGE_BINDING_SCHEMA,
+            "repo_view": binding.as_dict(),
+            "target_kind": target_kind,
+            "target": target,
+            "supporting_claim_ids": list(supporting_claim_ids),
+            "supporting_fragment_ids": list(supporting_fragment_ids),
+        }
+        return cls(
+            _record_digest(identity),
+            binding,
+            target_kind,
+            target,
+            tuple(supporting_claim_ids),
+            tuple(supporting_fragment_ids),
+        )
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "CoverageBinding":
+        _exact_fields(
+            value,
+            {"schema", "coverage_binding_id", "repo_view", "target_kind", "target", "supporting_claim_ids", "supporting_fragment_ids"},
+            field="coverage_binding",
+        )
+        if value["schema"] != COVERAGE_BINDING_SCHEMA:
+            _fail("schema_mismatch", "unsupported coverage binding schema")
+        return cls(
+            value["coverage_binding_id"],
+            _parse_repo_binding(value["repo_view"], field="coverage_binding.repo_view"),
+            value["target_kind"],
+            value["target"],
+            _digest_sequence(value["supporting_claim_ids"], field="coverage_binding.supporting_claim_ids"),
+            _digest_sequence(value["supporting_fragment_ids"], field="coverage_binding.supporting_fragment_ids"),
+        )
+
+
+@dataclass(frozen=True)
+class UnderstandingClaim:
+    """One epistemic claim explicitly separated from exact source authority."""
+
+    claim_id: str
+    repo_view: RepoViewBinding
+    subject: str
+    dimension: str
+    kind: str
+    authority: str
+    statement: str
+    evidence_refs: tuple[str, ...]
+    basis_refs: tuple[str, ...]
+    producer_id: str = M2C_PRODUCER_ID
+    producer_version: str = M2C_PRODUCER_VERSION
+    source_evidence: tuple[SourceEvidenceRef | RepoSourceEvidence, ...] = ()
+
+    def __post_init__(self) -> None:
+        _digest(self.claim_id, field="claim_id")
+        if not isinstance(self.repo_view, RepoViewBinding):
+            _fail("malformed_claim", "claim repo_view must be RepoViewBinding")
+        _text(self.subject, field="claim.subject")
+        _identifier(self.dimension, field="claim.dimension")
+        if self.kind not in CLAIM_KINDS:
+            _fail("claim_kind_invalid", f"unsupported claim kind: {self.kind}")
+        if self.authority not in CLAIM_AUTHORITIES:
+            _fail("claim_authority_invalid", f"unsupported claim authority: {self.authority}")
+        if self.kind == "FACT" and self.authority != "EXACT_SOURCE":
+            _fail("claim_authority_mismatch", "FACT claims must be exact-source claims")
+        if self.kind != "FACT" and self.authority != "DERIVED":
+            _fail("claim_authority_mismatch", "non-FACT claims must remain visibly derived")
+        _text(self.statement, field="claim.statement")
+        if not self.evidence_refs and self.kind in {"FACT", "INFERENCE"}:
+            _fail("claim_evidence_required", "FACT and INFERENCE claims require evidence references")
+        if any(not isinstance(item, (SourceEvidenceRef, RepoSourceEvidence)) for item in self.source_evidence):
+            _fail("malformed_claim", "claim source_evidence must contain typed evidence records")
+        if self.kind == "FACT":
+            if not self.source_evidence:
+                _fail("repository_source_evidence_required", "FACT claims require repository-source evidence")
+            expected_refs = tuple(item.evidence_id for item in self.source_evidence)
+            if tuple(self.evidence_refs) != expected_refs:
+                _fail("source_evidence_binding_mismatch", "FACT evidence_refs must exactly name source_evidence IDs")
+        elif self.source_evidence:
+            _fail("claim_authority_mismatch", "only FACT claims may carry source evidence")
+        for reference in (*self.evidence_refs, *self.basis_refs):
+            _text(reference, field="claim.reference", max_length=512)
+        _identifier(self.producer_id, field="claim.producer_id")
+        _identifier(self.producer_version, field="claim.producer_version")
+        if self.claim_id != _record_digest(self._identity_payload()):
+            _fail("claim_integrity_failure", "claim_id does not match its semantic identity")
+
+    def _identity_payload(self) -> dict[str, Any]:
+        return {
+            "schema": CLAIM_SCHEMA,
+            "repo_view": self.repo_view.as_dict(),
+            "subject": self.subject,
+            "dimension": self.dimension,
+            "kind": self.kind,
+            "authority": self.authority,
+            "statement": self.statement,
+            "evidence_refs": list(self.evidence_refs),
+            "basis_refs": list(self.basis_refs),
+            "producer_id": self.producer_id,
+            "producer_version": self.producer_version,
+            "source_evidence": [item.as_dict() for item in self.source_evidence],
+        }
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"schema": CLAIM_SCHEMA, "claim_id": self.claim_id, **self._identity_payload()}
+
+    @classmethod
+    def create(
+        cls,
+        repo_view: CommittedRepoView | RepoViewBinding,
+        *,
+        subject: str,
+        dimension: str,
+        kind: str,
+        statement: str,
+        evidence_refs: Sequence[str] = (),
+        basis_refs: Sequence[str] = (),
+        source_evidence: Sequence[SourceEvidenceRef | RepoSourceEvidence] = (),
+        source_evidence_refs: Sequence[SourceEvidenceRef | RepoSourceEvidence] | None = None,
+        binding_store: DurableBindingStore | None = None,
+        producer_id: str = M2C_PRODUCER_ID,
+        producer_version: str = M2C_PRODUCER_VERSION,
+    ) -> "UnderstandingClaim":
+        binding = RepoViewBinding.from_view(repo_view) if isinstance(repo_view, CommittedRepoView) else repo_view
+        if not isinstance(binding, RepoViewBinding):
+            _fail("malformed_repo_view_basis", "claim requires an exact RepoView binding")
+        evidence_items = tuple(source_evidence_refs if source_evidence_refs is not None else source_evidence)
+        if kind == "FACT":
+            if not evidence_items:
+                _fail("repository_source_evidence_required", "FACT claims require repository-source evidence")
+            if binding_store is None:
+                _fail("repository_source_store_required", "FACT claims require M2a and M2b source validation")
+            for item in evidence_items:
+                if not isinstance(item, RepoSourceEvidence):
+                    _fail("repository_source_evidence_required", "generic M2b SourceEvidenceRef cannot become FACT authority")
+                if not isinstance(repo_view, CommittedRepoView):
+                    _fail("repository_source_authority_required", "FACT creation requires the exact CommittedRepoView reader")
+                item.validate(repo_view, binding_store)
+            normalized_refs = tuple(item.evidence_id for item in evidence_items)
+            if evidence_refs and tuple(evidence_refs) not in {normalized_refs, tuple(item.fragment_id for item in evidence_items)}:
+                _fail("source_evidence_binding_mismatch", "FACT evidence_refs must match verified source evidence IDs")
+            evidence_refs = normalized_refs
+        elif evidence_items:
+            _fail("claim_authority_mismatch", "only FACT claims may carry source evidence")
+        identity = {
+            "schema": CLAIM_SCHEMA,
+            "repo_view": binding.as_dict(),
+            "subject": subject,
+            "dimension": dimension,
+            "kind": kind,
+            "authority": "EXACT_SOURCE" if kind == "FACT" else "DERIVED",
+            "statement": statement,
+            "evidence_refs": list(evidence_refs),
+            "basis_refs": list(basis_refs),
+            "producer_id": producer_id,
+            "producer_version": producer_version,
+            "source_evidence": [item.as_dict() for item in evidence_items],
+        }
+        return cls(
+            _record_digest(identity),
+            binding,
+            subject,
+            dimension,
+            kind,
+            identity["authority"],
+            statement,
+            tuple(evidence_refs),
+            tuple(basis_refs),
+            producer_id,
+            producer_version,
+            evidence_items,
+        )
+
+    def validate_source_grounding(
+        self,
+        binding_store: DurableBindingStore,
+        repo_view: CommittedRepoView | RepoViewBinding,
+    ) -> None:
+        if self.kind != "FACT":
+            return
+        if not self.source_evidence:
+            _fail("repository_source_evidence_required", "FACT claims require repository-source evidence")
+        for item in self.source_evidence:
+            if not isinstance(item, RepoSourceEvidence) or not isinstance(repo_view, CommittedRepoView):
+                _fail("repository_source_authority_required", "FACT grounding requires RepoSourceEvidence and CommittedRepoView")
+            item.validate(repo_view, binding_store)
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "UnderstandingClaim":
+        _exact_fields(
+            value,
+            {
+                "schema",
+                "claim_id",
+                "repo_view",
+                "subject",
+                "dimension",
+                "kind",
+                "authority",
+                "statement",
+                "evidence_refs",
+                "basis_refs",
+                "producer_id",
+                "producer_version",
+                "source_evidence",
+            },
+            field="claim",
+        )
+        if value["schema"] != CLAIM_SCHEMA:
+            _fail("schema_mismatch", "unsupported claim schema")
+        return cls(
+            value["claim_id"],
+            _parse_repo_binding(value["repo_view"]),
+            value["subject"],
+            value["dimension"],
+            value["kind"],
+            value["authority"],
+            value["statement"],
+            _sequence(value["evidence_refs"], field="claim.evidence_refs"),
+            _sequence(value["basis_refs"], field="claim.basis_refs"),
+            value["producer_id"],
+            value["producer_version"],
+            tuple(
+                RepoSourceEvidence.from_mapping(item)
+                if isinstance(item, Mapping) and item.get("schema") == REPO_SOURCE_EVIDENCE_SCHEMA
+                else SourceEvidenceRef.from_mapping(item)
+                for item in value["source_evidence"]
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class Unknown:
+    unknown_id: str
+    repo_view: RepoViewBinding
+    subject: str
+    dimension: str
+    reason: str
+    material: bool = True
+    producer_id: str = M2C_PRODUCER_ID
+    producer_version: str = M2C_PRODUCER_VERSION
+
+    def __post_init__(self) -> None:
+        _digest(self.unknown_id, field="unknown_id")
+        if not isinstance(self.repo_view, RepoViewBinding):
+            _fail("malformed_unknown", "unknown repo_view must be RepoViewBinding")
+        _text(self.subject, field="unknown.subject")
+        _identifier(self.dimension, field="unknown.dimension")
+        _text(self.reason, field="unknown.reason")
+        if not isinstance(self.material, bool):
+            _fail("malformed_unknown", "unknown.material must be boolean")
+        _identifier(self.producer_id, field="unknown.producer_id")
+        _identifier(self.producer_version, field="unknown.producer_version")
+        if self.unknown_id != _record_digest(self._identity_payload()):
+            _fail("unknown_integrity_failure", "unknown_id does not match its semantic identity")
+
+    def _identity_payload(self) -> dict[str, Any]:
+        return {
+            "schema": UNKNOWN_SCHEMA,
+            "repo_view": self.repo_view.as_dict(),
+            "subject": self.subject,
+            "dimension": self.dimension,
+            "reason": self.reason,
+            "material": self.material,
+            "producer_id": self.producer_id,
+            "producer_version": self.producer_version,
+        }
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"schema": UNKNOWN_SCHEMA, "unknown_id": self.unknown_id, **self._identity_payload()}
+
+    @classmethod
+    def create(
+        cls,
+        repo_view: CommittedRepoView | RepoViewBinding,
+        *,
+        subject: str,
+        dimension: str,
+        reason: str,
+        material: bool = True,
+    ) -> "Unknown":
+        binding = RepoViewBinding.from_view(repo_view) if isinstance(repo_view, CommittedRepoView) else repo_view
+        if not isinstance(binding, RepoViewBinding):
+            _fail("malformed_repo_view_basis", "unknown requires an exact RepoView binding")
+        identity = {
+            "schema": UNKNOWN_SCHEMA,
+            "repo_view": binding.as_dict(),
+            "subject": subject,
+            "dimension": dimension,
+            "reason": reason,
+            "material": material,
+            "producer_id": M2C_PRODUCER_ID,
+            "producer_version": M2C_PRODUCER_VERSION,
+        }
+        return cls(_record_digest(identity), binding, subject, dimension, reason, material)
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "Unknown":
+        _exact_fields(
+            value,
+            {"schema", "unknown_id", "repo_view", "subject", "dimension", "reason", "material", "producer_id", "producer_version"},
+            field="unknown",
+        )
+        if value["schema"] != UNKNOWN_SCHEMA:
+            _fail("schema_mismatch", "unsupported unknown schema")
+        return cls(
+            value["unknown_id"],
+            _parse_repo_binding(value["repo_view"]),
+            value["subject"],
+            value["dimension"],
+            value["reason"],
+            value["material"],
+            value["producer_id"],
+            value["producer_version"],
+        )
+
+
+@dataclass(frozen=True)
+class Omission:
+    omission_id: str
+    repo_view: RepoViewBinding
+    dimension: str
+    reason: str
+    policy_denied: bool = False
+    producer_id: str = M2C_PRODUCER_ID
+    producer_version: str = M2C_PRODUCER_VERSION
+
+    def __post_init__(self) -> None:
+        _digest(self.omission_id, field="omission_id")
+        if not isinstance(self.repo_view, RepoViewBinding):
+            _fail("malformed_omission", "omission repo_view must be RepoViewBinding")
+        _identifier(self.dimension, field="omission.dimension")
+        _text(self.reason, field="omission.reason")
+        if not isinstance(self.policy_denied, bool):
+            _fail("malformed_omission", "omission.policy_denied must be boolean")
+        _identifier(self.producer_id, field="omission.producer_id")
+        _identifier(self.producer_version, field="omission.producer_version")
+        if self.omission_id != _record_digest(self._identity_payload()):
+            _fail("omission_integrity_failure", "omission_id does not match its semantic identity")
+
+    def _identity_payload(self) -> dict[str, Any]:
+        return {
+            "schema": OMISSION_SCHEMA,
+            "repo_view": self.repo_view.as_dict(),
+            "dimension": self.dimension,
+            "reason": self.reason,
+            "policy_denied": self.policy_denied,
+            "producer_id": self.producer_id,
+            "producer_version": self.producer_version,
+        }
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"schema": OMISSION_SCHEMA, "omission_id": self.omission_id, **self._identity_payload()}
+
+    @classmethod
+    def create(
+        cls,
+        repo_view: CommittedRepoView | RepoViewBinding,
+        *,
+        dimension: str,
+        reason: str,
+        policy_denied: bool = False,
+    ) -> "Omission":
+        binding = RepoViewBinding.from_view(repo_view) if isinstance(repo_view, CommittedRepoView) else repo_view
+        if not isinstance(binding, RepoViewBinding):
+            _fail("malformed_repo_view_basis", "omission requires an exact RepoView binding")
+        identity = {
+            "schema": OMISSION_SCHEMA,
+            "repo_view": binding.as_dict(),
+            "dimension": dimension,
+            "reason": reason,
+            "policy_denied": policy_denied,
+            "producer_id": M2C_PRODUCER_ID,
+            "producer_version": M2C_PRODUCER_VERSION,
+        }
+        return cls(_record_digest(identity), binding, dimension, reason, policy_denied)
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "Omission":
+        _exact_fields(
+            value,
+            {"schema", "omission_id", "repo_view", "dimension", "reason", "policy_denied", "producer_id", "producer_version"},
+            field="omission",
+        )
+        if value["schema"] != OMISSION_SCHEMA:
+            _fail("schema_mismatch", "unsupported omission schema")
+        return cls(
+            value["omission_id"],
+            _parse_repo_binding(value["repo_view"]),
+            value["dimension"],
+            value["reason"],
+            value["policy_denied"],
+            value["producer_id"],
+            value["producer_version"],
+        )
+
+
+@dataclass(frozen=True)
+class ClaimContradiction:
+    contradiction_id: str
+    repo_view: RepoViewBinding
+    subject: str
+    dimension: str
+    claim_ids: tuple[str, ...]
+    source_claim_ids: tuple[str, ...]
+    derived_claim_ids: tuple[str, ...]
+    reason: str
+    source_authority: str
+    producer_id: str = M2C_PRODUCER_ID
+    producer_version: str = M2C_PRODUCER_VERSION
+
+    def __post_init__(self) -> None:
+        _digest(self.contradiction_id, field="contradiction_id")
+        if not isinstance(self.repo_view, RepoViewBinding):
+            _fail("malformed_contradiction", "contradiction repo_view must be RepoViewBinding")
+        _text(self.subject, field="contradiction.subject")
+        _identifier(self.dimension, field="contradiction.dimension")
+        for field, values in (
+            ("contradiction.claim_ids", self.claim_ids),
+            ("contradiction.source_claim_ids", self.source_claim_ids),
+            ("contradiction.derived_claim_ids", self.derived_claim_ids),
+        ):
+            if not values or len(set(values)) != len(values):
+                _fail("malformed_contradiction", f"{field} must contain unique claim IDs")
+            for value in values:
+                _digest(value, field=f"{field}[]")
+        if not set(self.source_claim_ids).issubset(self.claim_ids) or not set(self.derived_claim_ids).issubset(self.claim_ids):
+            _fail("malformed_contradiction", "contradiction source/derived claims must be members of claim_ids")
+        if set(self.source_claim_ids) & set(self.derived_claim_ids):
+            _fail("malformed_contradiction", "a claim cannot be both source and derived")
+        expected_authority = "EXACT_SOURCE_WINS" if self.source_claim_ids else "NO_EXACT_SOURCE_CLAIM"
+        if self.source_authority != expected_authority:
+            _fail("source_authority_mismatch", "contradiction source authority is not explicit")
+        _text(self.reason, field="contradiction.reason")
+        _identifier(self.producer_id, field="contradiction.producer_id")
+        _identifier(self.producer_version, field="contradiction.producer_version")
+        if self.contradiction_id != _record_digest(self._identity_payload()):
+            _fail("contradiction_integrity_failure", "contradiction_id does not match its semantic identity")
+
+    def _identity_payload(self) -> dict[str, Any]:
+        return {
+            "schema": CONTRADICTION_SCHEMA,
+            "repo_view": self.repo_view.as_dict(),
+            "subject": self.subject,
+            "dimension": self.dimension,
+            "claim_ids": list(self.claim_ids),
+            "source_claim_ids": list(self.source_claim_ids),
+            "derived_claim_ids": list(self.derived_claim_ids),
+            "reason": self.reason,
+            "source_authority": self.source_authority,
+            "producer_id": self.producer_id,
+            "producer_version": self.producer_version,
+        }
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"schema": CONTRADICTION_SCHEMA, "contradiction_id": self.contradiction_id, **self._identity_payload()}
+
+    @classmethod
+    def create(
+        cls,
+        repo_view: CommittedRepoView | RepoViewBinding,
+        *,
+        subject: str,
+        dimension: str,
+        claim_ids: Sequence[str],
+        source_claim_ids: Sequence[str] = (),
+        derived_claim_ids: Sequence[str] = (),
+        reason: str,
+    ) -> "ClaimContradiction":
+        binding = RepoViewBinding.from_view(repo_view) if isinstance(repo_view, CommittedRepoView) else repo_view
+        if not isinstance(binding, RepoViewBinding):
+            _fail("malformed_repo_view_basis", "contradiction requires an exact RepoView binding")
+        source = tuple(source_claim_ids)
+        identity = {
+            "schema": CONTRADICTION_SCHEMA,
+            "repo_view": binding.as_dict(),
+            "subject": subject,
+            "dimension": dimension,
+            "claim_ids": list(claim_ids),
+            "source_claim_ids": list(source),
+            "derived_claim_ids": list(derived_claim_ids),
+            "reason": reason,
+            "source_authority": "EXACT_SOURCE_WINS" if source else "NO_EXACT_SOURCE_CLAIM",
+            "producer_id": M2C_PRODUCER_ID,
+            "producer_version": M2C_PRODUCER_VERSION,
+        }
+        return cls(
+            _record_digest(identity),
+            binding,
+            subject,
+            dimension,
+            tuple(claim_ids),
+            source,
+            tuple(derived_claim_ids),
+            reason,
+            identity["source_authority"],
+        )
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "ClaimContradiction":
+        _exact_fields(
+            value,
+            {"schema", "contradiction_id", "repo_view", "subject", "dimension", "claim_ids", "source_claim_ids", "derived_claim_ids", "reason", "source_authority", "producer_id", "producer_version"},
+            field="contradiction",
+        )
+        if value["schema"] != CONTRADICTION_SCHEMA:
+            _fail("schema_mismatch", "unsupported contradiction schema")
+        return cls(
+            value["contradiction_id"],
+            _parse_repo_binding(value["repo_view"]),
+            value["subject"],
+            value["dimension"],
+            _sequence(value["claim_ids"], field="contradiction.claim_ids", allow_empty=False),
+            _sequence(value["source_claim_ids"], field="contradiction.source_claim_ids"),
+            _sequence(value["derived_claim_ids"], field="contradiction.derived_claim_ids", allow_empty=False),
+            value["reason"],
+            value["source_authority"],
+            value["producer_id"],
+            value["producer_version"],
+        )
+
+
+@dataclass(frozen=True)
+class ContextAffordance:
+    """An on-demand semantic affordance, not a transport retry record."""
+
+    affordance_id: str
+    dimension: str
+    horizon: str
+    evidence_type: str
+    reason: str
+    producer_id: str = M2C_PRODUCER_ID
+    producer_version: str = M2C_PRODUCER_VERSION
+
+    def __post_init__(self) -> None:
+        _digest(self.affordance_id, field="affordance_id")
+        _identifier(self.dimension, field="affordance.dimension")
+        if self.horizon not in HORIZONS:
+            _fail("horizon_invalid", f"unsupported affordance horizon: {self.horizon}")
+        _identifier(self.evidence_type, field="affordance.evidence_type")
+        _text(self.reason, field="affordance.reason")
+        _identifier(self.producer_id, field="affordance.producer_id")
+        _identifier(self.producer_version, field="affordance.producer_version")
+        if self.affordance_id != _record_digest(self._identity_payload()):
+            _fail("affordance_integrity_failure", "affordance_id does not match its semantic identity")
+
+    def _identity_payload(self) -> dict[str, Any]:
+        return {
+            "schema": AFFORDANCE_SCHEMA,
+            "dimension": self.dimension,
+            "horizon": self.horizon,
+            "evidence_type": self.evidence_type,
+            "reason": self.reason,
+            "producer_id": self.producer_id,
+            "producer_version": self.producer_version,
+        }
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"schema": AFFORDANCE_SCHEMA, "affordance_id": self.affordance_id, **self._identity_payload()}
+
+    @classmethod
+    def create(cls, *, dimension: str, horizon: str, evidence_type: str, reason: str) -> "ContextAffordance":
+        identity = {
+            "schema": AFFORDANCE_SCHEMA,
+            "dimension": dimension,
+            "horizon": horizon,
+            "evidence_type": evidence_type,
+            "reason": reason,
+            "producer_id": M2C_PRODUCER_ID,
+            "producer_version": M2C_PRODUCER_VERSION,
+        }
+        return cls(_record_digest(identity), dimension, horizon, evidence_type, reason)
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "ContextAffordance":
+        _exact_fields(
+            value,
+            {"schema", "affordance_id", "dimension", "horizon", "evidence_type", "reason", "producer_id", "producer_version"},
+            field="affordance",
+        )
+        if value["schema"] != AFFORDANCE_SCHEMA:
+            _fail("schema_mismatch", "unsupported affordance schema")
+        return cls(
+            value["affordance_id"],
+            value["dimension"],
+            value["horizon"],
+            value["evidence_type"],
+            value["reason"],
+            value["producer_id"],
+            value["producer_version"],
+        )
+
+
+def _validate_coverage_bindings(
+    bindings: Sequence[CoverageBinding],
+    *,
+    repo_view: RepoViewBinding,
+    claims: Sequence[UnderstandingClaim],
+    allowed_claim_ids: Sequence[str] | None = None,
+    requested_dimensions: Sequence[str],
+    covered_dimensions: Sequence[str],
+    must_see_categories: Sequence[str],
+    covered_must_see: Sequence[str],
+    binding_store: DurableBindingStore | None = None,
+    committed_view: CommittedRepoView | None = None,
+    included_fragment_ids: Sequence[str] = (),
+    allowed_fragment_ids: Sequence[str] | None = None,
+) -> None:
+    _validate_unique_records(bindings, "coverage_binding_id", field="coverage_bindings")
+    claim_by_id = {claim.claim_id: claim for claim in claims}
+    allowed_claim_set = set(allowed_claim_ids if allowed_claim_ids is not None else claim_by_id)
+    expected_targets = {("DIMENSION", item) for item in covered_dimensions} | {
+        ("MUST_SEE", item) for item in covered_must_see
+    }
+    observed_targets: set[tuple[str, str]] = set()
+    for binding in bindings:
+        if not isinstance(binding, CoverageBinding) or binding.repo_view != repo_view:
+            _fail("coverage_basis_mismatch", "coverage bindings must bind the exact RepoView")
+        target = (binding.target_kind, binding.target)
+        if target not in expected_targets:
+            _fail("coverage_overclaim", "coverage binding targets an uncovered or unrequested target")
+        if target in observed_targets:
+            _fail("duplicate_m2c_value", "coverage targets must have one deterministic binding")
+        observed_targets.add(target)
+        if not set(binding.supporting_claim_ids).issubset(allowed_claim_set):
+            _fail("coverage_claim_missing", "coverage binding names a claim outside the Understanding")
+        for claim_id in binding.supporting_claim_ids:
+            claim = claim_by_id.get(claim_id)
+            if claim is not None and claim.repo_view != repo_view:
+                _fail("coverage_basis_mismatch", "coverage supporting claim has a foreign RepoView")
+        for fragment_id in binding.supporting_fragment_ids:
+            if included_fragment_ids and fragment_id not in set(included_fragment_ids):
+                _fail("coverage_fragment_missing", "coverage binding fragment is not included in the ContextPackage")
+            if allowed_fragment_ids is not None and fragment_id not in set(allowed_fragment_ids):
+                _fail("coverage_fragment_missing", "coverage binding fragment is not part of the real Understanding evidence")
+            if binding_store is None:
+                # Pure record parsing remains possible, but it does not confer
+                # authority.  Authority-sensitive construction validates the
+                # same edge again with a live binding store below.
+                continue
+            try:
+                accepted = binding_store.resolve_accepted(
+                    fragment_id,
+                    expected_view=committed_view,
+                )
+            except ContentStoreError as exc:
+                _fail("coverage_fragment_unaccepted", "coverage fragment is not an accepted durable M2b binding", details={"cause": exc.code})
+            if accepted.fragment.repo_view != repo_view:
+                _fail("coverage_basis_mismatch", "coverage fragment has a foreign RepoView")
+    if observed_targets != expected_targets:
+        _fail("coverage_grounding_required", "every covered dimension and must-see target needs a CoverageBinding")
+
+
+@dataclass(frozen=True)
+class RepositoryUnderstandingView:
+    """Rebuildable exact-RepoView claim projection, never source-byte authority."""
+
+    understanding_id: str
+    intent_basis: IntentBasis
+    repo_view: RepoViewBinding
+    claims: tuple[UnderstandingClaim, ...]
+    requested_dimensions: tuple[str, ...]
+    covered_dimensions: tuple[str, ...]
+    must_see_categories: tuple[str, ...]
+    covered_must_see: tuple[str, ...]
+    coverage_bindings: tuple[CoverageBinding, ...]
+    unknowns: tuple[Unknown, ...]
+    omissions: tuple[Omission, ...]
+    contradictions: tuple[ClaimContradiction, ...]
+    invalidation_predicates: tuple[str, ...]
+    producer_id: str = M2C_PRODUCER_ID
+    producer_version: str = M2C_PRODUCER_VERSION
+
+    def __post_init__(self) -> None:
+        _digest(self.understanding_id, field="understanding_id")
+        if not isinstance(self.intent_basis, IntentBasis) or not isinstance(self.repo_view, RepoViewBinding):
+            _fail("malformed_understanding", "understanding requires typed intent and RepoView basis")
+        _validate_unique_records(self.claims, "claim_id", field="understanding.claims")
+        _validate_unique_records(self.unknowns, "unknown_id", field="understanding.unknowns")
+        _validate_unique_records(self.omissions, "omission_id", field="understanding.omissions")
+        _validate_unique_records(self.contradictions, "contradiction_id", field="understanding.contradictions")
+        if any(not isinstance(item, CoverageBinding) for item in self.coverage_bindings):
+            _fail("malformed_coverage_binding", "understanding coverage_bindings must be typed")
+        for claim in self.claims:
+            if not isinstance(claim, UnderstandingClaim) or not _same_repo(claim.repo_view, self.repo_view):
+                _fail("understanding_basis_mismatch", "all claims must bind the exact Understanding RepoView")
+        for unknown in self.unknowns:
+            if not isinstance(unknown, Unknown) or not _same_repo(unknown.repo_view, self.repo_view):
+                _fail("understanding_basis_mismatch", "all unknowns must bind the exact Understanding RepoView")
+        for omission in self.omissions:
+            if not isinstance(omission, Omission) or not _same_repo(omission.repo_view, self.repo_view):
+                _fail("understanding_basis_mismatch", "all omissions must bind the exact Understanding RepoView")
+        claim_by_id = {claim.claim_id: claim for claim in self.claims}
+        for contradiction in self.contradictions:
+            if not isinstance(contradiction, ClaimContradiction) or not _same_repo(contradiction.repo_view, self.repo_view):
+                _fail("understanding_basis_mismatch", "contradictions must bind the exact Understanding RepoView")
+            if not set(contradiction.claim_ids).issubset(claim_by_id):
+                _fail("contradiction_claim_missing", "contradiction references a claim not present in Understanding")
+            for claim_id in contradiction.source_claim_ids:
+                if claim_by_id[claim_id].kind != "FACT" or claim_by_id[claim_id].authority != "EXACT_SOURCE":
+                    _fail("source_authority_mismatch", "source contradiction claims must be exact FACT claims")
+            for claim_id in contradiction.derived_claim_ids:
+                if claim_by_id[claim_id].kind == "FACT" or claim_by_id[claim_id].authority != "DERIVED":
+                    _fail("source_authority_mismatch", "derived contradiction claims cannot be FACT claims")
+        _validate_coverage_fields(
+            self.requested_dimensions,
+            self.covered_dimensions,
+            self.must_see_categories,
+            self.covered_must_see,
+        )
+        _validate_coverage_bindings(
+            self.coverage_bindings,
+            repo_view=self.repo_view,
+            claims=self.claims,
+            requested_dimensions=self.requested_dimensions,
+            covered_dimensions=self.covered_dimensions,
+            must_see_categories=self.must_see_categories,
+            covered_must_see=self.covered_must_see,
+        )
+        if not self.invalidation_predicates:
+            _fail("invalidation_predicates_required", "Understanding must expose invalidation predicates")
+        _identifier(self.producer_id, field="understanding.producer_id")
+        _identifier(self.producer_version, field="understanding.producer_version")
+        self._validate_conflicts()
+        if self.understanding_id != _record_digest(self._identity_payload()):
+            _fail("understanding_integrity_failure", "understanding_id does not match its semantic identity")
+
+    def _validate_conflicts(self) -> None:
+        groups: dict[tuple[str, str], list[UnderstandingClaim]] = {}
+        for claim in self.claims:
+            groups.setdefault((claim.dimension, claim.subject), []).append(claim)
+        represented = [set(item.claim_ids) for item in self.contradictions]
+        for group in groups.values():
+            if len({claim.statement for claim in group}) <= 1:
+                continue
+            expected = {claim.claim_id for claim in group}
+            if expected not in represented:
+                _fail(
+                    "contradiction_required",
+                    "conflicting claims must remain explicitly represented as a contradiction",
+                    details={"claim_ids": sorted(expected)},
+                )
+
+    def _identity_payload(self) -> dict[str, Any]:
+        return {
+            "schema": UNDERSTANDING_SCHEMA,
+            "intent_basis": self.intent_basis.as_dict(),
+            "repo_view": self.repo_view.as_dict(),
+            "claims": [claim.as_dict() for claim in self.claims],
+            "requested_dimensions": list(self.requested_dimensions),
+            "covered_dimensions": list(self.covered_dimensions),
+            "must_see_categories": list(self.must_see_categories),
+            "covered_must_see": list(self.covered_must_see),
+            "coverage_bindings": [item.as_dict() for item in self.coverage_bindings],
+            "unknowns": [item.as_dict() for item in self.unknowns],
+            "omissions": [item.as_dict() for item in self.omissions],
+            "contradictions": [item.as_dict() for item in self.contradictions],
+            "invalidation_predicates": list(self.invalidation_predicates),
+            "producer_id": self.producer_id,
+            "producer_version": self.producer_version,
+        }
+
+    @property
+    def coverage_status(self) -> Literal["COMPLETE", "PARTIAL", "BLOCKED"]:
+        return _coverage_state(
+            self.requested_dimensions,
+            self.covered_dimensions,
+            self.must_see_categories,
+            self.covered_must_see,
+            self.unknowns,
+            self.omissions,
+            self.contradictions,
+            self.coverage_bindings,
+        )
+
+    @property
+    def gap_ids(self) -> tuple[str, ...]:
+        return tuple(item.unknown_id for item in self.unknowns) + tuple(item.omission_id for item in self.omissions)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "schema": UNDERSTANDING_SCHEMA,
+            "understanding_id": self.understanding_id,
+            "intent_basis": self.intent_basis.as_dict(),
+            "repo_view": self.repo_view.as_dict(),
+            "claims": [claim.as_dict() for claim in self.claims],
+            "requested_dimensions": list(self.requested_dimensions),
+            "covered_dimensions": list(self.covered_dimensions),
+            "must_see_categories": list(self.must_see_categories),
+            "covered_must_see": list(self.covered_must_see),
+            "coverage_bindings": [item.as_dict() for item in self.coverage_bindings],
+            "unknowns": [item.as_dict() for item in self.unknowns],
+            "omissions": [item.as_dict() for item in self.omissions],
+            "contradictions": [item.as_dict() for item in self.contradictions],
+            "invalidation_predicates": list(self.invalidation_predicates),
+            "coverage_status": self.coverage_status,
+            "producer_id": self.producer_id,
+            "producer_version": self.producer_version,
+        }
+
+    def to_json_bytes(self) -> bytes:
+        return canonical_json_bytes(self.as_dict())
+
+    @classmethod
+    def create(
+        cls,
+        intent_basis: IntentBasis,
+        repo_view: CommittedRepoView | RepoViewBinding,
+        *,
+        claims: Sequence[UnderstandingClaim] = (),
+        requested_dimensions: Sequence[str],
+        covered_dimensions: Sequence[str] = (),
+        must_see_categories: Sequence[str] = (),
+        covered_must_see: Sequence[str] = (),
+        coverage_bindings: Sequence[CoverageBinding] = (),
+        unknowns: Sequence[Unknown] = (),
+        omissions: Sequence[Omission] = (),
+        contradictions: Sequence[ClaimContradiction] = (),
+        invalidation_predicates: Sequence[str] = (
+            "repo_view.view_id_changed",
+            "intent_basis.changed",
+            "producer_or_schema.changed",
+        ),
+        producer_id: str = M2C_PRODUCER_ID,
+        producer_version: str = M2C_PRODUCER_VERSION,
+        binding_store: DurableBindingStore | None = None,
+    ) -> "RepositoryUnderstandingView":
+        if not isinstance(intent_basis, IntentBasis):
+            _fail("malformed_intent_basis", "Understanding requires IntentBasis")
+        binding = RepoViewBinding.from_view(repo_view) if isinstance(repo_view, CommittedRepoView) else repo_view
+        if not isinstance(binding, RepoViewBinding):
+            _fail("malformed_repo_view_basis", "Understanding requires an exact RepoView binding")
+        identity = {
+            "schema": UNDERSTANDING_SCHEMA,
+            "intent_basis": intent_basis.as_dict(),
+            "repo_view": binding.as_dict(),
+            "claims": [item.as_dict() for item in claims],
+            "requested_dimensions": list(requested_dimensions),
+            "covered_dimensions": list(covered_dimensions),
+            "must_see_categories": list(must_see_categories),
+            "covered_must_see": list(covered_must_see),
+            "coverage_bindings": [item.as_dict() for item in coverage_bindings],
+            "unknowns": [item.as_dict() for item in unknowns],
+            "omissions": [item.as_dict() for item in omissions],
+            "contradictions": [item.as_dict() for item in contradictions],
+            "invalidation_predicates": list(invalidation_predicates),
+            "producer_id": producer_id,
+            "producer_version": producer_version,
+        }
+        result = cls(
+            _record_digest(identity),
+            intent_basis,
+            binding,
+            tuple(claims),
+            tuple(requested_dimensions),
+            tuple(covered_dimensions),
+            tuple(must_see_categories),
+            tuple(covered_must_see),
+            tuple(coverage_bindings),
+            tuple(unknowns),
+            tuple(omissions),
+            tuple(contradictions),
+            tuple(invalidation_predicates),
+            producer_id,
+            producer_version,
+        )
+        if any(claim.kind == "FACT" for claim in result.claims) or any(
+            item.supporting_fragment_ids for item in result.coverage_bindings
+        ):
+            if binding_store is None:
+                _fail("source_evidence_store_required", "authoritative Understanding construction requires M2b grounding")
+            result.validate_source_grounding(binding_store, repo_view)
+        return result
+
+    def validate_source_grounding(
+        self,
+        binding_store: DurableBindingStore,
+        repo_view: CommittedRepoView | RepoViewBinding | None = None,
+    ) -> None:
+        expected_repo = self.repo_view if repo_view is None else _binding_for_repo(repo_view)
+        if expected_repo != self.repo_view:
+            _fail("understanding_basis_mismatch", "grounding RepoView differs from Understanding RepoView")
+        for claim in self.claims:
+            claim.validate_source_grounding(binding_store, repo_view or self.repo_view)
+        _validate_coverage_bindings(
+            self.coverage_bindings,
+            repo_view=self.repo_view,
+            claims=self.claims,
+            requested_dimensions=self.requested_dimensions,
+            covered_dimensions=self.covered_dimensions,
+            must_see_categories=self.must_see_categories,
+            covered_must_see=self.covered_must_see,
+            binding_store=binding_store,
+            committed_view=repo_view if isinstance(repo_view, CommittedRepoView) else None,
+        )
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "RepositoryUnderstandingView":
+        _exact_fields(
+            value,
+            {
+                "schema",
+                "understanding_id",
+                "intent_basis",
+                "repo_view",
+                "claims",
+                "requested_dimensions",
+                "covered_dimensions",
+                "must_see_categories",
+                "covered_must_see",
+                "coverage_bindings",
+                "unknowns",
+                "omissions",
+                "contradictions",
+                "invalidation_predicates",
+                "coverage_status",
+                "producer_id",
+                "producer_version",
+            },
+            field="understanding",
+        )
+        if value["schema"] != UNDERSTANDING_SCHEMA:
+            _fail("schema_mismatch", "unsupported RepositoryUnderstanding schema")
+        intent = _parse_intent(value["intent_basis"])
+        binding = _parse_repo_binding(value["repo_view"])
+        claims = tuple(UnderstandingClaim.from_mapping(item) for item in value["claims"])
+        result = cls(
+            value["understanding_id"],
+            intent,
+            binding,
+            claims,
+            requested_dimensions=_identifier_sequence(value["requested_dimensions"], field="understanding.requested_dimensions"),
+            covered_dimensions=_identifier_sequence(value["covered_dimensions"], field="understanding.covered_dimensions"),
+            must_see_categories=_identifier_sequence(value["must_see_categories"], field="understanding.must_see_categories"),
+            covered_must_see=_identifier_sequence(value["covered_must_see"], field="understanding.covered_must_see"),
+            coverage_bindings=tuple(CoverageBinding.from_mapping(item) for item in value["coverage_bindings"]),
+            unknowns=tuple(Unknown.from_mapping(item) for item in value["unknowns"]),
+            omissions=tuple(Omission.from_mapping(item) for item in value["omissions"]),
+            contradictions=tuple(ClaimContradiction.from_mapping(item) for item in value["contradictions"]),
+            invalidation_predicates=_identifier_sequence(value["invalidation_predicates"], field="understanding.invalidation_predicates", allow_empty=False),
+            producer_id=value["producer_id"],
+            producer_version=value["producer_version"],
+        )
+        if value["coverage_status"] != result.coverage_status:
+            _fail("coverage_status_mismatch", "coverage_status must be mechanically derived")
+        if value["understanding_id"] != result.understanding_id:
+            _fail("understanding_integrity_failure", "understanding_id differs from exact record identity")
+        return result
+
+
+def _validate_unique_records(records: Sequence[object], attribute: str, *, field: str) -> None:
+    values = [getattr(record, attribute, None) for record in records]
+    if len(values) != len(set(values)):
+        _fail("duplicate_m2c_value", f"{field} contains duplicate identities")
+
+
+def _validate_coverage_fields(
+    requested_dimensions: Sequence[str],
+    covered_dimensions: Sequence[str],
+    must_see_categories: Sequence[str],
+    covered_must_see: Sequence[str],
+) -> None:
+    for field, values in (
+        ("requested_dimensions", requested_dimensions),
+        ("covered_dimensions", covered_dimensions),
+        ("must_see_categories", must_see_categories),
+        ("covered_must_see", covered_must_see),
+    ):
+        _identifier_sequence(values, field=field)
+    if not set(covered_dimensions).issubset(requested_dimensions):
+        _fail("coverage_overclaim", "covered dimensions must be requested dimensions")
+    if not set(covered_must_see).issubset(must_see_categories):
+        _fail("coverage_overclaim", "covered must-see categories must be required categories")
+
+
+@dataclass(frozen=True)
+class ContextPackage:
+    """Immutable quality capsule referring to typed fragments, never duplicating bytes."""
+
+    package_id: str
+    intent_basis: IntentBasis
+    repo_view: RepoViewBinding
+    understanding_id: str
+    horizon: str
+    requested_dimensions: tuple[str, ...]
+    covered_dimensions: tuple[str, ...]
+    must_see_categories: tuple[str, ...]
+    covered_must_see: tuple[str, ...]
+    coverage_bindings: tuple[CoverageBinding, ...]
+    unknowns: tuple[Unknown, ...]
+    omissions: tuple[Omission, ...]
+    contradictions: tuple[ClaimContradiction, ...]
+    included_fragment_ids: tuple[str, ...]
+    affordances: tuple[ContextAffordance, ...]
+    architecture_constraints_included: tuple[str, ...]
+    invalidation_predicates: tuple[str, ...]
+    policy_version: str = M2C_POLICY_VERSION
+    producer_id: str = M2C_PRODUCER_ID
+    producer_version: str = M2C_PRODUCER_VERSION
+    fact_claim_ids: tuple[str, ...] = ()
+    inference_claim_ids: tuple[str, ...] = ()
+    assumption_claim_ids: tuple[str, ...] = ()
+    hypothesis_claim_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _digest(self.package_id, field="package_id")
+        _digest(self.understanding_id, field="understanding_id")
+        if not isinstance(self.intent_basis, IntentBasis) or not isinstance(self.repo_view, RepoViewBinding):
+            _fail("malformed_context_package", "ContextPackage requires typed intent and RepoView basis")
+        if self.horizon not in HORIZONS:
+            _fail("horizon_invalid", f"unsupported context horizon: {self.horizon}")
+        _validate_coverage_fields(
+            self.requested_dimensions,
+            self.covered_dimensions,
+            self.must_see_categories,
+            self.covered_must_see,
+        )
+        if any(not isinstance(item, CoverageBinding) for item in self.coverage_bindings):
+            _fail("malformed_coverage_binding", "package coverage_bindings must be typed")
+        _validate_unique_records(self.unknowns, "unknown_id", field="package.unknowns")
+        _validate_unique_records(self.omissions, "omission_id", field="package.omissions")
+        _validate_unique_records(self.contradictions, "contradiction_id", field="package.contradictions")
+        _validate_unique_records(self.affordances, "affordance_id", field="package.affordances")
+        for unknown in self.unknowns:
+            if not isinstance(unknown, Unknown) or not _same_repo(unknown.repo_view, self.repo_view):
+                _fail("context_package_basis_mismatch", "package unknowns must bind the package RepoView")
+        for omission in self.omissions:
+            if not isinstance(omission, Omission) or not _same_repo(omission.repo_view, self.repo_view):
+                _fail("context_package_basis_mismatch", "package omissions must bind the package RepoView")
+        for contradiction in self.contradictions:
+            if not isinstance(contradiction, ClaimContradiction) or not _same_repo(contradiction.repo_view, self.repo_view):
+                _fail("context_package_basis_mismatch", "package contradictions must bind the package RepoView")
+        claim_ids = {
+            claim_id
+            for values in (
+                self.fact_claim_ids,
+                self.inference_claim_ids,
+                self.assumption_claim_ids,
+                self.hypothesis_claim_ids,
+            )
+            for claim_id in values
+        }
+        _validate_coverage_bindings(
+            self.coverage_bindings,
+            repo_view=self.repo_view,
+            claims=(),
+            allowed_claim_ids=claim_ids,
+            requested_dimensions=self.requested_dimensions,
+            covered_dimensions=self.covered_dimensions,
+            must_see_categories=self.must_see_categories,
+            covered_must_see=self.covered_must_see,
+            included_fragment_ids=self.included_fragment_ids,
+        )
+        for fragment_id in self.included_fragment_ids:
+            _digest(fragment_id, field="package.included_fragment_ids[]")
+        _identifier_sequence(self.architecture_constraints_included, field="package.architecture_constraints_included")
+        _identifier_sequence(self.invalidation_predicates, field="package.invalidation_predicates", allow_empty=False)
+        _identifier(self.policy_version, field="package.policy_version")
+        _identifier(self.producer_id, field="package.producer_id")
+        _identifier(self.producer_version, field="package.producer_version")
+        for field, values in (
+            ("package.fact_claim_ids", self.fact_claim_ids),
+            ("package.inference_claim_ids", self.inference_claim_ids),
+            ("package.assumption_claim_ids", self.assumption_claim_ids),
+            ("package.hypothesis_claim_ids", self.hypothesis_claim_ids),
+        ):
+            _digest_sequence(values, field=field)
+        if len({claim_id for values in (self.fact_claim_ids, self.inference_claim_ids, self.assumption_claim_ids, self.hypothesis_claim_ids) for claim_id in values}) != sum(
+            len(values) for values in (self.fact_claim_ids, self.inference_claim_ids, self.assumption_claim_ids, self.hypothesis_claim_ids)
+        ):
+            _fail("package_claim_overlap", "ContextPackage claim classifications must be disjoint")
+        if self.package_id != _record_digest(self._identity_payload()):
+            _fail("context_package_integrity_failure", "package_id does not match its semantic identity")
+
+    def _identity_payload(self) -> dict[str, Any]:
+        return {
+            "schema": CONTEXT_PACKAGE_SCHEMA,
+            "intent_basis": self.intent_basis.as_dict(),
+            "repo_view": self.repo_view.as_dict(),
+            "understanding_id": self.understanding_id,
+            "horizon": self.horizon,
+            "requested_dimensions": list(self.requested_dimensions),
+            "covered_dimensions": list(self.covered_dimensions),
+            "must_see_categories": list(self.must_see_categories),
+            "covered_must_see": list(self.covered_must_see),
+            "coverage_bindings": [item.as_dict() for item in self.coverage_bindings],
+            "unknowns": [item.as_dict() for item in self.unknowns],
+            "omissions": [item.as_dict() for item in self.omissions],
+            "contradictions": [item.as_dict() for item in self.contradictions],
+            "included_fragment_ids": list(self.included_fragment_ids),
+            "affordances": [item.as_dict() for item in self.affordances],
+            "architecture_constraints_included": list(self.architecture_constraints_included),
+            "invalidation_predicates": list(self.invalidation_predicates),
+            "policy_version": self.policy_version,
+            "producer_id": self.producer_id,
+            "producer_version": self.producer_version,
+            "fact_claim_ids": list(self.fact_claim_ids),
+            "inference_claim_ids": list(self.inference_claim_ids),
+            "assumption_claim_ids": list(self.assumption_claim_ids),
+            "hypothesis_claim_ids": list(self.hypothesis_claim_ids),
+        }
+
+    @property
+    def coverage_status(self) -> Literal["COMPLETE", "PARTIAL", "BLOCKED"]:
+        return _coverage_state(
+            self.requested_dimensions,
+            self.covered_dimensions,
+            self.must_see_categories,
+            self.covered_must_see,
+            self.unknowns,
+            self.omissions,
+            self.contradictions,
+            self.coverage_bindings,
+        )
+
+    @property
+    def gap_ids(self) -> tuple[str, ...]:
+        return tuple(item.unknown_id for item in self.unknowns) + tuple(item.omission_id for item in self.omissions)
+
+    def validate_source_grounding(
+        self,
+        understanding: RepositoryUnderstandingView,
+        view: CommittedRepoView,
+        binding_store: DurableBindingStore,
+    ) -> None:
+        """Recheck package authority against live M2a and M2b authorities."""
+
+        if not isinstance(understanding, RepositoryUnderstandingView) or not isinstance(view, CommittedRepoView):
+            _fail("repository_source_authority_required", "ContextPackage grounding requires typed Understanding and CommittedRepoView")
+        expected_binding = RepoViewBinding.from_view(view)
+        if (
+            self.understanding_id != understanding.understanding_id
+            or self.intent_basis != understanding.intent_basis
+            or self.repo_view != expected_binding
+            or tuple(self.requested_dimensions) != understanding.requested_dimensions
+            or tuple(self.covered_dimensions) != understanding.covered_dimensions
+            or tuple(self.must_see_categories) != understanding.must_see_categories
+            or tuple(self.covered_must_see) != understanding.covered_must_see
+            or tuple(self.coverage_bindings) != understanding.coverage_bindings
+            or tuple(self.unknowns) != understanding.unknowns
+            or tuple(self.omissions) != understanding.omissions
+            or tuple(self.contradictions) != understanding.contradictions
+            or self.fact_claim_ids != tuple(claim.claim_id for claim in understanding.claims if claim.kind == "FACT")
+            or self.inference_claim_ids != tuple(claim.claim_id for claim in understanding.claims if claim.kind == "INFERENCE")
+            or self.assumption_claim_ids != tuple(claim.claim_id for claim in understanding.claims if claim.kind == "ASSUMPTION")
+            or self.hypothesis_claim_ids != tuple(claim.claim_id for claim in understanding.claims if claim.kind == "HYPOTHESIS")
+        ):
+            _fail("context_package_basis_mismatch", "ContextPackage does not match the exact Understanding basis")
+        understanding.validate_source_grounding(binding_store, view)
+        for fragment_id in self.included_fragment_ids:
+            try:
+                accepted = binding_store.resolve_accepted(fragment_id, expected_view=view)
+            except Exception as exc:
+                _fail("repository_source_binding_failure", "ContextPackage includes a non-accepted M2b fragment", details={"cause": getattr(exc, "code", "binding_failure")})
+            if accepted.fragment.repo_view != expected_binding:
+                _fail("repository_source_repo_mismatch", "ContextPackage fragment has a foreign RepoView")
+        _validate_coverage_bindings(
+            self.coverage_bindings,
+            repo_view=expected_binding,
+            claims=understanding.claims,
+            requested_dimensions=self.requested_dimensions,
+            covered_dimensions=self.covered_dimensions,
+            must_see_categories=self.must_see_categories,
+            covered_must_see=self.covered_must_see,
+            binding_store=binding_store,
+            committed_view=view,
+            included_fragment_ids=self.included_fragment_ids,
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "schema": CONTEXT_PACKAGE_SCHEMA,
+            "package_id": self.package_id,
+            "intent_basis": self.intent_basis.as_dict(),
+            "repo_view": self.repo_view.as_dict(),
+            "understanding_id": self.understanding_id,
+            "horizon": self.horizon,
+            "requested_dimensions": list(self.requested_dimensions),
+            "covered_dimensions": list(self.covered_dimensions),
+            "must_see_categories": list(self.must_see_categories),
+            "covered_must_see": list(self.covered_must_see),
+            "coverage_bindings": [item.as_dict() for item in self.coverage_bindings],
+            "unknowns": [item.as_dict() for item in self.unknowns],
+            "omissions": [item.as_dict() for item in self.omissions],
+            "contradictions": [item.as_dict() for item in self.contradictions],
+            "included_fragment_ids": list(self.included_fragment_ids),
+            "affordances": [item.as_dict() for item in self.affordances],
+            "architecture_constraints_included": list(self.architecture_constraints_included),
+            "invalidation_predicates": list(self.invalidation_predicates),
+            "coverage_status": self.coverage_status,
+            "policy_version": self.policy_version,
+            "producer_id": self.producer_id,
+            "producer_version": self.producer_version,
+            "fact_claim_ids": list(self.fact_claim_ids),
+            "inference_claim_ids": list(self.inference_claim_ids),
+            "assumption_claim_ids": list(self.assumption_claim_ids),
+            "hypothesis_claim_ids": list(self.hypothesis_claim_ids),
+        }
+
+    def to_json_bytes(self) -> bytes:
+        return canonical_json_bytes(self.as_dict())
+
+    @classmethod
+    def create(
+        cls,
+        intent_basis: IntentBasis,
+        repo_view: CommittedRepoView | RepoViewBinding,
+        *,
+        understanding_id: str,
+        horizon: str,
+        requested_dimensions: Sequence[str],
+        covered_dimensions: Sequence[str] = (),
+        must_see_categories: Sequence[str] = (),
+        covered_must_see: Sequence[str] = (),
+        coverage_bindings: Sequence[CoverageBinding] = (),
+        unknowns: Sequence[Unknown] = (),
+        omissions: Sequence[Omission] = (),
+        contradictions: Sequence[ClaimContradiction] = (),
+        included_fragment_ids: Sequence[str] = (),
+        affordances: Sequence[ContextAffordance] = (),
+        architecture_constraints_included: Sequence[str] = (),
+        invalidation_predicates: Sequence[str] = (
+            "repo_view.view_id_changed",
+            "intent_basis.changed",
+            "producer_or_schema.changed",
+        ),
+        policy_version: str = M2C_POLICY_VERSION,
+        producer_id: str = M2C_PRODUCER_ID,
+        producer_version: str = M2C_PRODUCER_VERSION,
+        fact_claim_ids: Sequence[str] = (),
+        inference_claim_ids: Sequence[str] = (),
+        assumption_claim_ids: Sequence[str] = (),
+        hypothesis_claim_ids: Sequence[str] = (),
+        understanding: RepositoryUnderstandingView | None = None,
+        binding_store: DurableBindingStore | None = None,
+    ) -> "ContextPackage":
+        if not isinstance(intent_basis, IntentBasis):
+            _fail("malformed_intent_basis", "ContextPackage requires IntentBasis")
+        binding = RepoViewBinding.from_view(repo_view) if isinstance(repo_view, CommittedRepoView) else repo_view
+        if not isinstance(binding, RepoViewBinding):
+            _fail("malformed_repo_view_basis", "ContextPackage requires an exact RepoView binding")
+        _validate_coverage_fields(requested_dimensions, covered_dimensions, must_see_categories, covered_must_see)
+        if understanding is not None:
+            if (
+                not isinstance(understanding, RepositoryUnderstandingView)
+                or understanding.understanding_id != understanding_id
+                or understanding.intent_basis != intent_basis
+                or understanding.repo_view != binding
+            ):
+                _fail("context_package_basis_mismatch", "ContextPackage must bind the exact RepositoryUnderstanding")
+            expected_claims = {
+                "FACT": tuple(claim.claim_id for claim in understanding.claims if claim.kind == "FACT"),
+                "INFERENCE": tuple(claim.claim_id for claim in understanding.claims if claim.kind == "INFERENCE"),
+                "ASSUMPTION": tuple(claim.claim_id for claim in understanding.claims if claim.kind == "ASSUMPTION"),
+                "HYPOTHESIS": tuple(claim.claim_id for claim in understanding.claims if claim.kind == "HYPOTHESIS"),
+            }
+            if (
+                tuple(requested_dimensions) != understanding.requested_dimensions
+                or tuple(covered_dimensions) != understanding.covered_dimensions
+                or tuple(must_see_categories) != understanding.must_see_categories
+                or tuple(covered_must_see) != understanding.covered_must_see
+                or tuple(coverage_bindings) != understanding.coverage_bindings
+                or tuple(unknowns) != understanding.unknowns
+                or tuple(omissions) != understanding.omissions
+                or tuple(contradictions) != understanding.contradictions
+                or tuple(fact_claim_ids) != expected_claims["FACT"]
+                or tuple(inference_claim_ids) != expected_claims["INFERENCE"]
+                or tuple(assumption_claim_ids) != expected_claims["ASSUMPTION"]
+                or tuple(hypothesis_claim_ids) != expected_claims["HYPOTHESIS"]
+            ):
+                _fail("context_package_basis_mismatch", "ContextPackage fields must be derived from the exact Understanding")
+            if binding_store is not None:
+                understanding.validate_source_grounding(binding_store, repo_view)
+        if (covered_dimensions or covered_must_see or coverage_bindings or fact_claim_ids or inference_claim_ids or assumption_claim_ids or hypothesis_claim_ids) and understanding is None:
+            _fail("understanding_basis_required", "covered ContextPackage claims require a real RepositoryUnderstanding basis")
+        allowed_fragments = None
+        if understanding is not None and binding_store is None:
+            allowed_fragments = tuple(
+                fragment_id
+                for claim in understanding.claims
+                for evidence in claim.source_evidence
+                for fragment_id in (evidence.fragment_id,)
+            )
+        _validate_coverage_bindings(
+            tuple(coverage_bindings),
+            repo_view=binding,
+            claims=(),
+            allowed_claim_ids=tuple(
+                claim_id
+                for values in (fact_claim_ids, inference_claim_ids, assumption_claim_ids, hypothesis_claim_ids)
+                for claim_id in values
+            ),
+            requested_dimensions=requested_dimensions,
+            covered_dimensions=covered_dimensions,
+            must_see_categories=must_see_categories,
+            covered_must_see=covered_must_see,
+            binding_store=binding_store,
+            committed_view=repo_view if isinstance(repo_view, CommittedRepoView) else None,
+            included_fragment_ids=included_fragment_ids,
+            allowed_fragment_ids=allowed_fragments,
+        )
+        identity = {
+            "schema": CONTEXT_PACKAGE_SCHEMA,
+            "intent_basis": intent_basis.as_dict(),
+            "repo_view": binding.as_dict(),
+            "understanding_id": understanding_id,
+            "horizon": horizon,
+            "requested_dimensions": list(requested_dimensions),
+            "covered_dimensions": list(covered_dimensions),
+            "must_see_categories": list(must_see_categories),
+            "covered_must_see": list(covered_must_see),
+            "coverage_bindings": [item.as_dict() for item in coverage_bindings],
+            "unknowns": [item.as_dict() for item in unknowns],
+            "omissions": [item.as_dict() for item in omissions],
+            "contradictions": [item.as_dict() for item in contradictions],
+            "included_fragment_ids": list(included_fragment_ids),
+            "affordances": [item.as_dict() for item in affordances],
+            "architecture_constraints_included": list(architecture_constraints_included),
+            "invalidation_predicates": list(invalidation_predicates),
+            "policy_version": policy_version,
+            "producer_id": producer_id,
+            "producer_version": producer_version,
+            "fact_claim_ids": list(fact_claim_ids),
+            "inference_claim_ids": list(inference_claim_ids),
+            "assumption_claim_ids": list(assumption_claim_ids),
+            "hypothesis_claim_ids": list(hypothesis_claim_ids),
+        }
+        return cls(
+            _record_digest(identity),
+            intent_basis,
+            binding,
+            understanding_id,
+            horizon,
+            tuple(requested_dimensions),
+            tuple(covered_dimensions),
+            tuple(must_see_categories),
+            tuple(covered_must_see),
+            tuple(coverage_bindings),
+            tuple(unknowns),
+            tuple(omissions),
+            tuple(contradictions),
+            tuple(included_fragment_ids),
+            tuple(affordances),
+            tuple(architecture_constraints_included),
+            tuple(invalidation_predicates),
+            policy_version,
+            producer_id,
+            producer_version,
+            tuple(fact_claim_ids),
+            tuple(inference_claim_ids),
+            tuple(assumption_claim_ids),
+            tuple(hypothesis_claim_ids),
+        )
+
+    @classmethod
+    def from_understanding(
+        cls,
+        understanding: RepositoryUnderstandingView,
+        *,
+        horizon: str,
+        included_fragment_ids: Sequence[str] = (),
+        affordances: Sequence[ContextAffordance] = (),
+        architecture_constraints_included: Sequence[str] = (),
+        binding_store: DurableBindingStore | None = None,
+    ) -> "ContextPackage":
+        return cls.create(
+            understanding.intent_basis,
+            understanding.repo_view,
+            understanding_id=understanding.understanding_id,
+            horizon=horizon,
+            requested_dimensions=understanding.requested_dimensions,
+            covered_dimensions=understanding.covered_dimensions,
+            must_see_categories=understanding.must_see_categories,
+            covered_must_see=understanding.covered_must_see,
+            coverage_bindings=understanding.coverage_bindings,
+            unknowns=understanding.unknowns,
+            omissions=understanding.omissions,
+            contradictions=understanding.contradictions,
+            included_fragment_ids=included_fragment_ids,
+            affordances=affordances,
+            architecture_constraints_included=architecture_constraints_included,
+            invalidation_predicates=understanding.invalidation_predicates,
+            producer_id=understanding.producer_id,
+            producer_version=understanding.producer_version,
+            fact_claim_ids=tuple(claim.claim_id for claim in understanding.claims if claim.kind == "FACT"),
+            inference_claim_ids=tuple(claim.claim_id for claim in understanding.claims if claim.kind == "INFERENCE"),
+            assumption_claim_ids=tuple(claim.claim_id for claim in understanding.claims if claim.kind == "ASSUMPTION"),
+            hypothesis_claim_ids=tuple(claim.claim_id for claim in understanding.claims if claim.kind == "HYPOTHESIS"),
+            understanding=understanding,
+            binding_store=binding_store,
+        )
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "ContextPackage":
+        _exact_fields(
+            value,
+            {
+                "schema",
+                "package_id",
+                "intent_basis",
+                "repo_view",
+                "understanding_id",
+                "horizon",
+                "requested_dimensions",
+                "covered_dimensions",
+                "must_see_categories",
+                "covered_must_see",
+                "coverage_bindings",
+                "unknowns",
+                "omissions",
+                "contradictions",
+                "included_fragment_ids",
+                "affordances",
+                "architecture_constraints_included",
+                "invalidation_predicates",
+                "coverage_status",
+                "policy_version",
+                "producer_id",
+                "producer_version",
+                "fact_claim_ids",
+                "inference_claim_ids",
+                "assumption_claim_ids",
+                "hypothesis_claim_ids",
+            },
+            field="context_package",
+        )
+        if value["schema"] != CONTEXT_PACKAGE_SCHEMA:
+            _fail("schema_mismatch", "unsupported ContextPackage schema")
+        result = cls(
+            package_id=value["package_id"],
+            intent_basis=_parse_intent(value["intent_basis"]),
+            repo_view=_parse_repo_binding(value["repo_view"]),
+            understanding_id=value["understanding_id"],
+            horizon=value["horizon"],
+            requested_dimensions=_identifier_sequence(value["requested_dimensions"], field="package.requested_dimensions"),
+            covered_dimensions=_identifier_sequence(value["covered_dimensions"], field="package.covered_dimensions"),
+            must_see_categories=_identifier_sequence(value["must_see_categories"], field="package.must_see_categories"),
+            covered_must_see=_identifier_sequence(value["covered_must_see"], field="package.covered_must_see"),
+            coverage_bindings=tuple(CoverageBinding.from_mapping(item) for item in value["coverage_bindings"]),
+            unknowns=tuple(Unknown.from_mapping(item) for item in value["unknowns"]),
+            omissions=tuple(Omission.from_mapping(item) for item in value["omissions"]),
+            contradictions=tuple(ClaimContradiction.from_mapping(item) for item in value["contradictions"]),
+            included_fragment_ids=_sequence(value["included_fragment_ids"], field="package.included_fragment_ids"),
+            affordances=tuple(ContextAffordance.from_mapping(item) for item in value["affordances"]),
+            architecture_constraints_included=_identifier_sequence(value["architecture_constraints_included"], field="package.architecture_constraints_included"),
+            invalidation_predicates=_identifier_sequence(value["invalidation_predicates"], field="package.invalidation_predicates", allow_empty=False),
+            policy_version=value["policy_version"],
+            producer_id=value["producer_id"],
+            producer_version=value["producer_version"],
+            fact_claim_ids=_digest_sequence(value["fact_claim_ids"], field="package.fact_claim_ids"),
+            inference_claim_ids=_digest_sequence(value["inference_claim_ids"], field="package.inference_claim_ids"),
+            assumption_claim_ids=_digest_sequence(value["assumption_claim_ids"], field="package.assumption_claim_ids"),
+            hypothesis_claim_ids=_digest_sequence(value["hypothesis_claim_ids"], field="package.hypothesis_claim_ids"),
+        )
+        if value["coverage_status"] != result.coverage_status:
+            _fail("coverage_status_mismatch", "package coverage_status must be mechanically derived")
+        if value["package_id"] != result.package_id:
+            _fail("context_package_integrity_failure", "package_id differs from exact record identity")
+        return result
+
+
+@dataclass(frozen=True)
+class ContextRequest:
+    """Immutable semantic request for more context; never a scheduler item."""
+
+    request_id: str
+    intent_basis: IntentBasis
+    repo_view: RepoViewBinding
+    source_package_id: str
+    gap_ids: tuple[str, ...]
+    horizon: str
+    requested_dimensions: tuple[str, ...]
+    requested_evidence: tuple[str, ...]
+    question: str
+    counterexample: str | None
+    reason: str
+    producer_id: str = M2C_PRODUCER_ID
+    producer_version: str = M2C_PRODUCER_VERSION
+
+    def __post_init__(self) -> None:
+        _digest(self.request_id, field="request_id")
+        if not isinstance(self.intent_basis, IntentBasis) or not isinstance(self.repo_view, RepoViewBinding):
+            _fail("malformed_context_request", "ContextRequest requires typed intent and RepoView basis")
+        _digest(self.source_package_id, field="source_package_id")
+        _digest_sequence(self.gap_ids, field="request.gap_ids", allow_empty=False)
+        if self.horizon not in HORIZONS:
+            _fail("horizon_invalid", f"unsupported request horizon: {self.horizon}")
+        _identifier_sequence(self.requested_dimensions, field="request.requested_dimensions", allow_empty=False)
+        _sequence(self.requested_evidence, field="request.requested_evidence", allow_empty=False)
+        _text(self.question, field="request.question")
+        if self.counterexample is not None:
+            _text(self.counterexample, field="request.counterexample")
+        _text(self.reason, field="request.reason")
+        _identifier(self.producer_id, field="request.producer_id")
+        _identifier(self.producer_version, field="request.producer_version")
+        if self.request_id != _record_digest(self._identity_payload()):
+            _fail("context_request_integrity_failure", "request_id does not match its semantic identity")
+
+    def _identity_payload(self) -> dict[str, Any]:
+        return {
+            "schema": CONTEXT_REQUEST_SCHEMA,
+            "intent_basis": self.intent_basis.as_dict(),
+            "repo_view": self.repo_view.as_dict(),
+            "source_package_id": self.source_package_id,
+            "gap_ids": list(self.gap_ids),
+            "horizon": self.horizon,
+            "requested_dimensions": list(self.requested_dimensions),
+            "requested_evidence": list(self.requested_evidence),
+            "question": self.question,
+            "counterexample": self.counterexample,
+            "reason": self.reason,
+            "producer_id": self.producer_id,
+            "producer_version": self.producer_version,
+        }
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"schema": CONTEXT_REQUEST_SCHEMA, "request_id": self.request_id, **self._identity_payload()}
+
+    def to_json_bytes(self) -> bytes:
+        return canonical_json_bytes(self.as_dict())
+
+    def validate_source_package(self, package: ContextPackage) -> None:
+        if not isinstance(package, ContextPackage):
+            _fail("stale_request_basis", "ContextRequest source package is unavailable")
+        if (
+            package.package_id != self.source_package_id
+            or package.intent_basis != self.intent_basis
+            or package.repo_view != self.repo_view
+            or not set(self.gap_ids).issubset(package.gap_ids)
+        ):
+            _fail("stale_request_basis", "ContextRequest is not bound to the exact source ContextPackage")
+
+    @classmethod
+    def create(
+        cls,
+        package: ContextPackage,
+        *,
+        gap_ids: Sequence[str],
+        horizon: str,
+        requested_dimensions: Sequence[str],
+        requested_evidence: Sequence[str],
+        question: str,
+        reason: str,
+        counterexample: str | None = None,
+    ) -> "ContextRequest":
+        if not isinstance(package, ContextPackage):
+            _fail("malformed_context_request", "ContextRequest requires a source ContextPackage")
+        gaps = tuple(gap_ids)
+        if not set(gaps).issubset(package.gap_ids) or not gaps:
+            _fail("gap_not_visible", "ContextRequest must target visible source-package gaps")
+        identity = {
+            "schema": CONTEXT_REQUEST_SCHEMA,
+            "intent_basis": package.intent_basis.as_dict(),
+            "repo_view": package.repo_view.as_dict(),
+            "source_package_id": package.package_id,
+            "gap_ids": list(gaps),
+            "horizon": horizon,
+            "requested_dimensions": list(requested_dimensions),
+            "requested_evidence": list(requested_evidence),
+            "question": question,
+            "counterexample": counterexample,
+            "reason": reason,
+            "producer_id": M2C_PRODUCER_ID,
+            "producer_version": M2C_PRODUCER_VERSION,
+        }
+        return cls(
+            _record_digest(identity),
+            package.intent_basis,
+            package.repo_view,
+            package.package_id,
+            gaps,
+            horizon,
+            tuple(requested_dimensions),
+            tuple(requested_evidence),
+            question,
+            counterexample,
+            reason,
+        )
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "ContextRequest":
+        _exact_fields(
+            value,
+            {
+                "schema",
+                "request_id",
+                "intent_basis",
+                "repo_view",
+                "source_package_id",
+                "gap_ids",
+                "horizon",
+                "requested_dimensions",
+                "requested_evidence",
+                "question",
+                "counterexample",
+                "reason",
+                "producer_id",
+                "producer_version",
+            },
+            field="context_request",
+        )
+        if value["schema"] != CONTEXT_REQUEST_SCHEMA:
+            _fail("schema_mismatch", "unsupported ContextRequest schema")
+        return cls(
+            value["request_id"],
+            _parse_intent(value["intent_basis"]),
+            _parse_repo_binding(value["repo_view"]),
+            value["source_package_id"],
+            _digest_sequence(value["gap_ids"], field="request.gap_ids", allow_empty=False),
+            value["horizon"],
+            _identifier_sequence(value["requested_dimensions"], field="request.requested_dimensions", allow_empty=False),
+            _sequence(value["requested_evidence"], field="request.requested_evidence", allow_empty=False),
+            value["question"],
+            value["counterexample"],
+            value["reason"],
+            value["producer_id"],
+            value["producer_version"],
+        )
+
+
+@dataclass(frozen=True)
+class GapResolutionEvidence:
+    """Explicit evidence edge for one resolved ContextPackage gap."""
+
+    gap_resolution_id: str
+    gap_id: str
+    added_fragment_ids: tuple[str, ...]
+    supporting_claim_ids: tuple[str, ...]
+    coverage_binding_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _digest(self.gap_resolution_id, field="gap_resolution.gap_resolution_id")
+        _digest(self.gap_id, field="gap_resolution.gap_id")
+        _digest_sequence(self.added_fragment_ids, field="gap_resolution.added_fragment_ids")
+        _digest_sequence(self.supporting_claim_ids, field="gap_resolution.supporting_claim_ids")
+        _digest_sequence(self.coverage_binding_ids, field="gap_resolution.coverage_binding_ids")
+        if not (self.added_fragment_ids or self.supporting_claim_ids or self.coverage_binding_ids):
+            _fail("resolution_evidence_required", "each resolved gap requires explicit fragment/claim/coverage evidence")
+        if self.gap_resolution_id != _record_digest(self._identity_payload()):
+            _fail("gap_resolution_integrity_failure", "gap_resolution_id does not match exact evidence identity")
+
+    def _identity_payload(self) -> dict[str, Any]:
+        return {
+            "schema": GAP_RESOLUTION_EVIDENCE_SCHEMA,
+            "gap_id": self.gap_id,
+            "added_fragment_ids": list(self.added_fragment_ids),
+            "supporting_claim_ids": list(self.supporting_claim_ids),
+            "coverage_binding_ids": list(self.coverage_binding_ids),
+        }
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"schema": GAP_RESOLUTION_EVIDENCE_SCHEMA, "gap_resolution_id": self.gap_resolution_id, **self._identity_payload()}
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        gap_id: str,
+        added_fragment_ids: Sequence[str] = (),
+        supporting_claim_ids: Sequence[str] = (),
+        coverage_binding_ids: Sequence[str] = (),
+    ) -> "GapResolutionEvidence":
+        identity = {
+            "schema": GAP_RESOLUTION_EVIDENCE_SCHEMA,
+            "gap_id": gap_id,
+            "added_fragment_ids": list(added_fragment_ids),
+            "supporting_claim_ids": list(supporting_claim_ids),
+            "coverage_binding_ids": list(coverage_binding_ids),
+        }
+        return cls(
+            _record_digest(identity),
+            gap_id,
+            tuple(added_fragment_ids),
+            tuple(supporting_claim_ids),
+            tuple(coverage_binding_ids),
+        )
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "GapResolutionEvidence":
+        _exact_fields(
+            value,
+            {"schema", "gap_resolution_id", "gap_id", "added_fragment_ids", "supporting_claim_ids", "coverage_binding_ids"},
+            field="gap_resolution_evidence",
+        )
+        if value["schema"] != GAP_RESOLUTION_EVIDENCE_SCHEMA:
+            _fail("schema_mismatch", "unsupported gap-resolution evidence schema")
+        return cls(
+            value["gap_resolution_id"],
+            value["gap_id"],
+            _digest_sequence(value["added_fragment_ids"], field="gap_resolution.added_fragment_ids"),
+            _digest_sequence(value["supporting_claim_ids"], field="gap_resolution.supporting_claim_ids"),
+            _digest_sequence(value["coverage_binding_ids"], field="gap_resolution.coverage_binding_ids"),
+        )
+
+
+@dataclass(frozen=True)
+class ContextResolution:
+    """Immutable request-to-result linkage; no request lifecycle state machine."""
+
+    resolution_id: str
+    request_id: str
+    prior_package_id: str
+    resulting_package_id: str | None
+    outcome: str
+    added_fragment_ids: tuple[str, ...]
+    resolved_gap_ids: tuple[str, ...]
+    unresolved_gap_ids: tuple[str, ...]
+    denial_reason: str | None = None
+    introduced_gap_ids: tuple[str, ...] = ()
+    gap_resolution_evidence: tuple[GapResolutionEvidence, ...] = ()
+    producer_id: str = M2C_PRODUCER_ID
+    producer_version: str = M2C_PRODUCER_VERSION
+
+    def __post_init__(self) -> None:
+        _digest(self.resolution_id, field="resolution_id")
+        _digest(self.request_id, field="request_id")
+        _digest(self.prior_package_id, field="prior_package_id")
+        if self.resulting_package_id is not None:
+            _digest(self.resulting_package_id, field="resulting_package_id")
+        if self.outcome not in RESOLUTION_OUTCOMES:
+            _fail("resolution_outcome_invalid", f"unsupported ContextResolution outcome: {self.outcome}")
+        _digest_sequence(self.added_fragment_ids, field="resolution.added_fragment_ids")
+        _digest_sequence(self.resolved_gap_ids, field="resolution.resolved_gap_ids")
+        _digest_sequence(self.unresolved_gap_ids, field="resolution.unresolved_gap_ids")
+        _digest_sequence(self.introduced_gap_ids, field="resolution.introduced_gap_ids")
+        _validate_unique_records(self.gap_resolution_evidence, "gap_resolution_id", field="resolution.gap_resolution_evidence")
+        if any(not isinstance(item, GapResolutionEvidence) for item in self.gap_resolution_evidence):
+            _fail("malformed_context_resolution", "gap_resolution_evidence must be typed")
+        if self.outcome == "RESOLVED":
+            if self.resulting_package_id is None or not self.added_fragment_ids or not self.resolved_gap_ids:
+                _fail("resolution_evidence_required", "RESOLVED linkage requires resulting package, fragments and gaps")
+            if self.denial_reason is not None:
+                _fail("malformed_context_resolution", "RESOLVED linkage cannot carry denial_reason")
+        else:
+            if not self.unresolved_gap_ids:
+                _fail("resolution_gap_mismatch", "denied/unavailable linkage must keep at least one gap visible")
+            if self.resulting_package_id is not None or self.added_fragment_ids or self.resolved_gap_ids or self.introduced_gap_ids or self.gap_resolution_evidence:
+                _fail("resolution_denial_mismatch", "denied/unavailable linkage cannot claim a result or repair")
+            if self.denial_reason is None:
+                _fail("resolution_denial_reason_required", "denied/unavailable linkage requires a visible reason")
+        _identifier(self.producer_id, field="resolution.producer_id")
+        _identifier(self.producer_version, field="resolution.producer_version")
+        if self.resolution_id != _record_digest(self._identity_payload()):
+            _fail("context_resolution_integrity_failure", "resolution_id does not match its semantic identity")
+
+    def _identity_payload(self) -> dict[str, Any]:
+        return {
+            "schema": CONTEXT_RESOLUTION_SCHEMA,
+            "request_id": self.request_id,
+            "prior_package_id": self.prior_package_id,
+            "resulting_package_id": self.resulting_package_id,
+            "outcome": self.outcome,
+            "added_fragment_ids": list(self.added_fragment_ids),
+            "resolved_gap_ids": list(self.resolved_gap_ids),
+            "unresolved_gap_ids": list(self.unresolved_gap_ids),
+            "denial_reason": self.denial_reason,
+            "introduced_gap_ids": list(self.introduced_gap_ids),
+            "gap_resolution_evidence": [item.as_dict() for item in self.gap_resolution_evidence],
+            "producer_id": self.producer_id,
+            "producer_version": self.producer_version,
+        }
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"schema": CONTEXT_RESOLUTION_SCHEMA, "resolution_id": self.resolution_id, **self._identity_payload()}
+
+    def to_json_bytes(self) -> bytes:
+        return canonical_json_bytes(self.as_dict())
+
+    @classmethod
+    def create(
+        cls,
+        request: ContextRequest,
+        prior_package: ContextPackage,
+        *,
+        resulting_package: ContextPackage | None = None,
+        added_fragments: Sequence[TypedContextFragment] = (),
+        binding_store: DurableBindingStore | None = None,
+        resolved_gap_ids: Sequence[str] = (),
+        unresolved_gap_ids: Sequence[str] | None = None,
+        outcome: str = "RESOLVED",
+        denial_reason: str | None = None,
+        gap_resolution_evidence: Sequence[GapResolutionEvidence] = (),
+        introduced_gap_ids: Sequence[str] = (),
+    ) -> "ContextResolution":
+        if not isinstance(request, ContextRequest) or not isinstance(prior_package, ContextPackage):
+            _fail("malformed_context_resolution", "resolution requires typed request and prior package")
+        request.validate_source_package(prior_package)
+        if outcome == "RESOLVED":
+            if not isinstance(resulting_package, ContextPackage):
+                _fail("resolution_evidence_required", "resolved request requires resulting ContextPackage")
+            if resulting_package.intent_basis != prior_package.intent_basis or resulting_package.repo_view != prior_package.repo_view:
+                _fail("resolution_basis_mismatch", "resulting package must preserve exact intent and RepoView basis")
+            fragments = tuple(added_fragments)
+            if binding_store is None or not fragments:
+                _fail("resolution_evidence_required", "resolved request requires accepted M2b fragments")
+            fragment_ids: list[str] = []
+            for fragment in fragments:
+                if not isinstance(fragment, TypedContextFragment) or fragment.repo_view != prior_package.repo_view:
+                    _fail("resolution_basis_mismatch", "added fragment is not bound to the exact package RepoView")
+                accepted = binding_store.resolve_accepted(fragment.fragment_id)
+                if accepted.fragment != fragment:
+                    _fail("resolution_evidence_required", "added fragment is not the accepted durable binding")
+                fragment_ids.append(fragment.fragment_id)
+            resolved = tuple(resolved_gap_ids)
+            if not resolved or not set(resolved).issubset(request.gap_ids):
+                _fail("resolution_gap_mismatch", "resolved gaps must be requested visible gaps")
+            if set(resolved) & set(resulting_package.gap_ids):
+                _fail("resolution_gap_mismatch", "a resolved gap remains visible in resulting package")
+            introduced = tuple(introduced_gap_ids)
+            if set(introduced) & set(prior_package.gap_ids):
+                _fail("resolution_gap_mismatch", "introduced gaps must be new to the prior package")
+            expected_resulting = (set(prior_package.gap_ids) - set(resolved)) | set(introduced)
+            if set(resulting_package.gap_ids) != expected_resulting:
+                _fail("resolution_gap_mismatch", "resulting gaps must equal prior minus resolved plus introduced gaps")
+            unresolved = tuple(resulting_package.gap_ids) if unresolved_gap_ids is None else tuple(unresolved_gap_ids)
+            if set(unresolved) != set(resulting_package.gap_ids):
+                _fail("resolution_gap_mismatch", "unresolved gaps must match resulting package gaps")
+            added = tuple(fragment_ids)
+            evidence = tuple(gap_resolution_evidence)
+            if {item.gap_id for item in evidence} != set(resolved) or len(evidence) != len(resolved):
+                _fail("resolution_evidence_required", "each and only each resolved gap requires one evidence edge")
+            package_claim_ids = {
+                claim_id
+                for values in (
+                    resulting_package.fact_claim_ids,
+                    resulting_package.inference_claim_ids,
+                    resulting_package.assumption_claim_ids,
+                    resulting_package.hypothesis_claim_ids,
+                )
+                for claim_id in values
+            }
+            coverage_by_id = {item.coverage_binding_id: item for item in resulting_package.coverage_bindings}
+            gaps_by_id = {item.unknown_id: item for item in prior_package.unknowns} | {
+                item.omission_id: item for item in prior_package.omissions
+            }
+            for item in evidence:
+                if not set(item.added_fragment_ids).issubset(set(added)):
+                    _fail("resolution_evidence_mismatch", "gap evidence must point only to newly accepted fragments")
+                if not set(item.supporting_claim_ids).issubset(package_claim_ids):
+                    _fail("resolution_evidence_mismatch", "gap evidence names a claim outside the resulting package")
+                if not set(item.coverage_binding_ids).issubset(coverage_by_id):
+                    _fail("resolution_evidence_mismatch", "gap evidence names a coverage binding outside the resulting package")
+                gap = gaps_by_id.get(item.gap_id)
+                if gap is None:
+                    _fail("resolution_gap_mismatch", "gap evidence names a gap outside the prior package")
+                if not any(
+                    coverage_by_id[binding_id].target == gap.dimension
+                    for binding_id in item.coverage_binding_ids
+                ):
+                    _fail("resolution_evidence_mismatch", "gap evidence does not ground the resolved gap dimension")
+                for binding_id in item.coverage_binding_ids:
+                    coverage = coverage_by_id[binding_id]
+                    if not (
+                        set(coverage.supporting_fragment_ids) & set(item.added_fragment_ids)
+                        or set(coverage.supporting_claim_ids) & set(item.supporting_claim_ids)
+                    ):
+                        _fail("resolution_evidence_mismatch", "gap evidence is not linked to the binding support it names")
+            result_id = resulting_package.package_id
+        elif outcome in {"DENIED", "UNAVAILABLE"}:
+            if resulting_package is not None or added_fragments or resolved_gap_ids or gap_resolution_evidence or introduced_gap_ids:
+                _fail("resolution_denial_mismatch", "denied/unavailable request cannot carry repair evidence")
+            unresolved = tuple(prior_package.gap_ids) if unresolved_gap_ids is None else tuple(unresolved_gap_ids)
+            if not set(request.gap_ids).issubset(unresolved):
+                _fail("resolution_gap_mismatch", "denied/unavailable request must keep requested gaps visible")
+            if set(unresolved) != set(prior_package.gap_ids):
+                _fail("resolution_gap_mismatch", "denied/unavailable linkage must preserve all prior gaps")
+            added = ()
+            resolved = ()
+            evidence = ()
+            introduced = ()
+            result_id = None
+        else:
+            _fail("resolution_outcome_invalid", f"unsupported ContextResolution outcome: {outcome}")
+        identity = {
+            "schema": CONTEXT_RESOLUTION_SCHEMA,
+            "request_id": request.request_id,
+            "prior_package_id": prior_package.package_id,
+            "resulting_package_id": result_id,
+            "outcome": outcome,
+            "added_fragment_ids": list(added),
+            "resolved_gap_ids": list(resolved),
+            "unresolved_gap_ids": list(unresolved),
+            "denial_reason": denial_reason,
+            "introduced_gap_ids": list(introduced),
+            "gap_resolution_evidence": [item.as_dict() for item in evidence],
+            "producer_id": M2C_PRODUCER_ID,
+            "producer_version": M2C_PRODUCER_VERSION,
+        }
+        return cls(
+            _record_digest(identity),
+            request.request_id,
+            prior_package.package_id,
+            result_id,
+            outcome,
+            added,
+            resolved,
+            unresolved,
+            denial_reason,
+            introduced,
+            evidence,
+        )
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "ContextResolution":
+        _exact_fields(
+            value,
+            {"schema", "resolution_id", "request_id", "prior_package_id", "resulting_package_id", "outcome", "added_fragment_ids", "resolved_gap_ids", "unresolved_gap_ids", "denial_reason", "introduced_gap_ids", "gap_resolution_evidence", "producer_id", "producer_version"},
+            field="context_resolution",
+        )
+        if value["schema"] != CONTEXT_RESOLUTION_SCHEMA:
+            _fail("schema_mismatch", "unsupported ContextResolution schema")
+        result = cls(
+            value["resolution_id"],
+            value["request_id"],
+            value["prior_package_id"],
+            value["resulting_package_id"],
+            value["outcome"],
+            _digest_sequence(value["added_fragment_ids"], field="resolution.added_fragment_ids"),
+            _digest_sequence(value["resolved_gap_ids"], field="resolution.resolved_gap_ids"),
+            _digest_sequence(value["unresolved_gap_ids"], field="resolution.unresolved_gap_ids"),
+            value["denial_reason"],
+            _digest_sequence(value["introduced_gap_ids"], field="resolution.introduced_gap_ids"),
+            tuple(GapResolutionEvidence.from_mapping(item) for item in value["gap_resolution_evidence"]),
+            value["producer_id"],
+            value["producer_version"],
+        )
+        if value["resolution_id"] != result.resolution_id:
+            _fail("context_resolution_integrity_failure", "resolution_id differs from exact record identity")
+        return result
+
+
+def _digest_sequence(value: object, *, field: str, allow_empty: bool = True) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        _fail("malformed_m2c_record", f"{field} must be an array")
+    result = tuple(_digest(item, field=f"{field}[]") for item in value)
+    if not allow_empty and not result:
+        _fail("malformed_m2c_record", f"{field} must not be empty")
+    if len(set(result)) != len(result):
+        _fail("duplicate_m2c_value", f"{field} must contain unique digests")
+    return result
+
+
+@dataclass(frozen=True)
+class DecisionOption:
+    option_id: str
+    summary: str
+    tradeoffs: tuple[str, ...]
+    risks: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _identifier(self.option_id, field="option.option_id")
+        _text(self.summary, field="option.summary")
+        _sequence(self.tradeoffs, field="option.tradeoffs")
+        _sequence(self.risks, field="option.risks")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "schema": DECISION_OPTION_SCHEMA,
+            "option_id": self.option_id,
+            "summary": self.summary,
+            "tradeoffs": list(self.tradeoffs),
+            "risks": list(self.risks),
+        }
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "DecisionOption":
+        _exact_fields(value, {"schema", "option_id", "summary", "tradeoffs", "risks"}, field="decision_option")
+        if value["schema"] != DECISION_OPTION_SCHEMA:
+            _fail("schema_mismatch", "unsupported DecisionOption schema")
+        return cls(
+            value["option_id"],
+            value["summary"],
+            _sequence(value["tradeoffs"], field="option.tradeoffs"),
+            _sequence(value["risks"], field="option.risks"),
+        )
+
+
+@dataclass(frozen=True)
+class EngineeringDecision:
+    """Concise immutable review/resume evidence without private model reasoning."""
+
+    decision_id: str
+    intent_basis: IntentBasis
+    repo_view_bases: tuple[RepoViewBinding, ...]
+    context_package_ids: tuple[str, ...]
+    established_fact_claim_ids: tuple[str, ...]
+    inference_claim_ids: tuple[str, ...]
+    assumption_claim_ids: tuple[str, ...]
+    hypothesis_claim_ids: tuple[str, ...]
+    alternatives: tuple[DecisionOption, ...]
+    chosen_option_id: str
+    must_preserve: tuple[str, ...]
+    must_not: tuple[str, ...]
+    expected_effect_scope: tuple[str, ...]
+    acceptance_obligations: tuple[str, ...]
+    evidence_obligations: tuple[str, ...]
+    uncertainty: tuple[str, ...]
+    requested_context_ids: tuple[str, ...]
+    architecture_consequences: tuple[str, ...]
+    revisit_triggers: tuple[str, ...]
+    producer_id: str = M2C_PRODUCER_ID
+    producer_version: str = M2C_PRODUCER_VERSION
+
+    def __post_init__(self) -> None:
+        _digest(self.decision_id, field="decision_id")
+        if not isinstance(self.intent_basis, IntentBasis) or not self.repo_view_bases:
+            _fail("malformed_engineering_decision", "decision requires intent and at least one RepoView basis")
+        for binding in self.repo_view_bases:
+            if not isinstance(binding, RepoViewBinding):
+                _fail("malformed_engineering_decision", "decision RepoView bases must be typed")
+        for field, values in (
+            ("decision.context_package_ids", self.context_package_ids),
+            ("decision.established_fact_claim_ids", self.established_fact_claim_ids),
+            ("decision.inference_claim_ids", self.inference_claim_ids),
+            ("decision.assumption_claim_ids", self.assumption_claim_ids),
+            ("decision.hypothesis_claim_ids", self.hypothesis_claim_ids),
+            ("decision.requested_context_ids", self.requested_context_ids),
+        ):
+            _digest_sequence(values, field=field)
+        _validate_unique_claim_lists(self)
+        if not self.alternatives:
+            _fail("decision_alternatives_required", "EngineeringDecision requires explicit alternatives")
+        _validate_unique_records(self.alternatives, "option_id", field="decision.alternatives")
+        if self.chosen_option_id not in {option.option_id for option in self.alternatives}:
+            _fail("chosen_option_missing", "chosen option must be one of the explicit alternatives")
+        _identifier(self.chosen_option_id, field="decision.chosen_option_id")
+        for field, values in (
+            ("decision.must_preserve", self.must_preserve),
+            ("decision.must_not", self.must_not),
+            ("decision.expected_effect_scope", self.expected_effect_scope),
+            ("decision.acceptance_obligations", self.acceptance_obligations),
+            ("decision.evidence_obligations", self.evidence_obligations),
+            ("decision.uncertainty", self.uncertainty),
+            ("decision.architecture_consequences", self.architecture_consequences),
+            ("decision.revisit_triggers", self.revisit_triggers),
+        ):
+            _sequence(values, field=field)
+        _identifier(self.producer_id, field="decision.producer_id")
+        _identifier(self.producer_version, field="decision.producer_version")
+        if self.decision_id != _record_digest(self._identity_payload()):
+            _fail("decision_integrity_failure", "decision_id does not match its semantic identity")
+
+    def _identity_payload(self) -> dict[str, Any]:
+        return {
+            "schema": ENGINEERING_DECISION_SCHEMA,
+            "intent_basis": self.intent_basis.as_dict(),
+            "repo_view_bases": [item.as_dict() for item in self.repo_view_bases],
+            "context_package_ids": list(self.context_package_ids),
+            "established_fact_claim_ids": list(self.established_fact_claim_ids),
+            "inference_claim_ids": list(self.inference_claim_ids),
+            "assumption_claim_ids": list(self.assumption_claim_ids),
+            "hypothesis_claim_ids": list(self.hypothesis_claim_ids),
+            "alternatives": [item.as_dict() for item in self.alternatives],
+            "chosen_option_id": self.chosen_option_id,
+            "must_preserve": list(self.must_preserve),
+            "must_not": list(self.must_not),
+            "expected_effect_scope": list(self.expected_effect_scope),
+            "acceptance_obligations": list(self.acceptance_obligations),
+            "evidence_obligations": list(self.evidence_obligations),
+            "uncertainty": list(self.uncertainty),
+            "requested_context_ids": list(self.requested_context_ids),
+            "architecture_consequences": list(self.architecture_consequences),
+            "revisit_triggers": list(self.revisit_triggers),
+            "producer_id": self.producer_id,
+            "producer_version": self.producer_version,
+        }
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"schema": ENGINEERING_DECISION_SCHEMA, "decision_id": self.decision_id, **self._identity_payload()}
+
+    def to_json_bytes(self) -> bytes:
+        return canonical_json_bytes(self.as_dict())
+
+    @classmethod
+    def create(
+        cls,
+        intent_basis: IntentBasis,
+        repo_views: Sequence[CommittedRepoView | RepoViewBinding],
+        context_packages: Sequence[ContextPackage],
+        *,
+        established_fact_claim_ids: Sequence[str] = (),
+        inference_claim_ids: Sequence[str] = (),
+        assumption_claim_ids: Sequence[str] = (),
+        hypothesis_claim_ids: Sequence[str] = (),
+        alternatives: Sequence[DecisionOption],
+        chosen_option_id: str,
+        must_preserve: Sequence[str] = (),
+        must_not: Sequence[str] = (),
+        expected_effect_scope: Sequence[str] = (),
+        acceptance_obligations: Sequence[str] = (),
+        evidence_obligations: Sequence[str] = (),
+        uncertainty: Sequence[str] = (),
+        requested_context_ids: Sequence[str] = (),
+        architecture_consequences: Sequence[str] = (),
+        revisit_triggers: Sequence[str] = (),
+        producer_id: str = M2C_PRODUCER_ID,
+        producer_version: str = M2C_PRODUCER_VERSION,
+        understanding_bases: Sequence[RepositoryUnderstandingView] = (),
+        understandings: Sequence[RepositoryUnderstandingView] | None = None,
+        binding_store: DurableBindingStore | None = None,
+    ) -> "EngineeringDecision":
+        if not isinstance(intent_basis, IntentBasis):
+            _fail("malformed_intent_basis", "EngineeringDecision requires IntentBasis")
+        bindings = tuple(
+            RepoViewBinding.from_view(view) if isinstance(view, CommittedRepoView) else view for view in repo_views
+        )
+        if not bindings or any(not isinstance(item, RepoViewBinding) for item in bindings):
+            _fail("malformed_repo_view_basis", "EngineeringDecision requires exact RepoView bindings")
+        committed_views = {
+            RepoViewBinding.from_view(view): view for view in repo_views if isinstance(view, CommittedRepoView)
+        }
+        packages = tuple(context_packages)
+        if not packages:
+            _fail("decision_context_required", "EngineeringDecision requires at least one ContextPackage basis")
+        if any(
+            not isinstance(package, ContextPackage)
+            or package.intent_basis != intent_basis
+            or package.repo_view not in bindings
+            for package in packages
+        ):
+            _fail("decision_basis_mismatch", "decision ContextPackages must share exact intent and RepoView basis")
+        if {item for item in bindings} != {package.repo_view for package in packages}:
+            _fail("decision_basis_mismatch", "decision RepoView bases must exactly equal package RepoView bases")
+        supplied_bases = tuple(understandings) if understandings is not None else tuple(understanding_bases)
+        claim_groups = (
+            ("FACT", tuple(established_fact_claim_ids)),
+            ("INFERENCE", tuple(inference_claim_ids)),
+            ("ASSUMPTION", tuple(assumption_claim_ids)),
+            ("HYPOTHESIS", tuple(hypothesis_claim_ids)),
+        )
+        if any(ids for _kind, ids in claim_groups) and not supplied_bases:
+            _fail("decision_claim_basis_required", "decision claims require the actual Understanding basis")
+        actual_claims: dict[str, UnderstandingClaim] = {}
+        for understanding in supplied_bases:
+            if not isinstance(understanding, RepositoryUnderstandingView):
+                _fail("decision_claim_basis_mismatch", "decision Understanding bases must be typed")
+            if understanding.intent_basis != intent_basis or understanding.repo_view not in bindings:
+                _fail("decision_basis_mismatch", "decision Understanding basis has a foreign intent or RepoView")
+            if binding_store is not None:
+                committed_view = committed_views.get(understanding.repo_view)
+                needs_exact_view = any(claim.kind == "FACT" for claim in understanding.claims) or any(
+                    binding.supporting_fragment_ids for binding in understanding.coverage_bindings
+                )
+                package = next(
+                    (candidate for candidate in packages if candidate.understanding_id == understanding.understanding_id),
+                    None,
+                )
+                needs_exact_view = needs_exact_view or bool(package and package.included_fragment_ids)
+                if needs_exact_view and committed_view is None:
+                    _fail(
+                        "decision_source_authority_required",
+                        "source-grounded decision bases require the exact CommittedRepoView reader",
+                    )
+                understanding.validate_source_grounding(
+                    binding_store,
+                    committed_view if committed_view is not None else understanding.repo_view,
+                )
+                if package is not None and (needs_exact_view or package.included_fragment_ids):
+                    if committed_view is None:
+                        _fail(
+                            "decision_source_authority_required",
+                            "source-grounded ContextPackage bases require the exact CommittedRepoView reader",
+                        )
+                    package.validate_source_grounding(understanding, committed_view, binding_store)
+            for claim in understanding.claims:
+                if claim.claim_id in actual_claims and actual_claims[claim.claim_id] != claim:
+                    _fail("decision_claim_basis_mismatch", "decision claim ID has conflicting Understanding definitions")
+                actual_claims[claim.claim_id] = claim
+        package_by_understanding = {package.understanding_id: package for package in packages}
+        for understanding in supplied_bases:
+            package = package_by_understanding.get(understanding.understanding_id)
+            if package is None:
+                _fail("decision_basis_mismatch", "decision Understanding has no exact ContextPackage")
+        package_claim_classes: dict[str, str] = {}
+        for package in packages:
+            for kind, ids in (
+                ("FACT", package.fact_claim_ids),
+                ("INFERENCE", package.inference_claim_ids),
+                ("ASSUMPTION", package.assumption_claim_ids),
+                ("HYPOTHESIS", package.hypothesis_claim_ids),
+            ):
+                for claim_id in ids:
+                    package_claim_classes[claim_id] = kind
+        for kind, ids in claim_groups:
+            for claim_id in ids:
+                claim = actual_claims.get(claim_id)
+                if claim is None or claim.kind != kind or package_claim_classes.get(claim_id) != kind:
+                    _fail("decision_claim_basis_mismatch", "decision claim ID is not an exact member of its declared class")
+                if kind == "FACT":
+                    if binding_store is None:
+                        _fail("decision_claim_basis_required", "FACT decision claims require source grounding")
+                    committed_view = committed_views.get(claim.repo_view)
+                    if committed_view is None:
+                        _fail(
+                            "decision_source_authority_required",
+                            "FACT decision claims require the exact CommittedRepoView reader",
+                        )
+                    claim.validate_source_grounding(binding_store, committed_view)
+        identity = {
+            "schema": ENGINEERING_DECISION_SCHEMA,
+            "intent_basis": intent_basis.as_dict(),
+            "repo_view_bases": [item.as_dict() for item in bindings],
+            "context_package_ids": [item.package_id for item in packages],
+            "established_fact_claim_ids": list(established_fact_claim_ids),
+            "inference_claim_ids": list(inference_claim_ids),
+            "assumption_claim_ids": list(assumption_claim_ids),
+            "hypothesis_claim_ids": list(hypothesis_claim_ids),
+            "alternatives": [item.as_dict() for item in alternatives],
+            "chosen_option_id": chosen_option_id,
+            "must_preserve": list(must_preserve),
+            "must_not": list(must_not),
+            "expected_effect_scope": list(expected_effect_scope),
+            "acceptance_obligations": list(acceptance_obligations),
+            "evidence_obligations": list(evidence_obligations),
+            "uncertainty": list(uncertainty),
+            "requested_context_ids": list(requested_context_ids),
+            "architecture_consequences": list(architecture_consequences),
+            "revisit_triggers": list(revisit_triggers),
+            "producer_id": producer_id,
+            "producer_version": producer_version,
+        }
+        return cls(
+            _record_digest(identity),
+            intent_basis,
+            bindings,
+            tuple(item.package_id for item in packages),
+            tuple(established_fact_claim_ids),
+            tuple(inference_claim_ids),
+            tuple(assumption_claim_ids),
+            tuple(hypothesis_claim_ids),
+            tuple(alternatives),
+            chosen_option_id,
+            tuple(must_preserve),
+            tuple(must_not),
+            tuple(expected_effect_scope),
+            tuple(acceptance_obligations),
+            tuple(evidence_obligations),
+            tuple(uncertainty),
+            tuple(requested_context_ids),
+            tuple(architecture_consequences),
+            tuple(revisit_triggers),
+            producer_id,
+            producer_version,
+        )
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "EngineeringDecision":
+        _exact_fields(
+            value,
+            {
+                "schema",
+                "decision_id",
+                "intent_basis",
+                "repo_view_bases",
+                "context_package_ids",
+                "established_fact_claim_ids",
+                "inference_claim_ids",
+                "assumption_claim_ids",
+                "hypothesis_claim_ids",
+                "alternatives",
+                "chosen_option_id",
+                "must_preserve",
+                "must_not",
+                "expected_effect_scope",
+                "acceptance_obligations",
+                "evidence_obligations",
+                "uncertainty",
+                "requested_context_ids",
+                "architecture_consequences",
+                "revisit_triggers",
+                "producer_id",
+                "producer_version",
+            },
+            field="engineering_decision",
+        )
+        if value["schema"] != ENGINEERING_DECISION_SCHEMA:
+            _fail("schema_mismatch", "unsupported EngineeringDecision schema")
+        result = cls(
+            value["decision_id"],
+            _parse_intent(value["intent_basis"]),
+            tuple(_parse_repo_binding(item, field="decision.repo_view_bases[]") for item in value["repo_view_bases"]),
+            _digest_sequence(value["context_package_ids"], field="decision.context_package_ids"),
+            _digest_sequence(value["established_fact_claim_ids"], field="decision.established_fact_claim_ids"),
+            _digest_sequence(value["inference_claim_ids"], field="decision.inference_claim_ids"),
+            _digest_sequence(value["assumption_claim_ids"], field="decision.assumption_claim_ids"),
+            _digest_sequence(value["hypothesis_claim_ids"], field="decision.hypothesis_claim_ids"),
+            tuple(DecisionOption.from_mapping(item) for item in value["alternatives"]),
+            value["chosen_option_id"],
+            _sequence(value["must_preserve"], field="decision.must_preserve"),
+            _sequence(value["must_not"], field="decision.must_not"),
+            _sequence(value["expected_effect_scope"], field="decision.expected_effect_scope"),
+            _sequence(value["acceptance_obligations"], field="decision.acceptance_obligations"),
+            _sequence(value["evidence_obligations"], field="decision.evidence_obligations"),
+            _sequence(value["uncertainty"], field="decision.uncertainty"),
+            _digest_sequence(value["requested_context_ids"], field="decision.requested_context_ids"),
+            _sequence(value["architecture_consequences"], field="decision.architecture_consequences"),
+            _sequence(value["revisit_triggers"], field="decision.revisit_triggers"),
+            value["producer_id"],
+            value["producer_version"],
+        )
+        return result
+
+
+def _validate_unique_claim_lists(decision: EngineeringDecision) -> None:
+    groups = (
+        decision.established_fact_claim_ids,
+        decision.inference_claim_ids,
+        decision.assumption_claim_ids,
+        decision.hypothesis_claim_ids,
+    )
+    flattened = [claim_id for group in groups for claim_id in group]
+    if len(flattened) != len(set(flattened)):
+        _fail("decision_claim_overlap", "a decision claim cannot be classified in multiple epistemic lists")
+
+
+def validate_decision_applicability(
+    decision: EngineeringDecision,
+    *,
+    intent_basis: IntentBasis,
+    repo_views: Sequence[CommittedRepoView | RepoViewBinding],
+    context_packages: Sequence[ContextPackage],
+) -> None:
+    """Reject reuse when any exact intent, RepoView or package basis changed."""
+
+    if decision.intent_basis != intent_basis:
+        if decision.intent_basis.intent_revision != intent_basis.intent_revision or decision.intent_basis.intent_digest != intent_basis.intent_digest:
+            _fail("stale_intent_basis", "EngineeringDecision intent revision/digest is stale")
+        _fail("stale_decision_basis", "EngineeringDecision task identity differs")
+    current_views = tuple(
+        RepoViewBinding.from_view(view) if isinstance(view, CommittedRepoView) else view for view in repo_views
+    )
+    if set(decision.repo_view_bases) != set(current_views):
+        _fail("stale_decision_basis", "EngineeringDecision RepoView basis set is not exactly current")
+    current_packages = {package.package_id: package for package in context_packages}
+    if set(decision.context_package_ids) != set(current_packages):
+        _fail("stale_decision_basis", "EngineeringDecision ContextPackage basis set is not exactly current")
+    for package in current_packages.values():
+        if package.intent_basis != intent_basis or package.repo_view not in current_views:
+            _fail("stale_decision_basis", "EngineeringDecision ContextPackage basis is stale")
+
+
+def semantic_record_bytes(record: object) -> bytes:
+    """Return canonical bytes for one explicit M2c record, with no protocol fields."""
+
+    as_dict = getattr(record, "as_dict", None)
+    if not callable(as_dict):
+        _fail("invalid_semantic_record", "M2c transport requires a semantic record with as_dict()")
+    document = as_dict()
+    if not isinstance(document, Mapping) or not isinstance(document.get("schema"), str):
+        _fail("invalid_semantic_record", "semantic record must expose a schema")
+    return canonical_json_bytes(document)
+
+
+def semantic_record_content_ref(record: object):
+    """Create the M2b ContentRef for canonical M2c record bytes."""
+
+    document = getattr(record, "as_dict", lambda: None)()
+    if not isinstance(document, Mapping) or not isinstance(document.get("schema"), str):
+        _fail("invalid_semantic_record", "semantic record must expose a schema")
+    return make_content_ref(SEMANTIC_RECORD_CONTENT_TYPE, document["schema"], semantic_record_bytes(record))
+
+
+def publish_semantic_record(
+    record: object,
+    view: CommittedRepoView,
+    content_store: ImmutableContentStore,
+    binding_store: DurableBindingStore,
+) -> TypedContextFragment:
+    """Publish and durably accept one record through the existing M2b substrate."""
+
+    if not isinstance(view, CommittedRepoView):
+        _fail("malformed_repo_view_basis", "semantic record publication requires CommittedRepoView")
+    raw = semantic_record_bytes(record)
+    document = record.as_dict()  # type: ignore[union-attr]
+    content_ref = make_content_ref(SEMANTIC_RECORD_CONTENT_TYPE, document["schema"], raw)
+    content_store.publish(content_ref, raw)
+    fragment = TypedContextFragment.create(
+        view,
+        content_ref,
+        fragment_type=SEMANTIC_RECORD_CONTENT_TYPE,
+        fragment_schema=document["schema"],
+        payload_size_bytes=len(raw),
+    )
+    binding_store.accept(fragment, view=view)
+    return fragment
+
+
+def reconstruct_semantic_record(raw: bytes) -> object:
+    """Reconstruct only known M2c records from exact canonical bytes."""
+
+    if not isinstance(raw, bytes):
+        _fail("invalid_semantic_record", "semantic record bytes must be bytes")
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise EngineeringIntelligenceError("malformed_semantic_record", "semantic record bytes are not canonical JSON") from exc
+    if not isinstance(document, Mapping) or canonical_json_bytes(document) != raw:
+        _fail("malformed_semantic_record", "semantic record bytes are not canonical")
+    schema = document.get("schema")
+    parsers = {
+        UNDERSTANDING_SCHEMA: RepositoryUnderstandingView.from_mapping,
+        CONTEXT_PACKAGE_SCHEMA: ContextPackage.from_mapping,
+        CONTEXT_REQUEST_SCHEMA: ContextRequest.from_mapping,
+        CONTEXT_RESOLUTION_SCHEMA: ContextResolution.from_mapping,
+        ENGINEERING_DECISION_SCHEMA: EngineeringDecision.from_mapping,
+    }
+    parser = parsers.get(schema)
+    if parser is None:
+        _fail("schema_mismatch", "semantic record schema is not an M2c record")
+    return parser(document)
+
+
+def transport_semantic_record(
+    record: object,
+    view: CommittedRepoView,
+    content_store: ImmutableContentStore,
+    binding_store: DurableBindingStore,
+) -> tuple[TypedContextFragment, object]:
+    """Exercise the exact M2b Browser→Native path for one semantic record."""
+
+    fragment = publish_semantic_record(record, view, content_store, binding_store)
+    envelope = BrowserTransportProvider().encode(binding_store, fragment, expected_view=view)
+    decoded = NativeTransportProvider().decode(envelope, bindings=binding_store, expected_view=view)
+    if decoded.fragment != fragment:
+        _fail("transport_integrity_failure", "M2b transport returned a different accepted fragment")
+    return fragment, reconstruct_semantic_record(decoded.raw)
+
+
+__all__ = [
+    "AFFORDANCE_SCHEMA",
+    "CLAIM_KINDS",
+    "CLAIM_SCHEMA",
+    "UNDERSTANDING_SCHEMA",
+    "CONTEXT_PACKAGE_SCHEMA",
+    "CONTEXT_REQUEST_SCHEMA",
+    "CONTEXT_RESOLUTION_SCHEMA",
+    "CONTRADICTION_SCHEMA",
+    "ContextAffordance",
+    "ContextPackage",
+    "ContextRequest",
+    "ContextResolution",
+    "DecisionOption",
+    "ENGINEERING_DECISION_SCHEMA",
+    "EngineeringDecision",
+    "EngineeringIntelligenceError",
+    "HORIZONS",
+    "IntentBasis",
+    "M2C_POLICY_VERSION",
+    "M2C_PRODUCER_ID",
+    "M2C_PRODUCER_VERSION",
+    "OMISSION_SCHEMA",
+    "RepositoryUnderstandingView",
+    "RepoSourceEvidence",
+    "REPO_SOURCE_EVIDENCE_SCHEMA",
+    "SEMANTIC_RECORD_CONTENT_TYPE",
+    "UNKNOWN_SCHEMA",
+    "UnderstandingClaim",
+    "ClaimContradiction",
+    "Unknown",
+    "Omission",
+    "publish_semantic_record",
+    "publish_repo_source_evidence",
+    "reconstruct_semantic_record",
+    "semantic_record_bytes",
+    "semantic_record_content_ref",
+    "transport_semantic_record",
+    "validate_decision_applicability",
+]
+
+```
+
+## SOURCE bdb_vnext/content_store.py
+object: 6fada01c12bfec5aaae1100455f8c0c12d04c147
+size_bytes: 31409
+raw_sha256: sha256:7ccbfc24106d53b03d1af927d14d0d6b81921d6065cf156cfc7cafbb967eebbd
+```text
+"""Small isolated vNext typed-content and durable-binding primitives.
+
+This is the production-shaped M2b substrate.  It deliberately owns no task,
+submission, lifecycle, scheduler, runtime activation or legacy state.  The
+content object/ref pair is immutable and the binding store accepts a fragment
+only after the exact object has been published and verified.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import os
+import re
+import sqlite3
+import stat
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import Any, Literal, NoReturn
+
+from bdb_shared.evidence import canonical_json_bytes
+from bdb_vnext.repo_view import CommittedRepoView
+
+
+CONTENT_STORE_SCHEMA = "bdb-vnext-content-store-v1"
+M2B_BINDING_STORE_SCHEMA = "bdb-vnext-m2b-binding-store-v1"
+M2B_BINDING_STORE_VERSION = 1
+M2B_RUNTIME_CONFIG_SCHEMA = "bdb-vnext-m2b-runtime-config-v1"
+CONTEXT_FRAGMENT_SCHEMA = "bdb-vnext-context-fragment-v1"
+M2B_SEMANTIC_DOMAIN = "bdb-vnext-m2b-semantic-v1"
+X2_SEMANTIC_DOMAIN = "bdb-vnext-x2-semantic-v1"
+MAX_CONTENT_BYTES = 8 * 1024 * 1024
+MAX_CONTEXT_FRAGMENT_BYTES = 1 * 1024 * 1024
+MAX_METADATA_BYTES = 128 * 1024
+_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+:-]{0,127}$")
+
+
+class ContentStoreError(ValueError):
+    """Typed fail-closed error for M2b content and binding operations."""
+
+    def __init__(self, code: str, message: str, *, details: Mapping[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = dict(details or {})
+
+
+def _fail(code: str, message: str, *, details: Mapping[str, Any] | None = None) -> NoReturn:
+    raise ContentStoreError(code, message, details=details)
+
+
+def _digest_bytes(data: bytes) -> str:
+    return f"sha256:{hashlib.sha256(data).hexdigest()}"
+
+
+def _validate_digest(value: object, *, field: str) -> str:
+    if not isinstance(value, str) or _DIGEST.fullmatch(value) is None:
+        _fail("malformed_content_ref", f"{field} is not a lowercase sha256 digest")
+    return value
+
+
+def _validate_identifier(value: object, *, field: str) -> str:
+    if not isinstance(value, str) or _IDENTIFIER.fullmatch(value) is None:
+        _fail("malformed_content_ref", f"{field} is not a bounded identifier")
+    return value
+
+
+def _validate_oid(value: object, *, field: str, object_format: str) -> str:
+    if not isinstance(value, str):
+        _fail("malformed_repo_view_binding", f"{field} is not an object ID")
+    length = 40 if object_format == "sha1" else 64
+    if len(value) != length or any(character not in "0123456789abcdef" for character in value):
+        _fail("malformed_repo_view_binding", f"{field} is not a {object_format} object ID")
+    return value
+
+
+def _semantic_representation(content_type: str, schema: str, raw: bytes) -> tuple[str, dict[str, Any]]:
+    if (content_type, schema) == ("text/plain", "x2-text-v1"):
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ContentStoreError("semantic_decode_failure", "text content is not valid UTF-8") from exc
+        return X2_SEMANTIC_DOMAIN, {"encoding": "utf-8", "text": text}
+    if (content_type, schema) == ("application/octet-stream", "x2-bytes-v1"):
+        return X2_SEMANTIC_DOMAIN, {"base64": base64.b64encode(raw).decode("ascii")}
+    if content_type == "text/plain":
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ContentStoreError("semantic_decode_failure", "text content is not valid UTF-8") from exc
+        return M2B_SEMANTIC_DOMAIN, {"encoding": "utf-8", "text": text}
+    return M2B_SEMANTIC_DOMAIN, {"base64": base64.b64encode(raw).decode("ascii")}
+
+
+def _semantic_digest(content_type: str, schema: str, raw: bytes) -> str:
+    domain, value = _semantic_representation(content_type, schema, raw)
+    semantic = {
+        "domain": domain,
+        "type": content_type,
+        "schema": schema,
+        "value": value,
+    }
+    # X2's accepted semantic domains predate the shared evidence helper and
+    # intentionally hash canonical JSON without a trailing newline.  Keep
+    # that exact byte contract for the two published X2 domains while the
+    # versioned M2b domains continue using the repository evidence helper.
+    serialized = (
+        json.dumps(semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        if domain == X2_SEMANTIC_DOMAIN
+        else canonical_json_bytes(semantic)
+    )
+    return _digest_bytes(serialized)
+
+
+@dataclass(frozen=True)
+class ContentRef:
+    """The accepted X2 four-field contract, reused without a fixture import."""
+
+    type: str
+    schema: str
+    semantic_digest: str
+    raw_digest: str
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.type, field="type")
+        _validate_identifier(self.schema, field="schema")
+        _validate_digest(self.semantic_digest, field="semantic_digest")
+        _validate_digest(self.raw_digest, field="raw_digest")
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "type": self.type,
+            "schema": self.schema,
+            "semantic_digest": self.semantic_digest,
+            "raw_digest": self.raw_digest,
+        }
+
+    to_dict = as_dict
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "ContentRef":
+        if not isinstance(value, Mapping) or set(value) != {"type", "schema", "semantic_digest", "raw_digest"}:
+            _fail("malformed_content_ref", "ContentRef has an unexpected field set")
+        return cls(
+            _validate_identifier(value["type"], field="type"),
+            _validate_identifier(value["schema"], field="schema"),
+            _validate_digest(value["semantic_digest"], field="semantic_digest"),
+            _validate_digest(value["raw_digest"], field="raw_digest"),
+        )
+
+
+def make_content_ref(content_type: str, schema: str, raw: bytes) -> ContentRef:
+    if not isinstance(raw, bytes):
+        _fail("invalid_payload", "content payload must be bytes")
+    if len(raw) > MAX_CONTENT_BYTES:
+        _fail("payload_too_large", "content payload exceeds the bounded content limit")
+    content_type = _validate_identifier(content_type, field="type")
+    schema = _validate_identifier(schema, field="schema")
+    return ContentRef(
+        content_type,
+        schema,
+        _semantic_digest(content_type, schema, raw),
+        _digest_bytes(raw),
+    )
+
+
+def verify_content_ref(ref: ContentRef, raw: bytes) -> None:
+    if not isinstance(ref, ContentRef) or not isinstance(raw, bytes):
+        _fail("content_ref_integrity_failure", "ContentRef verification requires a typed ref and bytes")
+    if len(raw) > MAX_CONTENT_BYTES:
+        _fail("payload_too_large", "content payload exceeds the bounded content limit")
+    if _digest_bytes(raw) != ref.raw_digest:
+        _fail("raw_integrity_failure", "content bytes do not match ContentRef.raw_digest")
+    if _semantic_digest(ref.type, ref.schema, raw) != ref.semantic_digest:
+        _fail("semantic_integrity_failure", "content bytes do not match ContentRef.semantic_digest")
+
+
+def _contains(child: Path, parent: Path) -> bool:
+    try:
+        return os.path.commonpath((str(child), str(parent))) == os.path.commonpath((str(parent), str(parent)))
+    except ValueError:
+        return False
+
+
+def _is_reparse(info: os.stat_result) -> bool:
+    attributes = int(getattr(info, "st_file_attributes", 0))
+    return bool(attributes & int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)))
+
+
+def _assert_no_reparse_components(path: Path, *, field: str) -> None:
+    current = Path(path.anchor)
+    parts = path.parts[1:] if path.anchor else path.parts
+    for part in parts:
+        current = current / part
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode) or _is_reparse(info):
+            _fail("reparse_point", f"{field} contains a symlink or reparse point")
+
+
+def _absolute_root(value: str | Path) -> Path:
+    root = Path(value).expanduser()
+    if not root.is_absolute():
+        _fail("relative_path", "M2b roots must be absolute")
+    _assert_no_reparse_components(root, field="m2b root")
+    root.mkdir(parents=True, exist_ok=True)
+    resolved = root.resolve(strict=True)
+    _assert_no_reparse_components(resolved, field="m2b root")
+    return resolved
+
+
+def _safe_child(root: Path, relative: str, *, field: str) -> Path:
+    path = PurePosixPath(relative)
+    if path.is_absolute() or not relative or "\\" in relative or any(part in {"", ".", ".."} for part in path.parts):
+        _fail("path_escape", f"{field} is not an allowed relative path")
+    target = root.joinpath(*path.parts)
+    if not _contains(target, root) or target == root:
+        _fail("path_escape", f"{field} escapes its isolated root")
+    _assert_no_reparse_components(target, field=field)
+    return target
+
+
+def _file_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        int(getattr(info, "st_dev", 0)),
+        int(getattr(info, "st_ino", 0)),
+        int(getattr(info, "st_size", 0)),
+        int(getattr(info, "st_mtime_ns", 0)),
+        int(getattr(info, "st_file_attributes", 0)),
+    )
+
+
+def _read_verified(path: Path, *, field: str, max_bytes: int, missing_code: str) -> bytes:
+    try:
+        before = os.lstat(path)
+    except FileNotFoundError as exc:
+        _fail(missing_code, f"{field} is missing")
+    if stat.S_ISLNK(before.st_mode) or _is_reparse(before):
+        _fail("reparse_point", f"{field} is a symlink or reparse point")
+    if not stat.S_ISREG(before.st_mode):
+        _fail("unexpected_file_type", f"{field} is not a regular file")
+    flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0)) | int(getattr(os, "O_NOFOLLOW", 0))
+    try:
+        descriptor = os.open(str(path), flags)
+    except FileNotFoundError as exc:
+        _fail(missing_code, f"{field} disappeared before open")
+    except OSError as exc:
+        raise ContentStoreError("content_open_failed", f"unable to open {field}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if _file_identity(opened) != _file_identity(before):
+            _fail("path_identity_changed", f"{field} changed before handle acquisition")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            payload = handle.read(max_bytes + 1)
+        after_handle = os.fstat(descriptor)
+        try:
+            after_path = os.lstat(path)
+        except FileNotFoundError:
+            _fail("path_identity_changed", f"{field} disappeared during read")
+        if (
+            _file_identity(after_handle) != _file_identity(opened)
+            or _file_identity(after_path) != _file_identity(opened)
+        ):
+            _fail("path_identity_changed", f"{field} changed during handle-bound read")
+        if len(payload) > max_bytes:
+            _fail("payload_too_large", f"{field} exceeds its bounded read limit")
+        return payload
+    finally:
+        os.close(descriptor)
+
+
+def _write_fsync(path: Path, payload: bytes) -> None:
+    _assert_no_reparse_components(path.parent, field="temporary parent")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | int(getattr(os, "O_BINARY", 0))
+    try:
+        descriptor = os.open(str(path), flags, 0o600)
+    except FileExistsError as exc:
+        raise ContentStoreError("temporary_collision", "temporary publication path already exists") from exc
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+@dataclass(frozen=True)
+class ContentPublication:
+    ref: ContentRef
+    object_relative_path: str
+    ref_relative_path: str
+    object_publication: Literal["published", "converged"]
+    ref_publication: Literal["published", "converged"]
+
+
+class ImmutableContentStore:
+    """Immutable object/ref store with handle-bound reads and no overwrite."""
+
+    def __init__(self, root: str | Path) -> None:
+        self.root = _absolute_root(root)
+        self.content_root = self.root / "content"
+        self.objects_root = self.content_root / "objects"
+        self.refs_root = self.content_root / "refs"
+        self.temp_root = self.content_root / "tmp"
+        for directory in (self.content_root, self.objects_root, self.refs_root, self.temp_root):
+            _assert_no_reparse_components(directory, field="content layout")
+            directory.mkdir(parents=True, exist_ok=True)
+            _assert_no_reparse_components(directory, field="content layout")
+
+    def object_relative_path(self, ref: ContentRef) -> str:
+        _validate_digest(ref.raw_digest, field="raw_digest")
+        return f"objects/{ref.raw_digest[7:]}.bin"
+
+    def ref_relative_path(self, ref: ContentRef) -> str:
+        _validate_digest(ref.semantic_digest, field="semantic_digest")
+        return f"refs/{ref.semantic_digest[7:]}.json"
+
+    def object_path(self, ref: ContentRef) -> Path:
+        return _safe_child(self.content_root, self.object_relative_path(ref), field="object path")
+
+    def ref_path(self, ref: ContentRef) -> Path:
+        return _safe_child(self.content_root, self.ref_relative_path(ref), field="ref path")
+
+    def _temporary_path(self, prefix: str) -> Path:
+        return _safe_child(
+            self.content_root,
+            f"tmp/{prefix}-{hashlib.sha256(os.urandom(32)).hexdigest()}.partial",
+            field="temporary path",
+        )
+
+    def _publish_immutable(self, temporary: Path, target: Path, expected: bytes, *, field: str) -> Literal["published", "converged"]:
+        _assert_no_reparse_components(target.parent, field=f"{field} parent")
+        if os.path.lexists(target):
+            observed = _read_verified(target, field=field, max_bytes=MAX_CONTENT_BYTES, missing_code="raw_object_missing")
+            if observed != expected:
+                _fail("immutable_conflict", f"{field} already contains different bytes")
+            temporary.unlink(missing_ok=True)
+            return "converged"
+        try:
+            os.link(temporary, target, follow_symlinks=False)
+        except FileExistsError:
+            observed = _read_verified(target, field=field, max_bytes=MAX_CONTENT_BYTES, missing_code="raw_object_missing")
+            if observed != expected:
+                _fail("immutable_conflict", f"{field} won a race with different bytes")
+            temporary.unlink(missing_ok=True)
+            return "converged"
+        except OSError as exc:
+            raise ContentStoreError("atomic_publish_failed", f"atomic immutable publication failed for {field}") from exc
+        temporary.unlink(missing_ok=True)
+        return "published"
+
+    def publish(self, ref: ContentRef, raw: bytes) -> ContentPublication:
+        if not isinstance(ref, ContentRef):
+            _fail("invalid_content_ref", "publish requires ContentRef")
+        verify_content_ref(ref, raw)
+        object_path = self.object_path(ref)
+        ref_path = self.ref_path(ref)
+        object_temp = self._temporary_path("object")
+        _write_fsync(object_temp, raw)
+        object_publication = self._publish_immutable(object_temp, object_path, raw, field="committed object")
+        metadata = canonical_json_bytes(
+            {
+                "schema": CONTENT_STORE_SCHEMA,
+                "content_ref": ref.as_dict(),
+                "object_relative_path": self.object_relative_path(ref),
+            }
+        )
+        ref_temp = self._temporary_path("ref")
+        _write_fsync(ref_temp, metadata)
+        ref_publication = self._publish_immutable(ref_temp, ref_path, metadata, field="committed ref")
+        self.resolve(ref)
+        return ContentPublication(
+            ref,
+            self.object_relative_path(ref),
+            self.ref_relative_path(ref),
+            object_publication,
+            ref_publication,
+        )
+
+    def resolve(self, ref: ContentRef) -> bytes:
+        if not isinstance(ref, ContentRef):
+            _fail("invalid_content_ref", "resolve requires ContentRef")
+        ref_path = self.ref_path(ref)
+        try:
+            metadata_bytes = _read_verified(
+                ref_path,
+                field="committed ref",
+                max_bytes=MAX_METADATA_BYTES,
+                missing_code="content_ref_missing",
+            )
+        except ContentStoreError as exc:
+            if exc.code == "content_ref_missing" and os.path.lexists(self.object_path(ref)):
+                _fail("content_ref_not_committed", "object exists without an authoritative committed ref")
+            raise
+        try:
+            document = json.loads(metadata_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ContentStoreError("malformed_content_ref", "committed ref is not valid JSON") from exc
+        if not isinstance(document, dict) or set(document) != {"schema", "content_ref", "object_relative_path"}:
+            _fail("malformed_content_ref", "committed ref has the wrong field set")
+        if document["schema"] != CONTENT_STORE_SCHEMA:
+            _fail("content_store_schema_mismatch", "committed ref schema is unsupported")
+        stored = ContentRef.from_mapping(document["content_ref"])
+        if stored != ref:
+            _fail("content_ref_identity_mismatch", "requested ContentRef differs from committed ref")
+        if document["object_relative_path"] != self.object_relative_path(ref):
+            _fail("content_metadata_path_mismatch", "committed ref object path is not raw-digest derived")
+        raw = _read_verified(
+            self.object_path(ref),
+            field="committed object",
+            max_bytes=MAX_CONTENT_BYTES,
+            missing_code="raw_object_missing",
+        )
+        verify_content_ref(ref, raw)
+        return raw
+
+
+@dataclass(frozen=True)
+class RepoViewBinding:
+    """Exact repository/commit/tree authority carried by a context fragment."""
+
+    repository_id: str
+    repository_identity_digest: str
+    object_format: str
+    commit_oid: str
+    tree_oid: str
+    view_id: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.repository_id, str) or not self.repository_id:
+            _fail("malformed_repo_view_binding", "repository_id is required")
+        _validate_digest(self.repository_identity_digest, field="repository_identity_digest")
+        if self.object_format not in {"sha1", "sha256"}:
+            _fail("malformed_repo_view_binding", "object_format is unsupported")
+        _validate_oid(self.commit_oid, field="commit_oid", object_format=self.object_format)
+        _validate_oid(self.tree_oid, field="tree_oid", object_format=self.object_format)
+        _validate_digest(self.view_id, field="view_id")
+
+    @classmethod
+    def from_view(cls, view: CommittedRepoView) -> "RepoViewBinding":
+        if not isinstance(view, CommittedRepoView):
+            _fail("invalid_repo_view", "M2b requires an exact CommittedRepoView")
+        view._authoritative_reader()
+        return cls(
+            view.repository_id,
+            view.repository_identity_digest,
+            view.object_format,
+            view.commit_oid,
+            view.tree_oid,
+            view.view_id,
+        )
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "RepoViewBinding":
+        required = {
+            "repository_id",
+            "repository_identity_digest",
+            "object_format",
+            "commit_oid",
+            "tree_oid",
+            "view_id",
+        }
+        if not isinstance(value, Mapping) or set(value) != required:
+            _fail("malformed_repo_view_binding", "RepoView binding has the wrong field set")
+        return cls(*(value[key] for key in (
+            "repository_id",
+            "repository_identity_digest",
+            "object_format",
+            "commit_oid",
+            "tree_oid",
+            "view_id",
+        )))
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "repository_id": self.repository_id,
+            "repository_identity_digest": self.repository_identity_digest,
+            "object_format": self.object_format,
+            "commit_oid": self.commit_oid,
+            "tree_oid": self.tree_oid,
+            "view_id": self.view_id,
+        }
+
+    def matches_view(self, view: CommittedRepoView) -> bool:
+        return self == RepoViewBinding.from_view(view)
+
+
+def _fragment_identity_digest(identity: Mapping[str, Any]) -> str:
+    return _digest_bytes(canonical_json_bytes(identity))
+
+
+@dataclass(frozen=True)
+class TypedContextFragment:
+    """Deterministic typed fragment metadata; bytes remain in ContentStore."""
+
+    fragment_id: str
+    fragment_type: str
+    fragment_schema: str
+    content_ref: ContentRef
+    repo_view: RepoViewBinding
+    payload_size_bytes: int
+
+    def __post_init__(self) -> None:
+        _validate_digest(self.fragment_id, field="fragment_id")
+        _validate_identifier(self.fragment_type, field="fragment_type")
+        _validate_identifier(self.fragment_schema, field="fragment_schema")
+        if not isinstance(self.content_ref, ContentRef) or not isinstance(self.repo_view, RepoViewBinding):
+            _fail("malformed_fragment", "fragment ContentRef and RepoView binding are typed objects")
+        if not isinstance(self.payload_size_bytes, int) or isinstance(self.payload_size_bytes, bool):
+            _fail("malformed_fragment", "payload_size_bytes must be an integer")
+        if not 0 <= self.payload_size_bytes <= MAX_CONTEXT_FRAGMENT_BYTES:
+            _fail("payload_too_large", "fragment exceeds the bounded payload limit")
+        if self.fragment_id != _fragment_identity_digest(self._identity_payload()):
+            _fail("fragment_integrity_failure", "fragment_id does not match exact fragment identity")
+
+    def _identity_payload(self) -> dict[str, Any]:
+        return {
+            "fragment_type": self.fragment_type,
+            "fragment_schema": self.fragment_schema,
+            "content_ref": self.content_ref.as_dict(),
+            "repo_view": self.repo_view.as_dict(),
+            "payload_size_bytes": self.payload_size_bytes,
+        }
+
+    @classmethod
+    def create(
+        cls,
+        view: CommittedRepoView,
+        content_ref: ContentRef,
+        *,
+        fragment_type: str,
+        fragment_schema: str,
+        payload_size_bytes: int,
+    ) -> "TypedContextFragment":
+        if not isinstance(content_ref, ContentRef):
+            _fail("invalid_content_ref", "typed fragment creation requires ContentRef")
+        binding = RepoViewBinding.from_view(view)
+        identity = {
+            "fragment_type": _validate_identifier(fragment_type, field="fragment_type"),
+            "fragment_schema": _validate_identifier(fragment_schema, field="fragment_schema"),
+            "content_ref": content_ref.as_dict(),
+            "repo_view": binding.as_dict(),
+            "payload_size_bytes": payload_size_bytes,
+        }
+        return cls(
+            _fragment_identity_digest(identity),
+            identity["fragment_type"],
+            identity["fragment_schema"],
+            content_ref,
+            binding,
+            payload_size_bytes,
+        )
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "TypedContextFragment":
+        required = {
+            "schema",
+            "fragment_id",
+            "fragment_type",
+            "fragment_schema",
+            "content_ref",
+            "repo_view",
+            "payload_size_bytes",
+        }
+        if not isinstance(value, Mapping) or set(value) != required:
+            _fail("malformed_fragment", "typed fragment has the wrong field set")
+        if value["schema"] != CONTEXT_FRAGMENT_SCHEMA:
+            _fail("fragment_schema_mismatch", "typed fragment schema is unsupported")
+        return cls(
+            value["fragment_id"],
+            value["fragment_type"],
+            value["fragment_schema"],
+            ContentRef.from_mapping(value["content_ref"]),
+            RepoViewBinding.from_mapping(value["repo_view"]),
+            value["payload_size_bytes"],
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "schema": CONTEXT_FRAGMENT_SCHEMA,
+            "fragment_id": self.fragment_id,
+            "fragment_type": self.fragment_type,
+            "fragment_schema": self.fragment_schema,
+            "content_ref": self.content_ref.as_dict(),
+            "repo_view": self.repo_view.as_dict(),
+            "payload_size_bytes": self.payload_size_bytes,
+        }
+
+    to_dict = as_dict
+
+    def to_json_bytes(self) -> bytes:
+        return canonical_json_bytes(self.as_dict())
+
+    def verify_payload(self, raw: bytes) -> None:
+        if len(raw) != self.payload_size_bytes:
+            _fail("fragment_length_mismatch", "payload length differs from typed fragment metadata")
+        verify_content_ref(self.content_ref, raw)
+
+
+@dataclass(frozen=True)
+class AcceptedBinding:
+    fragment: TypedContextFragment
+    raw: bytes
+    publication: Literal["published", "converged"]
+
+
+class DurableBindingStore:
+    """Minimal isolated SQLite binding substrate, not the future Control Store."""
+
+    def __init__(self, root: str | Path, *, content_store: ImmutableContentStore | None = None) -> None:
+        self.root = _absolute_root(root)
+        self.content_store = content_store or ImmutableContentStore(self.root)
+        if self.content_store.root != self.root:
+            _fail("authority_overlap", "binding store and content store must share one isolated root")
+        self.database_path = self.root / "control" / "control.db"
+        self.config_path = self.root / "config" / "bdb-vnext.json"
+        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        _assert_no_reparse_components(self.database_path.parent, field="binding database parent")
+        _assert_no_reparse_components(self.database_path, field="binding database")
+        _assert_no_reparse_components(self.config_path.parent, field="binding config parent")
+        self._ensure_config()
+        self._connection = sqlite3.connect(str(self.database_path))
+        self._connection.execute("PRAGMA journal_mode=WAL")
+        self._connection.execute("PRAGMA synchronous=FULL")
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS m2b_accepted_bindings ("
+            "fragment_id TEXT PRIMARY KEY, binding_json BLOB NOT NULL"
+            ")"
+        )
+        self._connection.commit()
+
+    def _ensure_config(self) -> None:
+        document = {
+            "schema": M2B_RUNTIME_CONFIG_SCHEMA,
+            "binding_store_schema": M2B_BINDING_STORE_SCHEMA,
+            "binding_store_version": M2B_BINDING_STORE_VERSION,
+        }
+        expected = canonical_json_bytes(document)
+        if self.config_path.exists():
+            actual = _read_verified(
+                self.config_path,
+                field="binding config",
+                max_bytes=MAX_METADATA_BYTES,
+                missing_code="binding_config_missing",
+            )
+            if actual != expected:
+                _fail("binding_config_mismatch", "M2b binding config identity differs")
+            return
+        _write_fsync(self.config_path, expected)
+
+    def accept(self, fragment: TypedContextFragment, *, view: CommittedRepoView) -> AcceptedBinding:
+        if not isinstance(fragment, TypedContextFragment):
+            _fail("invalid_fragment", "binding acceptance requires TypedContextFragment")
+        if not isinstance(view, CommittedRepoView):
+            _fail("invalid_repo_view", "binding acceptance requires CommittedRepoView")
+        expected_binding = RepoViewBinding.from_view(view)
+        if fragment.repo_view != expected_binding:
+            _fail("repo_view_binding_mismatch", "fragment is bound to a different exact RepoView")
+        raw = self.content_store.resolve(fragment.content_ref)
+        fragment.verify_payload(raw)
+        document = fragment.to_json_bytes()
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._connection.execute(
+                "SELECT binding_json FROM m2b_accepted_bindings WHERE fragment_id = ?",
+                (fragment.fragment_id,),
+            ).fetchone()
+            if row is not None:
+                if bytes(row[0]) != document:
+                    _fail("conflicting_binding", "fragment identity already has different accepted metadata")
+                self._connection.commit()
+                return AcceptedBinding(fragment, raw, "converged")
+            self._connection.execute(
+                "INSERT INTO m2b_accepted_bindings(fragment_id, binding_json) VALUES (?, ?)",
+                (fragment.fragment_id, document),
+            )
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
+        return AcceptedBinding(fragment, raw, "published")
+
+    def resolve_accepted(
+        self,
+        fragment_id: str,
+        *,
+        expected_view: CommittedRepoView | None = None,
+    ) -> AcceptedBinding:
+        _validate_digest(fragment_id, field="fragment_id")
+        row = self._connection.execute(
+            "SELECT binding_json FROM m2b_accepted_bindings WHERE fragment_id = ?",
+            (fragment_id,),
+        ).fetchone()
+        if row is None:
+            _fail("binding_missing", "fragment has no accepted durable binding")
+        stored_bytes = (
+            bytes(row[0])
+            if isinstance(row[0], (bytes, bytearray, memoryview))
+            else str(row[0]).encode("utf-8")
+        )
+        try:
+            fragment = TypedContextFragment.from_mapping(json.loads(stored_bytes.decode("utf-8")))
+        except ContentStoreError:
+            raise
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ContentStoreError("binding_corrupt", "durable binding is not valid JSON") from exc
+        if fragment.fragment_id != fragment_id:
+            _fail("binding_integrity_failure", "durable binding key differs from fragment identity")
+        if expected_view is not None:
+            if not fragment.repo_view.matches_view(expected_view):
+                _fail("repo_view_binding_mismatch", "durable binding is bound to a different RepoView")
+        raw = self.content_store.resolve(fragment.content_ref)
+        fragment.verify_payload(raw)
+        return AcceptedBinding(fragment, raw, "converged")
+
+    assert_accepted = resolve_accepted
+
+    def close(self) -> None:
+        self._connection.close()
+
+    def __enter__(self) -> "DurableBindingStore":
+        return self
+
+    def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
+        self.close()
+
+
+__all__ = [
+    "AcceptedBinding",
+    "CONTEXT_FRAGMENT_SCHEMA",
+    "CONTENT_STORE_SCHEMA",
+    "ContentPublication",
+    "ContentRef",
+    "ContentStoreError",
+    "DurableBindingStore",
+    "ImmutableContentStore",
+    "MAX_CONTENT_BYTES",
+    "MAX_CONTEXT_FRAGMENT_BYTES",
+    "M2B_BINDING_STORE_SCHEMA",
+    "M2B_BINDING_STORE_VERSION",
+    "RepoViewBinding",
+    "TypedContextFragment",
+    "make_content_ref",
+    "verify_content_ref",
+]
+
+```
+
+## SOURCE bdb_vnext/context_transport.py
+object: e0730a288ee02784fcc4c629beafc35936b41a25
+size_bytes: 10353
+raw_sha256: sha256:45a00aca01654089725278083d5f174e236c5cdc6aff606f58bfbf601304f481
+```text
+"""Build-only exact typed-context transport for the BDB Next boundary."""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+from dataclasses import dataclass
+from typing import Any
+
+from bdb_shared.evidence import canonical_json_bytes, semantic_digest
+from bdb_vnext.composition import GENERATION_ID, PROTOCOL_GENERATION
+from bdb_vnext.content_store import (
+    ContentStoreError,
+    DurableBindingStore,
+    MAX_CONTEXT_FRAGMENT_BYTES,
+    TypedContextFragment,
+)
+from bdb_vnext.repo_view import CommittedRepoView
+
+
+TRANSPORT_SCHEMA = "bdb-vnext-transport-envelope-v1"
+PROTOCOL_VERSION = 1
+MESSAGE_KIND = "typed_context_fragment"
+MAX_TRANSPORT_PAYLOAD_BYTES = MAX_CONTEXT_FRAGMENT_BYTES
+MAX_TRANSPORT_ENVELOPE_BYTES = 2 * 1024 * 1024
+BROWSER_PROVIDER_CONTRACT = "bdb-vnext-browser-transport-contract-v1"
+NATIVE_PROVIDER_CONTRACT = "bdb-vnext-native-transport-contract-v1"
+IMPLEMENTATION_IDENTITY_SCHEMA = "bdb-vnext-transport-implementation-identity-v1"
+BROWSER_IMPLEMENTATION_REVISION = "bdb-vnext-browser-transport-implementation-r1"
+NATIVE_IMPLEMENTATION_REVISION = "bdb-vnext-native-transport-implementation-r1"
+_IMPLEMENTATION_MODULE = "bdb_vnext.context_transport"
+_BROWSER_PROVIDER_ID = "devmaster.bdb.vnext.browser-transport"
+_NATIVE_PROVIDER_ID = "devmaster.bdb.vnext.native-transport"
+
+
+class TransportError(ValueError):
+    """Typed fail-closed transport error."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _fail(code: str, message: str) -> None:
+    raise TransportError(code, message)
+
+
+def _message_id(core: dict[str, Any]) -> str:
+    return f"sha256:{hashlib.sha256(canonical_json_bytes(core)).hexdigest()}"
+
+
+def _provider_identity(
+    provider_id: str,
+    contract: str,
+    implementation_module: str,
+    implementation_qualname: str,
+    implementation_revision: str,
+) -> str:
+    return semantic_digest(
+        {
+            "identity_schema": IMPLEMENTATION_IDENTITY_SCHEMA,
+            "provider_id": provider_id,
+            "provider_contract": contract,
+            "provider_contract_version": PROTOCOL_VERSION,
+            "protocol_generation": PROTOCOL_GENERATION,
+            "implementation_module": implementation_module,
+            "implementation_qualname": implementation_qualname,
+            "implementation_revision": implementation_revision,
+        }
+    )
+
+
+@dataclass(frozen=True)
+class DecodedTransport:
+    fragment: TypedContextFragment
+    raw: bytes
+    message_id: str
+
+
+def encode_envelope(fragment: TypedContextFragment, raw: bytes) -> bytes:
+    if not isinstance(fragment, TypedContextFragment):
+        _fail("invalid_fragment", "transport encoding requires TypedContextFragment")
+    if not isinstance(raw, bytes):
+        _fail("invalid_payload", "transport payload must be bytes")
+    if len(raw) > MAX_TRANSPORT_PAYLOAD_BYTES:
+        _fail("payload_too_large", "transport payload exceeds the bounded limit")
+    try:
+        fragment.verify_payload(raw)
+    except ContentStoreError as exc:
+        raise TransportError(exc.code, str(exc)) from exc
+    core: dict[str, Any] = {
+        "schema": TRANSPORT_SCHEMA,
+        "protocol_generation": PROTOCOL_GENERATION,
+        "protocol_version": PROTOCOL_VERSION,
+        "message_kind": MESSAGE_KIND,
+        "fragment": fragment.as_dict(),
+        "payload_length_bytes": len(raw),
+        "payload_base64": base64.b64encode(raw).decode("ascii"),
+    }
+    document = {**core, "message_id": _message_id(core)}
+    serialized = canonical_json_bytes(document)
+    if len(serialized) > MAX_TRANSPORT_ENVELOPE_BYTES:
+        _fail("envelope_too_large", "transport envelope exceeds the bounded limit")
+    return serialized
+
+
+def decode_envelope(payload: bytes) -> DecodedTransport:
+    if not isinstance(payload, bytes):
+        _fail("invalid_envelope", "transport envelope must be bytes")
+    if len(payload) > MAX_TRANSPORT_ENVELOPE_BYTES:
+        _fail("envelope_too_large", "transport envelope exceeds the bounded limit")
+    try:
+        document = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TransportError("malformed_envelope", "transport envelope is not valid UTF-8 JSON") from exc
+    if not isinstance(document, dict):
+        _fail("malformed_envelope", "transport envelope must be a JSON object")
+    required = {
+        "schema",
+        "protocol_generation",
+        "protocol_version",
+        "message_kind",
+        "message_id",
+        "fragment",
+        "payload_length_bytes",
+        "payload_base64",
+    }
+    if set(document) != required:
+        _fail("malformed_envelope", "transport envelope has an unexpected field set")
+    if canonical_json_bytes(document) != payload:
+        _fail("malformed_envelope", "transport envelope is not canonical or contains trailing bytes")
+    if document["schema"] != TRANSPORT_SCHEMA:
+        _fail("unsupported_envelope_schema", "transport envelope schema is unsupported")
+    if document["protocol_generation"] != PROTOCOL_GENERATION:
+        _fail("unsupported_protocol_generation", "transport protocol generation is unsupported")
+    if document["protocol_version"] != PROTOCOL_VERSION:
+        _fail("unsupported_protocol_version", "transport protocol version is unsupported")
+    if document["message_kind"] != MESSAGE_KIND:
+        _fail("unknown_message_kind", "transport message kind is unsupported")
+    message_id = document["message_id"]
+    if (
+        not isinstance(message_id, str)
+        or len(message_id) != 71
+        or not message_id.startswith("sha256:")
+        or any(character not in "0123456789abcdef" for character in message_id[7:])
+    ):
+        _fail("message_integrity_failure", "transport message identity is malformed")
+    length = document["payload_length_bytes"]
+    if not isinstance(length, int) or isinstance(length, bool) or not 0 <= length <= MAX_TRANSPORT_PAYLOAD_BYTES:
+        _fail("payload_too_large", "transport payload length is outside the bounded range")
+    encoded = document["payload_base64"]
+    if not isinstance(encoded, str):
+        _fail("malformed_envelope", "transport payload encoding is malformed")
+    try:
+        raw = base64.b64decode(encoded.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, ValueError) as exc:
+        raise TransportError("malformed_payload_encoding", "transport payload is not strict base64") from exc
+    if base64.b64encode(raw).decode("ascii") != encoded:
+        _fail("malformed_payload_encoding", "transport payload base64 is not canonical")
+    if len(raw) != length:
+        _fail("payload_length_mismatch", "transport payload length does not match envelope metadata")
+    core = {key: document[key] for key in required if key != "message_id"}
+    if message_id != _message_id(core):
+        _fail("message_integrity_failure", "transport message identity does not match exact envelope")
+    try:
+        fragment = TypedContextFragment.from_mapping(document["fragment"])
+        fragment.verify_payload(raw)
+    except ContentStoreError as exc:
+        raise TransportError(exc.code, str(exc)) from exc
+    return DecodedTransport(fragment, raw, message_id)
+
+
+@dataclass(frozen=True)
+class BrowserTransportProvider:
+    """Read-only adapter that emits only an already accepted binding."""
+
+    generation: str = GENERATION_ID
+    provider_contract: str = BROWSER_PROVIDER_CONTRACT
+    provider_contract_version: int = PROTOCOL_VERSION
+    implementation_module: str = _IMPLEMENTATION_MODULE
+    implementation_qualname: str = "BrowserTransportProvider"
+    implementation_revision: str = BROWSER_IMPLEMENTATION_REVISION
+    implementation_identity: str = _provider_identity(
+        _BROWSER_PROVIDER_ID,
+        BROWSER_PROVIDER_CONTRACT,
+        _IMPLEMENTATION_MODULE,
+        "BrowserTransportProvider",
+        BROWSER_IMPLEMENTATION_REVISION,
+    )
+
+    def encode(
+        self,
+        bindings: DurableBindingStore,
+        fragment: TypedContextFragment,
+        *,
+        expected_view: CommittedRepoView | None = None,
+    ) -> bytes:
+        accepted = bindings.resolve_accepted(fragment.fragment_id, expected_view=expected_view)
+        if accepted.fragment != fragment:
+            _fail("binding_integrity_failure", "transport fragment differs from accepted durable binding")
+        return encode_envelope(fragment, accepted.raw)
+
+
+@dataclass(frozen=True)
+class NativeTransportProvider:
+    """Read-only adapter that decodes exact envelopes and rejects unbound data."""
+
+    generation: str = GENERATION_ID
+    provider_contract: str = NATIVE_PROVIDER_CONTRACT
+    provider_contract_version: int = PROTOCOL_VERSION
+    implementation_module: str = _IMPLEMENTATION_MODULE
+    implementation_qualname: str = "NativeTransportProvider"
+    implementation_revision: str = NATIVE_IMPLEMENTATION_REVISION
+    implementation_identity: str = _provider_identity(
+        _NATIVE_PROVIDER_ID,
+        NATIVE_PROVIDER_CONTRACT,
+        _IMPLEMENTATION_MODULE,
+        "NativeTransportProvider",
+        NATIVE_IMPLEMENTATION_REVISION,
+    )
+
+    def decode(
+        self,
+        payload: bytes,
+        *,
+        bindings: DurableBindingStore | None = None,
+        expected_view: CommittedRepoView | None = None,
+    ) -> DecodedTransport:
+        if bindings is None:
+            _fail(
+                "binding_store_required",
+                "bound Native transport decoding requires a durable binding store",
+            )
+        decoded = decode_envelope(payload)
+        accepted = bindings.resolve_accepted(
+            decoded.fragment.fragment_id,
+            expected_view=expected_view,
+        )
+        if accepted.fragment != decoded.fragment or accepted.raw != decoded.raw:
+            _fail("binding_integrity_failure", "decoded envelope differs from accepted durable binding")
+        return decoded
+
+
+__all__ = [
+    "BROWSER_PROVIDER_CONTRACT",
+    "BROWSER_IMPLEMENTATION_REVISION",
+    "BrowserTransportProvider",
+    "DecodedTransport",
+    "MESSAGE_KIND",
+    "MAX_TRANSPORT_ENVELOPE_BYTES",
+    "MAX_TRANSPORT_PAYLOAD_BYTES",
+    "NATIVE_PROVIDER_CONTRACT",
+    "NATIVE_IMPLEMENTATION_REVISION",
+    "NativeTransportProvider",
+    "PROTOCOL_VERSION",
+    "TRANSPORT_SCHEMA",
+    "TransportError",
+    "decode_envelope",
+    "encode_envelope",
+]
+
+```
+
+## SOURCE tests/test_vnext_engineering_intelligence.py
+object: 2b0cf718cc2d38edf76d8eafe0d18739fc2cb6ea
+size_bytes: 25942
+raw_sha256: sha256:8acf23fef9d892b714bfd66b3745cece6e593f2e84a7f1d8a587a7bb4e92ca43
+```text
+from __future__ import annotations
+
+import hashlib
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from bdb_shared.evidence import semantic_digest
+from bdb_vnext.content_store import DurableBindingStore, ImmutableContentStore, TypedContextFragment, make_content_ref
+from bdb_vnext.engineering_intelligence import (
+    ClaimContradiction,
+    ContextPackage,
+    ContextRequest,
+    ContextResolution,
+    CoverageBinding,
+    DecisionOption,
+    EngineeringDecision,
+    EngineeringIntelligenceError,
+    GapResolutionEvidence,
+    IntentBasis,
+    Omission,
+    RepoSourceEvidence,
+    RepositoryUnderstandingView,
+    SourceEvidenceRef,
+    UnderstandingClaim,
+    Unknown,
+    publish_repo_source_evidence,
+    reconstruct_semantic_record,
+    transport_semantic_record,
+    validate_decision_applicability,
+)
+from bdb_vnext.repo_view import RepositoryResource
+
+
+def _git(repo: Path, *args: str) -> str:
+    completed = subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+    return completed.stdout.strip()
+
+
+def _fixture(tmp_path: Path) -> tuple[Path, object, object, IntentBasis]:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    _git(repo, "config", "user.name", "M2c Test")
+    _git(repo, "config", "user.email", "m2c@example.invalid")
+    (repo / "README.md").write_text("M2c fixture\n", encoding="utf-8")
+    (repo / "src").mkdir()
+    (repo / "src" / "service.py").write_text("OWNER = 'A'\n", encoding="utf-8")
+    (repo / "docs").mkdir()
+    (repo / "docs" / "recovery.txt").write_text("RECOVERY = 'A'\n", encoding="utf-8")
+    _git(repo, "add", "--all")
+    _git(repo, "commit", "-qm", "M2c fixture")
+    resource = RepositoryResource.from_path(repo, repository_id="m2c-fixture")
+    view = resource.resolve_committed("refs/heads/main", observed_at="2026-08-10T00:00:00Z")
+    intent = IntentBasis(
+        "external-task:m2c-1",
+        "r1",
+        semantic_digest({"intent": "understand ownership and recovery", "constraints": ["read-only"]}),
+    )
+    return repo, resource, view, intent
+
+
+def _accepted_fragment(tmp_path: Path, view: object, label: str) -> tuple[ImmutableContentStore, DurableBindingStore, TypedContextFragment, SourceEvidenceRef]:
+    runtime = tmp_path / f"runtime-{label}"
+    content_store = ImmutableContentStore(runtime)
+    binding_store = DurableBindingStore(runtime, content_store=content_store)
+    raw = f"source evidence: {label}\n".encode("utf-8")
+    content_ref = make_content_ref("text/plain", "m2c-source-v1", raw)
+    content_store.publish(content_ref, raw)
+    fragment = TypedContextFragment.create(
+        view,
+        content_ref,
+        fragment_type="text/plain",
+        fragment_schema="m2c-source-v1",
+        payload_size_bytes=len(raw),
+    )
+    binding_store.accept(fragment, view=view)
+    evidence = SourceEvidenceRef.create_verified(view, fragment, binding_store)
+    return content_store, binding_store, fragment, evidence
+
+
+def _repo_source(
+    tmp_path: Path,
+    view: object,
+    path: str,
+    *,
+    content_store: ImmutableContentStore | None = None,
+    binding_store: DurableBindingStore | None = None,
+) -> tuple[ImmutableContentStore, DurableBindingStore, TypedContextFragment, RepoSourceEvidence]:
+    if content_store is None or binding_store is None:
+        runtime = tmp_path / "runtime-repo-source"
+        content_store = ImmutableContentStore(runtime)
+        binding_store = DurableBindingStore(runtime, content_store=content_store)
+    evidence = publish_repo_source_evidence(
+        view,
+        path,
+        content_store,
+        binding_store,
+        fragment_type="text/plain",
+        fragment_schema="m2c-repo-source-v1",
+    )
+    fragment = binding_store.resolve_accepted(evidence.fragment_id, expected_view=view).fragment
+    return content_store, binding_store, fragment, evidence
+
+
+def _seeded(tmp_path: Path):
+    repo, resource, view, intent = _fixture(tmp_path)
+    content_store, binding_store, ownership_fragment, ownership_evidence = _repo_source(tmp_path, view, "src/service.py")
+    ownership = UnderstandingClaim.create(
+        view,
+        subject="src/service.py",
+        dimension="ownership",
+        kind="FACT",
+        statement="component ownership is explicit in the committed source",
+        source_evidence=[ownership_evidence],
+        binding_store=binding_store,
+    )
+    ownership_coverage = CoverageBinding.create(
+        view,
+        target_kind="DIMENSION",
+        target="ownership",
+        supporting_claim_ids=[ownership.claim_id],
+        supporting_fragment_ids=[ownership_fragment.fragment_id],
+    )
+    recovery_gap = Unknown.create(
+        view,
+        subject="repository recovery boundary",
+        dimension="recovery",
+        reason="no exact recovery evidence was requested in this initial package",
+    )
+    unrelated_gap = Unknown.create(
+        view,
+        subject="dependency boundary",
+        dimension="dependencies",
+        reason="dependency evidence was intentionally not requested",
+    )
+    understanding = RepositoryUnderstandingView.create(
+        intent,
+        view,
+        claims=[ownership],
+        requested_dimensions=["ownership", "recovery", "dependencies"],
+        covered_dimensions=["ownership"],
+        must_see_categories=["recovery"],
+        covered_must_see=[],
+        coverage_bindings=[ownership_coverage],
+        unknowns=[recovery_gap, unrelated_gap],
+        binding_store=binding_store,
+    )
+    package = ContextPackage.from_understanding(
+        understanding,
+        horizon="COMPONENT",
+        included_fragment_ids=[ownership_fragment.fragment_id],
+    )
+    return (
+        repo,
+        resource,
+        view,
+        intent,
+        content_store,
+        binding_store,
+        ownership_fragment,
+        ownership,
+        understanding,
+        package,
+        recovery_gap,
+        unrelated_gap,
+    )
+
+
+def _digest(label: str) -> str:
+    return "sha256:" + hashlib.sha256(label.encode("utf-8")).hexdigest()
+
+
+def test_fact_requires_verified_source_evidence_and_exact_repo_content_binding(tmp_path: Path) -> None:
+    _repo, _resource, view, _intent = _fixture(tmp_path)
+    with pytest.raises(EngineeringIntelligenceError) as arbitrary:
+        UnderstandingClaim.create(
+            view,
+            subject="src/service.py",
+            dimension="ownership",
+            kind="FACT",
+            statement="untrusted digest is not source authority",
+            evidence_refs=[_digest("arbitrary")],
+        )
+    assert arbitrary.value.code == "repository_source_evidence_required"
+
+    generic_content, generic_bindings, generic_fragment, generic_evidence = _accepted_fragment(tmp_path, view, "accepted")
+    with pytest.raises(EngineeringIntelligenceError) as generic:
+        UnderstandingClaim.create(
+            view,
+            subject="src/service.py",
+            dimension="ownership",
+            kind="FACT",
+            statement="a generic accepted fragment is not repository source authority",
+            source_evidence=[generic_evidence],
+            binding_store=generic_bindings,
+        )
+    assert generic.value.code == "repository_source_evidence_required"
+
+    content, bindings, fragment, evidence = _repo_source(tmp_path, view, "src/service.py")
+    claim = UnderstandingClaim.create(
+        view,
+        subject="src/service.py",
+        dimension="ownership",
+        kind="FACT",
+        statement="accepted source is exact",
+        source_evidence=[evidence],
+        binding_store=bindings,
+    )
+    assert claim.source_evidence[0].fragment_id == fragment.fragment_id
+    foreign_root = tmp_path / "foreign"
+    foreign_root.mkdir()
+    _foreign_repo, _foreign_resource, foreign_view, _foreign_intent = _fixture(foreign_root)
+    foreign_content, foreign_bindings, foreign_fragment, foreign_evidence = _repo_source(foreign_root, foreign_view, "src/service.py")
+    content.publish(foreign_evidence.content_ref, foreign_content.resolve(foreign_evidence.content_ref))
+    bindings.accept(foreign_fragment, view=foreign_view)
+    with pytest.raises(EngineeringIntelligenceError) as foreign_repo:
+        UnderstandingClaim.create(
+            view,
+            subject="src/service.py",
+            dimension="ownership",
+            kind="FACT",
+            statement="foreign RepoView cannot ground this claim",
+            source_evidence=[foreign_evidence],
+            binding_store=bindings,
+        )
+    assert foreign_repo.value.code == "repository_source_repo_mismatch"
+    with pytest.raises(EngineeringIntelligenceError) as unaccepted:
+        UnderstandingClaim.create(
+            view,
+            subject="src/service.py",
+            dimension="ownership",
+            kind="FACT",
+            statement="descriptor must be accepted",
+            source_evidence=[evidence],
+            binding_store=DurableBindingStore(tmp_path / "empty-runtime"),
+        )
+    assert unaccepted.value.code == "repository_source_binding_failure"
+    bindings.close()
+    generic_bindings.close()
+    foreign_bindings.close()
+
+
+def test_repo_source_evidence_proves_committed_bytes_and_rejects_fabricated_accepted_bytes(tmp_path: Path) -> None:
+    repo, _resource, view, _intent = _fixture(tmp_path)
+    content, bindings, fragment, evidence = _repo_source(tmp_path, view, "src/service.py")
+    assert view.query().read_bytes("src/service.py") == b"OWNER = 'A'\n"
+    assert bindings.resolve_accepted(evidence.fragment_id, expected_view=view).raw == b"OWNER = 'A'\n"
+    assert evidence.source_object_id == view.query().get_entry("src/service.py").object_oid
+
+    # The checkout may become dirty after the exact committed RepoView is built;
+    # source evidence still resolves the immutable committed blob.
+    (repo / "src" / "service.py").write_text("OWNER = 'WORKTREE'\n", encoding="utf-8")
+    assert view.read_text("src/service.py") == "OWNER = 'A'\n"
+    assert bindings.resolve_accepted(evidence.fragment_id, expected_view=view).raw == b"OWNER = 'A'\n"
+
+    claim = UnderstandingClaim.create(
+        view,
+        subject="src/service.py",
+        dimension="ownership",
+        kind="FACT",
+        statement="ownership is grounded in the exact committed bytes",
+        source_evidence=[evidence],
+        binding_store=bindings,
+    )
+    assert claim.authority == "EXACT_SOURCE"
+
+    fabricated_raw = b"OWNER = 'EVIL'\n"
+    fabricated_ref = make_content_ref(evidence.content_ref.type, evidence.content_ref.schema, fabricated_raw)
+    content.publish(fabricated_ref, fabricated_raw)
+    fabricated_fragment = TypedContextFragment.create(
+        view,
+        fabricated_ref,
+        fragment_type=evidence.fragment_type,
+        fragment_schema=evidence.fragment_schema,
+        payload_size_bytes=len(fabricated_raw),
+    )
+    bindings.accept(fabricated_fragment, view=view)
+    fabricated_evidence = RepoSourceEvidence.from_fragment(
+        view=view,
+        source_path=evidence.source_path,
+        source_object_id=evidence.source_object_id,
+        fragment=fabricated_fragment,
+    )
+    with pytest.raises(EngineeringIntelligenceError) as mismatch:
+        fabricated_evidence.validate(view, bindings)
+    assert mismatch.value.code == "repository_source_mismatch"
+    bindings.close()
+
+
+def test_repo_source_evidence_fails_closed_for_foreign_stale_and_missing_sources(tmp_path: Path) -> None:
+    repo, resource, view, _intent = _fixture(tmp_path)
+    content, bindings, _fragment, evidence = _repo_source(tmp_path, view, "src/service.py")
+
+    foreign_root = tmp_path / "foreign-source"
+    foreign_root.mkdir()
+    _foreign_repo, _foreign_resource, foreign_view, _foreign_intent = _fixture(foreign_root)
+    _foreign_content, foreign_bindings, _foreign_fragment, foreign_evidence = _repo_source(
+        foreign_root,
+        foreign_view,
+        "src/service.py",
+    )
+    with pytest.raises(EngineeringIntelligenceError) as foreign:
+        foreign_evidence.validate(view, bindings)
+    assert foreign.value.code == "repository_source_repo_mismatch"
+
+    (repo / "src" / "service.py").write_text("OWNER = 'B'\n", encoding="utf-8")
+    _git(repo, "add", "src/service.py")
+    _git(repo, "commit", "-qm", "stale source fixture")
+    stale_view = resource.resolve_committed("refs/heads/main", observed_at="2026-08-10T00:02:00Z")
+    with pytest.raises(EngineeringIntelligenceError) as stale:
+        evidence.validate(stale_view, bindings)
+    assert stale.value.code == "repository_source_repo_mismatch"
+
+    with pytest.raises(EngineeringIntelligenceError) as missing:
+        publish_repo_source_evidence(
+            view,
+            "missing/source.txt",
+            content,
+            bindings,
+            fragment_type="text/plain",
+            fragment_schema="m2c-repo-source-v1",
+        )
+    assert missing.value.code == "repository_source_not_found"
+    with pytest.raises(EngineeringIntelligenceError) as unsafe:
+        publish_repo_source_evidence(
+            view,
+            "../src/service.py",
+            content,
+            bindings,
+            fragment_type="text/plain",
+            fragment_schema="m2c-repo-source-v1",
+        )
+    assert unsafe.value.code == "unsafe_source_path"
+    bindings.close()
+    foreign_bindings.close()
+
+
+def test_understanding_claims_separate_fact_inference_and_require_exact_basis(tmp_path: Path) -> None:
+    (_repo, _resource, _view, _intent, _content, bindings, _fragment, _ownership, understanding, _package, _gap, _other) = _seeded(tmp_path)
+    with pytest.raises(EngineeringIntelligenceError) as failure:
+        UnderstandingClaim(
+            _digest("bad-claim"),
+            understanding.repo_view,
+            "src/service.py",
+            "ownership",
+            "FACT",
+            "DERIVED",
+            "source-looking claim",
+            (_digest("bad"),),
+            (),
+        )
+    assert failure.value.code == "claim_authority_mismatch"
+    bindings.close()
+
+
+def test_coverage_requires_explicit_grounded_bindings_and_rejects_random_support(tmp_path: Path) -> None:
+    (_repo, _resource, view, intent, _content, bindings, _fragment, ownership, _understanding, _package, gap, _other) = _seeded(tmp_path)
+    with pytest.raises(EngineeringIntelligenceError) as missing:
+        RepositoryUnderstandingView.create(
+            intent,
+            view,
+            claims=[ownership],
+            requested_dimensions=["ownership"],
+            covered_dimensions=["ownership"],
+            binding_store=bindings,
+        )
+    assert missing.value.code == "coverage_grounding_required"
+    random_binding = CoverageBinding.create(
+        view,
+        target_kind="DIMENSION",
+        target="ownership",
+        supporting_claim_ids=[_digest("foreign-claim")],
+    )
+    with pytest.raises(EngineeringIntelligenceError) as foreign:
+        RepositoryUnderstandingView.create(
+            intent,
+            view,
+            claims=[ownership],
+            requested_dimensions=["ownership"],
+            covered_dimensions=["ownership"],
+            coverage_bindings=[random_binding],
+            binding_store=bindings,
+        )
+    assert foreign.value.code == "coverage_claim_missing"
+    assert gap.unknown_id not in ownership.claim_id
+    bindings.close()
+
+
+def test_conflicting_source_and_inference_remain_visible_and_source_wins(tmp_path: Path) -> None:
+    (_repo, _resource, view, _intent, _content, bindings, _fragment, source, seeded, _package, _gap, _other) = _seeded(tmp_path)
+    inference = UnderstandingClaim.create(
+        seeded.repo_view,
+        subject=source.subject,
+        dimension=source.dimension,
+        kind="INFERENCE",
+        statement="component ownership is inferred as B",
+        evidence_refs=[source.claim_id],
+        basis_refs=[source.claim_id],
+    )
+    contradiction = ClaimContradiction.create(
+        seeded.repo_view,
+        subject=source.subject,
+        dimension=source.dimension,
+        claim_ids=[source.claim_id, inference.claim_id],
+        source_claim_ids=[source.claim_id],
+        derived_claim_ids=[inference.claim_id],
+        reason="derived ownership conflicts with exact source claim",
+    )
+    combined = RepositoryUnderstandingView.create(
+        seeded.intent_basis,
+        view,
+        claims=[source, inference],
+        requested_dimensions=["ownership"],
+        covered_dimensions=["ownership"],
+        coverage_bindings=[CoverageBinding.create(view, target_kind="DIMENSION", target="ownership", supporting_claim_ids=[source.claim_id])],
+        contradictions=[contradiction],
+        binding_store=bindings,
+    )
+    assert combined.contradictions[0].source_authority == "EXACT_SOURCE_WINS"
+    assert combined.coverage_status == "PARTIAL"
+    with pytest.raises(EngineeringIntelligenceError) as missing_contradiction:
+        RepositoryUnderstandingView.create(
+            seeded.intent_basis,
+            view,
+            claims=[source, inference],
+            requested_dimensions=["ownership"],
+            covered_dimensions=["ownership"],
+            coverage_bindings=[CoverageBinding.create(view, target_kind="DIMENSION", target="ownership", supporting_claim_ids=[source.claim_id])],
+            binding_store=bindings,
+        )
+    assert missing_contradiction.value.code == "contradiction_required"
+    bindings.close()
+
+
+def test_context_resolution_preserves_unrelated_gaps_and_denial_keeps_all_visible(tmp_path: Path) -> None:
+    (
+        _repo,
+        _resource,
+        view,
+        intent,
+        content_store,
+        bindings,
+        ownership_fragment,
+        ownership,
+        seeded,
+        prior_package,
+        recovery_gap,
+        unrelated_gap,
+    ) = _seeded(tmp_path)
+    request = ContextRequest.create(
+        prior_package,
+        gap_ids=[recovery_gap.unknown_id],
+        horizon="COMPONENT",
+        requested_dimensions=["recovery"],
+        requested_evidence=["committed recovery boundary"],
+        question="Which exact committed component owns recovery?",
+        reason="repair only the visible recovery gap",
+    )
+    _recovery_content, _recovery_bindings, recovery_fragment, recovery_evidence = _repo_source(
+        tmp_path,
+        view,
+        "docs/recovery.txt",
+        content_store=content_store,
+        binding_store=bindings,
+    )
+    recovery = UnderstandingClaim.create(
+        view,
+        subject="repository recovery boundary",
+        dimension="recovery",
+        kind="FACT",
+        statement="recovery evidence is supplied by the exact committed source",
+        source_evidence=[recovery_evidence],
+        binding_store=bindings,
+    )
+    recovery_dimension = CoverageBinding.create(
+        view,
+        target_kind="DIMENSION",
+        target="recovery",
+        supporting_claim_ids=[recovery.claim_id],
+        supporting_fragment_ids=[recovery_fragment.fragment_id],
+    )
+    recovery_must_see = CoverageBinding.create(
+        view,
+        target_kind="MUST_SEE",
+        target="recovery",
+        supporting_claim_ids=[recovery.claim_id],
+        supporting_fragment_ids=[recovery_fragment.fragment_id],
+    )
+    expanded = RepositoryUnderstandingView.create(
+        intent,
+        view,
+        claims=[ownership, recovery],
+        requested_dimensions=["ownership", "recovery", "dependencies"],
+        covered_dimensions=["ownership", "recovery"],
+        must_see_categories=["recovery"],
+        covered_must_see=["recovery"],
+        coverage_bindings=[seeded.coverage_bindings[0], recovery_dimension, recovery_must_see],
+        unknowns=[unrelated_gap],
+        binding_store=bindings,
+    )
+    repaired_package = ContextPackage.from_understanding(
+        expanded,
+        horizon="COMPONENT",
+        included_fragment_ids=[ownership_fragment.fragment_id, recovery_fragment.fragment_id],
+    )
+    evidence = GapResolutionEvidence.create(
+        gap_id=recovery_gap.unknown_id,
+        added_fragment_ids=[recovery_fragment.fragment_id],
+        supporting_claim_ids=[recovery.claim_id],
+        coverage_binding_ids=[recovery_dimension.coverage_binding_id],
+    )
+    resolution = ContextResolution.create(
+        request,
+        prior_package,
+        resulting_package=repaired_package,
+        added_fragments=[recovery_fragment],
+        binding_store=bindings,
+        resolved_gap_ids=[recovery_gap.unknown_id],
+        gap_resolution_evidence=[evidence],
+    )
+    assert resolution.outcome == "RESOLVED"
+    assert set(repaired_package.gap_ids) == {unrelated_gap.unknown_id}
+    assert resolution.unresolved_gap_ids == (unrelated_gap.unknown_id,)
+    with pytest.raises(EngineeringIntelligenceError) as silent_drop:
+        ContextResolution.create(
+            request,
+            prior_package,
+            resulting_package=ContextPackage.from_understanding(expanded, horizon="COMPONENT", included_fragment_ids=[ownership_fragment.fragment_id, recovery_fragment.fragment_id]),
+            added_fragments=[recovery_fragment],
+            binding_store=bindings,
+            resolved_gap_ids=[recovery_gap.unknown_id],
+            unresolved_gap_ids=[],
+            gap_resolution_evidence=[evidence],
+        )
+    assert silent_drop.value.code == "resolution_gap_mismatch"
+    denied = ContextResolution.create(request, prior_package, outcome="DENIED", denial_reason="policy denied")
+    assert denied.unresolved_gap_ids == prior_package.gap_ids
+    assert ContextResolution.from_mapping(resolution.as_dict()) == resolution
+    bindings.close()
+
+
+def test_decision_claim_membership_and_exact_basis_sets(tmp_path: Path) -> None:
+    (repo, resource, view, intent, _content, bindings, ownership_fragment, ownership, understanding, package, _gap, _other) = _seeded(tmp_path)
+    option_zero = DecisionOption("OPTION_ZERO", "retain the read-only path", ("no writer",), ("gap remains",))
+    option_one = DecisionOption("OPTION_ONE", "expand exact context", ("more evidence",), ("larger package",))
+    kwargs = dict(
+        established_fact_claim_ids=[ownership.claim_id],
+        alternatives=[option_zero, option_one],
+        chosen_option_id="OPTION_ONE",
+        must_preserve=["exact RepoView authority", "runtime OFF"],
+        must_not=["Task lifecycle", "private chain-of-thought"],
+        expected_effect_scope=["M2c semantic records only"],
+        acceptance_obligations=["seeded gap repair"],
+        evidence_obligations=["M2b exact roundtrip"],
+        uncertainty=["recovery evidence is initially unknown"],
+        architecture_consequences=["rebuildable projection"],
+        revisit_triggers=["RepoView or intent basis changes"],
+        understanding_bases=[understanding],
+        binding_store=bindings,
+    )
+    decision = EngineeringDecision.create(intent, [view], [package], **kwargs)
+    same = EngineeringDecision.create(intent, [view], [package], **kwargs)
+    assert same.decision_id == decision.decision_id
+    package.validate_source_grounding(understanding, view, bindings)
+    parsed_understanding = RepositoryUnderstandingView.from_mapping(understanding.as_dict())
+    parsed_package = ContextPackage.from_mapping(package.as_dict())
+    parsed_package.validate_source_grounding(parsed_understanding, view, bindings)
+    _semantic_fragment, transported_understanding = transport_semantic_record(
+        understanding,
+        view,
+        _content,
+        bindings,
+    )
+    assert transported_understanding == understanding
+    validate_decision_applicability(decision, intent_basis=intent, repo_views=[view], context_packages=[package])
+    with pytest.raises(EngineeringIntelligenceError) as random_claim:
+        EngineeringDecision.create(intent, [view], [package], established_fact_claim_ids=[_digest("random")], **{k: v for k, v in kwargs.items() if k != "established_fact_claim_ids"})
+    assert random_claim.value.code == "decision_claim_basis_mismatch"
+    changed_package = ContextPackage.from_understanding(understanding, horizon="COMPONENT", included_fragment_ids=[ownership_fragment.fragment_id, _digest("new")])
+    with pytest.raises(EngineeringIntelligenceError) as old_new:
+        validate_decision_applicability(decision, intent_basis=intent, repo_views=[view], context_packages=[package, changed_package])
+    assert old_new.value.code == "stale_decision_basis"
+    with pytest.raises(EngineeringIntelligenceError) as new_only:
+        validate_decision_applicability(decision, intent_basis=intent, repo_views=[view], context_packages=[changed_package])
+    assert new_only.value.code == "stale_decision_basis"
+    (repo / "README.md").write_text("changed\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-qm", "changed view")
+    changed_view = resource.resolve_committed("refs/heads/main", observed_at="2026-08-10T00:01:00Z")
+    with pytest.raises(EngineeringIntelligenceError) as stale_view:
+        validate_decision_applicability(decision, intent_basis=intent, repo_views=[changed_view], context_packages=[package])
+    assert stale_view.value.code == "stale_decision_basis"
+    bindings.close()
+
+
+def test_semantic_record_roundtrip_and_import_side_effect_contract(tmp_path: Path) -> None:
+    _repo, _resource, view, intent = _fixture(tmp_path)
+    unknown = Unknown.create(view, subject="network boundary", dimension="network", reason="not requested")
+    understanding = RepositoryUnderstandingView.create(intent, view, requested_dimensions=["network"], unknowns=[unknown])
+    package = ContextPackage.from_understanding(understanding, horizon="LOCAL")
+    request = ContextRequest.create(
+        package,
+        gap_ids=[unknown.unknown_id],
+        horizon="LOCAL",
+        requested_dimensions=["network"],
+        requested_evidence=["network boundary"],
+        question="What is the network boundary?",
+        reason="unknown boundary",
+    )
+    raw = request.to_json_bytes()
+    assert reconstruct_semantic_record(raw) == request
+    assert raw == request.to_json_bytes()
+
+```
+
+## SOURCE docs/m2c-vnext-engineering-intelligence.md
+object: 2454a4ec9ff9c7469a656a7c44056f650db76b59
+size_bytes: 4620
+raw_sha256: sha256:2c59a1000794f47b91974973a5f671296e3503ff2f3d841d3466d3dde535ac2b
+```text
+# M2c-vNext — Engineering Intelligence Slice
+
+M2c is a build-only, additive semantic layer. It introduces immutable,
+rebuildable records bound to an exact M2a `COMMITTED` RepoView and uses M2b
+typed content/transport without creating a new mutable authority.
+
+## Record families
+
+- `RepositoryUnderstandingView` — claim projection with explicit `FACT`,
+  `INFERENCE`, `ASSUMPTION`, and `HYPOTHESIS` kinds; coverage, must-see
+  categories, unknowns, omissions, contradictions, provenance and
+  invalidation predicates.
+- `ContextPackage` — categorical quality capsule with requested versus covered
+  dimensions, explicit epistemic claim classifications, fragment IDs,
+  architecture constraints and on-demand affordances. `COMPLETE`, `PARTIAL`
+  and `BLOCKED` are mechanically derived; no token count or quality score is
+  authoritative.
+- `ContextRequest` — immutable request for a visible gap, bound to the exact
+  intent, RepoView and source package. It is not a Task, WorkItem, effect,
+  retry, capability grant or lifecycle record.
+- `ContextResolution` — immutable linkage from request and prior package to a
+  resulting package, added accepted fragments, resolved gaps and remaining
+  gaps. Denial/unavailability keeps the gap visible.
+- `EngineeringDecision` — concise review/resume evidence containing exact
+  intent/RepoView/package bases, claim classifications, alternatives,
+  trade-offs, selected option, obligations, uncertainty and revisit triggers.
+
+`IntentBasis.task_id` is opaque caller input. M2c consumes
+`task_id`/`intent_revision`/`intent_digest` and never allocates Task IDs,
+creates Task tables or owns lifecycle/admission.
+
+## Authority and epistemics
+
+Git object data exposed by exact RepoView remains source authority. Understanding
+is a projection/claim view, not source bytes authority. Conflicting claims are
+preserved as explicit contradictions; when an exact-source `FACT` conflicts
+with a derived claim, the record states `EXACT_SOURCE_WINS` without silently
+rewriting either claim. Private chain-of-thought, hidden reasoning traces and
+token-by-token reasoning are never stored.
+
+Every record identity is derived from stable canonical fields, including exact
+intent/RepoView basis and producer/schema versions. Rebuilding the same inputs
+converges; changing a material basis or producer/schema identity changes the
+record identity and stale decision applicability is rejected.
+
+FACT claims require `RepoSourceEvidence`, a distinct descriptor that binds a
+repo-relative source path and committed tree-entry object ID to an accepted M2b
+fragment. `publish_repo_source_evidence()` reads the bytes itself through the
+exact M2a `CommittedRepoView.query().get_entry()/read_bytes()` boundary, then
+publishes the immutable `ContentRef` and accepted fragment. Live validation
+proves the complete chain: exact RepoView and source object ID, M2a reread
+bytes, `ContentRef`, and accepted fragment raw bytes are all equal. A generic
+accepted `SourceEvidenceRef` remains useful for parser/negative cases but can
+never promote a claim to `FACT`; parsing a serialized descriptor is not
+authority verification. `ContextPackage` and `EngineeringDecision` source
+grounding likewise require the exact CommittedRepoView plus live M2b binding
+store. `CoverageBinding` records explicitly bind every covered dimension and
+must-see target to actual claim IDs and/or accepted fragment IDs, so
+`COMPLETE` cannot be self-attested.
+
+`ContextResolution` carries one explicit gap-to-evidence edge per resolved
+gap. It enforces `resulting_gap_ids = prior_gap_ids - resolved_gap_ids +
+introduced_gap_ids`, keeps unrelated gaps visible, and requires the edge to
+name resulting coverage for the resolved gap and the newly accepted evidence.
+Denial and unavailability preserve the complete prior gap set. An
+`EngineeringDecision` may classify only claim IDs present in the supplied
+Understanding basis and requires exact equality of the current RepoView set,
+ContextPackage set and opaque IntentBasis when applicability is checked.
+
+## M2b boundary
+
+`publish_semantic_record()` creates canonical JSON bytes, an M2b `ContentRef`,
+an exact RepoView-bound `TypedContextFragment`, and a durable accepted binding.
+`transport_semantic_record()` exercises Browser encode → Native decode with the
+binding store and reconstructs the exact record. Semantic records contain no
+protocol/chunk bookkeeping.
+
+No daemon, database, writer, scheduler, API requirement, Browser UI,
+production activation or Control Center authority is introduced. Runtime,
+writer and activation remain `OFF / OFF / OFF`. M2d remains unstarted.
+
+```
