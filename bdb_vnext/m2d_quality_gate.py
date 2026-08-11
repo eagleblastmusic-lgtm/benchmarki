@@ -58,6 +58,7 @@ GROUND_TRUTH_SCHEMA = "bdb-vnext-m2d-ground-truth-v1"
 EVALUATOR_SHEET_SCHEMA = "bdb-vnext-m2d-evaluator-sheet-v1"
 ASSET_MANIFEST_SCHEMA = "bdb-vnext-m2d-payload-manifest-v1"
 ASSET_CONTRACT_VERSION = "m2d-browser-assets-v1"
+RUN_SCHEMA = "bdb-vnext-m2d-run-v2"
 FOLLOWUP_OPERATOR_MESSAGE = "Here is the additional exact source context available for the requested package-grounding question."
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _ALLOWED_JUDGMENTS = frozenset({"BETTER", "EQUIVALENT", "WORSE", "INCONCLUSIVE", "N/A"})
@@ -1121,11 +1122,26 @@ def _timestamp_ok(value: Any) -> bool:
     return True
 
 
-def _validate_step_timestamps(step: Mapping[str, Any]) -> None:
-    _require(_timestamp_ok(step["started_at"]) and _timestamp_ok(step["finished_at"]), "run_timestamp_invalid", "step timestamp is malformed")
-    started = _datetime.datetime.fromisoformat(step["started_at"][:-1] + "+00:00")
-    finished = _datetime.datetime.fromisoformat(step["finished_at"][:-1] + "+00:00")
-    _require(finished >= started, "run_timestamp_order_invalid", "step finished before it started")
+def _validate_step_timing(step: Mapping[str, Any]) -> None:
+    duration = step["processing_duration_seconds"]
+    _require(
+        isinstance(duration, int) and not isinstance(duration, bool) and duration >= 0,
+        "run_processing_duration_invalid",
+        "processing duration must be a non-negative integer",
+    )
+    started = step["started_at"]
+    finished = step["finished_at"]
+    if started is None and finished is None:
+        return
+    _require(
+        started is not None and finished is not None,
+        "run_timestamp_pair_invalid",
+        "started_at and finished_at must both be present or both be null",
+    )
+    _require(_timestamp_ok(started) and _timestamp_ok(finished), "run_timestamp_invalid", "step timestamp is malformed")
+    started_dt = _datetime.datetime.fromisoformat(started[:-1] + "+00:00")
+    finished_dt = _datetime.datetime.fromisoformat(finished[:-1] + "+00:00")
+    _require(finished_dt >= started_dt, "run_timestamp_order_invalid", "step finished before it started")
 
 
 def _expected_step_asset(scenario: Mapping[str, Any], arm_id: str, phase: str) -> tuple[str | None, str, str, str | None]:
@@ -1153,7 +1169,7 @@ def validate_arm_run(
         "conversation_steps", "context_request_used", "requested_source_paths", "protocol_burden_visible", "run_digest",
     }
     _require(set(run) == required, "run_field_set", "run has unexpected or missing fields")
-    _require(run["schema"] == "bdb-vnext-m2d-run-v1", "run_schema_mismatch", "unsupported arm run schema")
+    _require(run["schema"] == RUN_SCHEMA, "run_schema_mismatch", "unsupported arm run schema")
     _require(run["scenario_id"] == scenario["scenario_id"], "run_scenario_mismatch", scenario["scenario_id"])
     _require(run["scenario_digest"] == scenario["scenario_digest"], "run_scenario_digest_mismatch", scenario["scenario_id"])
     _require(run["repo_view"] == scenario["repo_view"], "run_repo_view_mismatch", scenario["scenario_id"])
@@ -1170,19 +1186,33 @@ def validate_arm_run(
     _require(run["environment_digest"] == execution_environment_digest(environment), "run_environment_digest_mismatch", scenario["scenario_id"])
     steps = run["conversation_steps"]
     _require(isinstance(steps, list) and steps, "run_steps_missing", scenario["scenario_id"])
+    _require(isinstance(run["context_request_used"], bool), "run_context_request_invalid", scenario["scenario_id"])
+    requested_paths = run["requested_source_paths"]
+    _require(isinstance(requested_paths, list), "run_requested_paths_invalid", scenario["scenario_id"])
+    _require(all(isinstance(path, str) and bool(path) for path in requested_paths), "run_requested_paths_invalid", scenario["scenario_id"])
     if scenario["scenario_id"] != "S5":
         _require(len(steps) == 1 and steps[0]["phase"] == "INITIAL", "run_step_count_invalid", scenario["scenario_id"])
         _require(run["context_request_used"] is False, "run_unexpected_context_request", scenario["scenario_id"])
+        _require(requested_paths == [], "run_requested_paths_mismatch", scenario["scenario_id"])
     else:
         _require(len(steps) in {1, 2} and steps[0]["phase"] == "INITIAL", "s5_step_count_invalid", "S5")
         if run["context_request_used"]:
-            _require(len(steps) == 2 and steps[1]["phase"] == "FOLLOWUP", "s5_followup_missing", "S5")
+            _require(requested_paths, "s5_requested_paths_missing", "S5 context request must preserve observed paths")
+            if len(steps) == 2:
+                _require(steps[1]["phase"] == "FOLLOWUP", "s5_followup_missing", "S5")
+                frozen_followup_paths = set(scenario["context_seed"]["requested_source_paths"])
+                _require(
+                    all(path in frozen_followup_paths for path in requested_paths),
+                    "s5_followup_request_outside_universe",
+                    "operator follow-up is admitted only for an observed subset of the frozen follow-up paths",
+                )
         else:
             _require(len(steps) == 1, "s5_unexpected_followup", "S5")
+            _require(requested_paths == [], "run_requested_paths_mismatch", "S5")
     expected_paths = list(scenario["arm_construction"]["initial_visible_paths"])
     for index, step in enumerate(steps):
-        _require(set(step) == {"phase", "started_at", "finished_at", "prompt_digest", "payload_manifest_digest", "payload_digest", "operator_message_digest", "assistant_answer_markdown", "assistant_answer_sha256"}, "run_step_field_set", scenario["scenario_id"])
-        _validate_step_timestamps(step)
+        _require(set(step) == {"phase", "processing_duration_seconds", "started_at", "finished_at", "prompt_digest", "payload_manifest_digest", "payload_digest", "operator_message_digest", "assistant_answer_markdown", "assistant_answer_sha256"}, "run_step_field_set", scenario["scenario_id"])
+        _validate_step_timing(step)
         phase = step["phase"]
         prompt_expected, manifest_expected, payload_expected, operator_expected = _expected_step_asset(scenario, run["arm_id"], phase)
         _require(step["prompt_digest"] == prompt_expected, "run_prompt_digest_mismatch", scenario["scenario_id"])
@@ -1195,8 +1225,6 @@ def validate_arm_run(
         _require(step["operator_message_digest"] == operator_expected, "run_operator_message_mismatch", scenario["scenario_id"])
         answer = step["assistant_answer_markdown"]
         _require(step["assistant_answer_sha256"] == _sha256_bytes(answer.encode("utf-8")), "run_answer_digest_mismatch", scenario["scenario_id"])
-        if phase == "FOLLOWUP":
-            expected_paths = list(scenario["context_seed"]["requested_source_paths"])
         asset = scenario["browser_assets"]
         if phase == "INITIAL":
             asset_prefix = "arm_x" if run["arm_id"] == "X" else "arm_y"
@@ -1216,9 +1244,6 @@ def validate_arm_run(
             _require(_sha256_bytes((Path(materialized_root).resolve() / "S5" / "followup_manifest.json").read_bytes()) == asset["s5_followup_payload_manifest_sha256"], "s5_followup_manifest_drift", "S5")
             _require(_sha256_bytes((Path(materialized_root).resolve() / "S5" / "followup_context.md").read_bytes()) == asset["s5_followup_payload_digest"], "s5_followup_payload_drift", "S5")
         _require(index == 0 or phase == "FOLLOWUP", "run_phase_order_invalid", scenario["scenario_id"])
-    requested_paths = run["requested_source_paths"]
-    expected_requested_paths = list(scenario["context_seed"]["requested_source_paths"]) if run["context_request_used"] else []
-    _require(requested_paths == expected_requested_paths, "run_requested_paths_mismatch", scenario["scenario_id"])
     _require(run["run_digest"] == run_digest(run), "run_digest_mismatch", scenario["scenario_id"])
     return {
         "scenario_id": scenario["scenario_id"],

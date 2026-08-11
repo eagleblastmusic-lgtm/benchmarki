@@ -32,10 +32,13 @@ from bdb_vnext.m2d_quality_gate import (
     _validate_prompt_pair,
     _subject_view,
     derive_gate_decision,
+    execution_environment_digest,
     evaluation_digest,
     evidence_universe_digest,
+    run_digest,
     scenario_digest,
     task_text_digest,
+    validate_arm_run,
     validate_pair_evaluation,
 )
 
@@ -115,6 +118,95 @@ def _expect_evaluation_error(callback, code: str) -> None:
         assert exc.code == code
     else:
         raise AssertionError(f"expected {code}")
+
+
+def _s5_scenario() -> dict:
+    return next(item for item in _scenarios() if item["scenario_id"] == "S5")
+
+
+def _v2_run(
+    tmp_path: Path,
+    *,
+    arm_id: str = "X",
+    context_request_used: bool = False,
+    requested_source_paths: list[str] | None = None,
+    followup: bool = False,
+    processing_duration_seconds: int = 54,
+    started_at: str | None = None,
+    finished_at: str | None = None,
+) -> tuple[dict, dict, dict]:
+    scenario = _s5_scenario()
+    view = _subject_view(ROOT)
+    output = tmp_path / "assets"
+    initial = _materialize_one(
+        view,
+        scenario,
+        output=output,
+        arm_id=arm_id,
+        paths=list(scenario["arm_construction"]["initial_visible_paths"]),
+        phase="INITIAL",
+        runtime_root=tmp_path / f"runtime-{arm_id}",
+    )
+    if followup:
+        _materialize_followup(view, scenario, output=output)
+
+    environment = {
+        "product": "ChatGPT",
+        "mode": "operator-selected-mode",
+        "model_id": "operator-selected-visible-model",
+        "reasoning_setting": "operator-selected-reasoning",
+        "surface": "normal_chatgpt_browser",
+        "fresh_conversation": True,
+        "same_visible_capability_class": True,
+        "api_used": False,
+    }
+
+    def step(phase: str, answer: str) -> dict:
+        if phase == "INITIAL":
+            prefix = "arm_x" if arm_id == "X" else "arm_y"
+            prompt_digest = scenario["browser_assets"][f"{prefix}_prompt_sha256"]
+            manifest_digest = scenario["browser_assets"][f"{prefix}_initial_payload_manifest_digest"]
+            payload_digest = scenario["browser_assets"][f"{prefix}_initial_payload_digest"]
+            operator_message_digest = None
+        else:
+            prompt_digest = None
+            manifest_digest = scenario["browser_assets"]["s5_followup_payload_manifest_digest"]
+            payload_digest = scenario["browser_assets"]["s5_followup_payload_digest"]
+            operator_message_digest = scenario["browser_assets"]["s5_followup_operator_message_sha256"]
+        return {
+            "phase": phase,
+            "processing_duration_seconds": processing_duration_seconds,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "prompt_digest": prompt_digest,
+            "payload_manifest_digest": manifest_digest,
+            "payload_digest": payload_digest,
+            "operator_message_digest": operator_message_digest,
+            "assistant_answer_markdown": answer,
+            "assistant_answer_sha256": _sha256_bytes(answer.encode("utf-8")),
+        }
+
+    steps = [step("INITIAL", "initial answer")]
+    if followup:
+        steps.append(step("FOLLOWUP", "follow-up answer"))
+    run = {
+        "schema": gate_module.RUN_SCHEMA,
+        "scenario_id": scenario["scenario_id"],
+        "scenario_digest": scenario["scenario_digest"],
+        "arm_id": arm_id,
+        "arm_type": "BASELINE_FLAT_CONTEXT_V1" if arm_id == "X" else "M2_VNEXT_CONTEXT_PACKAGE_V1",
+        "repo_view": scenario["repo_view"],
+        "evidence_universe_digest": evidence_universe_digest(scenario),
+        "task_text_digest": task_text_digest(scenario),
+        "environment": environment,
+        "environment_digest": execution_environment_digest(environment),
+        "conversation_steps": steps,
+        "context_request_used": context_request_used,
+        "requested_source_paths": [] if requested_source_paths is None else requested_source_paths,
+        "protocol_burden_visible": False,
+    }
+    run["run_digest"] = run_digest(run)
+    return run, scenario, output
 
 
 def test_frozen_scenario_packet_has_five_deterministic_identities_and_assets() -> None:
@@ -439,3 +531,175 @@ def test_answer_key_is_not_an_input_to_materializer() -> None:
     source = inspect.getsource(__import__("bdb_vnext.m2d_quality_gate", fromlist=["materialize_packet"]).materialize_packet)
     assert "evaluator_ground_truth.json" not in source
     assert "evaluator_sheet.json" not in source
+
+
+def test_run_v2_s5_subset_request_with_frozen_followup_validates(tmp_path: Path) -> None:
+    requested = ["bdb_vnext/content_store.py"]
+    run, scenario, output = _v2_run(
+        tmp_path,
+        context_request_used=True,
+        requested_source_paths=requested,
+        followup=True,
+    )
+    validated = validate_arm_run(
+        run,
+        scenario,
+        packet_root=ROOT / "benchmarks" / "m2d",
+        materialized_root=output,
+    )
+    assert validated["step_count"] == 2
+    assert run["requested_source_paths"] == requested
+    assert run["requested_source_paths"] != scenario["context_seed"]["requested_source_paths"]
+
+
+def test_run_v2_s5_y_out_of_universe_request_is_recordable_without_followup(tmp_path: Path) -> None:
+    requested = ["bdb_vnext/content_store.py", "bdb_vnext/context_transport.py"]
+    run, scenario, output = _v2_run(
+        tmp_path,
+        arm_id="Y",
+        context_request_used=True,
+        requested_source_paths=requested,
+    )
+    validated = validate_arm_run(
+        run,
+        scenario,
+        packet_root=ROOT / "benchmarks" / "m2d",
+        materialized_root=output,
+    )
+    assert validated["step_count"] == 1
+    assert run["requested_source_paths"] == requested
+
+
+def test_run_v2_s5_y_out_of_universe_request_rejects_admitted_followup(tmp_path: Path) -> None:
+    run, scenario, output = _v2_run(
+        tmp_path,
+        arm_id="Y",
+        context_request_used=True,
+        requested_source_paths=["bdb_vnext/content_store.py", "bdb_vnext/context_transport.py"],
+        followup=True,
+    )
+    _expect_evaluation_error(
+        lambda: validate_arm_run(
+            run,
+            scenario,
+            packet_root=ROOT / "benchmarks" / "m2d",
+            materialized_root=output,
+        ),
+        "s5_followup_request_outside_universe",
+    )
+
+
+def test_run_v2_s5_no_request_remains_one_step_false_and_empty(tmp_path: Path) -> None:
+    run, scenario, output = _v2_run(tmp_path)
+    validated = validate_arm_run(
+        run,
+        scenario,
+        packet_root=ROOT / "benchmarks" / "m2d",
+        materialized_root=output,
+    )
+    assert validated["step_count"] == 1
+    assert run["context_request_used"] is False
+    assert run["requested_source_paths"] == []
+
+
+def test_run_v2_s5_full_exact_request_with_followup_remains_valid(tmp_path: Path) -> None:
+    requested = list(_s5_scenario()["context_seed"]["requested_source_paths"])
+    run, scenario, output = _v2_run(
+        tmp_path,
+        context_request_used=True,
+        requested_source_paths=requested,
+        followup=True,
+    )
+    validated = validate_arm_run(
+        run,
+        scenario,
+        packet_root=ROOT / "benchmarks" / "m2d",
+        materialized_root=output,
+    )
+    assert validated["step_count"] == 2
+    assert run["requested_source_paths"] == requested
+
+
+def test_requested_exact_evidence_remains_evaluator_adjudication(tmp_path: Path) -> None:
+    scenario, runs, evaluation = _synthetic_pair("S5")
+    evaluation["context_request"]["outcome"] = "INCONCLUSIVE"
+    evaluation["context_request"]["requested_exact_evidence"] = False
+    evaluation["evaluation_digest"] = evaluation_digest(evaluation)
+    validated = validate_pair_evaluation(evaluation, scenario, validated_runs=runs)
+    assert validated["evaluation"]["context_request"]["requested_exact_evidence"] is False
+
+
+def test_run_v2_processing_duration_is_required_timing_without_absolute_timestamps(tmp_path: Path) -> None:
+    run, scenario, output = _v2_run(tmp_path, processing_duration_seconds=81)
+    validated = validate_arm_run(
+        run,
+        scenario,
+        packet_root=ROOT / "benchmarks" / "m2d",
+        materialized_root=output,
+    )
+    assert validated["step_count"] == 1
+    assert run["conversation_steps"][0]["processing_duration_seconds"] == 81
+    assert run["conversation_steps"][0]["started_at"] is None
+    assert run["conversation_steps"][0]["finished_at"] is None
+
+
+def test_run_v2_rejects_missing_or_invalid_processing_duration(tmp_path: Path) -> None:
+    run, scenario, output = _v2_run(tmp_path)
+    run["conversation_steps"][0]["processing_duration_seconds"] = None
+    run["run_digest"] = run_digest(run)
+    _expect_evaluation_error(
+        lambda: validate_arm_run(
+            run,
+            scenario,
+            packet_root=ROOT / "benchmarks" / "m2d",
+            materialized_root=output,
+        ),
+        "run_processing_duration_invalid",
+    )
+
+
+def test_run_v2_optional_timestamps_fail_closed_when_malformed_or_reversed(tmp_path: Path) -> None:
+    malformed, scenario, output = _v2_run(
+        tmp_path / "malformed",
+        started_at="not-a-timestamp",
+        finished_at="2026-08-11T12:00:01Z",
+    )
+    _expect_evaluation_error(
+        lambda: validate_arm_run(
+            malformed,
+            scenario,
+            packet_root=ROOT / "benchmarks" / "m2d",
+            materialized_root=output,
+        ),
+        "run_timestamp_invalid",
+    )
+
+    reversed_run, scenario, output = _v2_run(
+        tmp_path / "reversed",
+        started_at="2026-08-11T12:00:02Z",
+        finished_at="2026-08-11T12:00:01Z",
+    )
+    _expect_evaluation_error(
+        lambda: validate_arm_run(
+            reversed_run,
+            scenario,
+            packet_root=ROOT / "benchmarks" / "m2d",
+            materialized_root=output,
+        ),
+        "run_timestamp_order_invalid",
+    )
+
+
+def test_run_v2_rejects_v1_schema_without_relaxing_v1_contract(tmp_path: Path) -> None:
+    run, scenario, output = _v2_run(tmp_path)
+    run["schema"] = "bdb-vnext-m2d-run-v1"
+    run["run_digest"] = run_digest(run)
+    _expect_evaluation_error(
+        lambda: validate_arm_run(
+            run,
+            scenario,
+            packet_root=ROOT / "benchmarks" / "m2d",
+            materialized_root=output,
+        ),
+        "run_schema_mismatch",
+    )
