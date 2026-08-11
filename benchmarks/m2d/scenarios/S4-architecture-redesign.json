@@ -44,9 +44,9 @@
     "arm_x_initial_payload_manifest_digest": "sha256:f2f36520e94380831d4e4afb73462c5c5ecff60f6f379defe5037d8e71c96ae3",
     "arm_x_initial_payload_manifest_sha256": "sha256:e5cf8fd6967365b70f741679ae9473c1ef882ad2a67051034758a864901e81cd",
     "arm_x_initial_payload_digest": "sha256:26dd04ac9e64f9a2e316744b19900598f49cb68e6871806dabd4b7111746d715",
-    "arm_y_initial_payload_manifest_digest": "sha256:b1c5247cdbde54a55c1a8749e251cc2c7f469fe9226d9407c1c7c3c4051dfd62",
-    "arm_y_initial_payload_manifest_sha256": "sha256:e15a82b4379dc4ef008be33466579d07587a0fc1678cb1e95b896398a136ee0d",
-    "arm_y_initial_payload_digest": "sha256:aeb2d99d6cb7e8d6a37152a7af1abfacab4b06bae9b1aa9beb5167022d44f94c",
+    "arm_y_initial_payload_manifest_digest": "sha256:87bb1e17a5c1ac146df20813f0b0ced02248033de78586f43695b2d86e2886fa",
+    "arm_y_initial_payload_manifest_sha256": "sha256:6271941f2c8255433db29c1e88f3bf6c9b9096f787dd477eaeead6405eae873e",
+    "arm_y_initial_payload_digest": "sha256:bc3b801185d74b1a8e7ef8ea0c0e83a5d0b11fdc98d945744a0570af2a2dcba6",
     "s5_followup_operator_message_sha256": null,
     "s5_followup_payload_manifest_digest": null,
     "s5_followup_payload_manifest_sha256": null,
@@ -54,5 +54,5 @@
   },
   "rubric_version": "m2d-rubric-v1",
   "gate_policy_version": "m2d-gate-policy-v1",
-  "scenario_digest": "sha256:c313b19106cd2b217318b07aa3dc8c82de2733158237c0712b96c495f727ce86"
+  "scenario_digest": "sha256:e2f993ab23df9d52f55143d30dcfc70e2fdd9fa7df37a307186ef464a1043d68"
 }

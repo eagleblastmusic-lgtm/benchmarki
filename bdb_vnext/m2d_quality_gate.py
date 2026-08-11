@@ -60,6 +60,17 @@ ASSET_MANIFEST_SCHEMA = "bdb-vnext-m2d-payload-manifest-v1"
 ASSET_CONTRACT_VERSION = "m2d-browser-assets-v1"
 FOLLOWUP_OPERATOR_MESSAGE = "Here is the additional exact source context available for the requested package-grounding question."
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_ALLOWED_JUDGMENTS = frozenset({"BETTER", "EQUIVALENT", "WORSE", "INCONCLUSIVE", "N/A"})
+_CORE_IMPROVEMENT_VECTOR_IDS = frozenset({
+    "repository_understanding_must_see_coverage",
+    "root_cause_or_ownership_accuracy",
+    "explicit_unknowns_uncertainty",
+    "constraint_violations",
+    "engineering_decision_quality_tradeoffs",
+    "validation_relevance_missed_risks",
+    "rework_required",
+})
+_CONTEXT_REQUEST_OUTCOMES = frozenset({"NOT_APPLICABLE", "NOT_REQUESTED", "RESOLVED", "DENIED", "UNAVAILABLE", "INCONCLUSIVE"})
 
 
 class M2dValidationError(ValueError):
@@ -508,8 +519,12 @@ def _m2_context_records(
                 understanding = RepositoryUnderstandingView.create(
                     intent,
                     view,
-                    requested_dimensions=[seed["gap_dimension"], seed["unrelated_gap_dimension"]],
-                    must_see_categories=[seed["gap_dimension"]],
+                    # Keep the initial package genuinely partial rather than
+                    # mechanically BLOCKED: the two seeded unknowns are
+                    # visible, but no task-specific requested dimension or
+                    # must-see coverage is predeclared to the model.
+                    requested_dimensions=[],
+                    must_see_categories=[],
                     unknowns=[gap, unrelated],
                 )
                 package = ContextPackage.from_understanding(
@@ -522,22 +537,16 @@ def _m2_context_records(
                         reason="Request exact committed source context when package grounding is incomplete.",
                     )],
                 )
-                request = ContextRequest.create(
-                    package,
-                    gap_ids=[gap.unknown_id],
-                    horizon="COMPONENT",
-                    requested_dimensions=[seed["gap_dimension"]],
-                    requested_evidence=seed["requested_source_paths"],
-                    question="Which exact accepted M2b source edges establish package grounding?",
-                    reason="repair only the visible package-grounding gap",
-                )
                 return {
                     "understanding": understanding,
                     "package": package,
                     "claims": (),
                     "evidences": tuple(evidences),
                     "fragments": tuple(fragments),
-                    "context_request": request,
+                    # The model must formulate this request.  The canonical
+                    # request is constructed only by the internal S5 fixture
+                    # and by the post-request follow-up construction below.
+                    "context_request": None,
                     "context_resolution": None,
                 }
             claim = UnderstandingClaim.create(
@@ -642,10 +651,10 @@ def _m2_context_records(
             supporting_claim_ids=[claim.claim_id for claim in claims],
             supporting_fragment_ids=[fragment.fragment_id for fragment in fragments],
         )
-        unknowns = [
-            Unknown.create(view, subject="task context", dimension=f"task-unknown-{index}", reason=reason)
-            for index, reason in enumerate(scenario["known_unknowns"])
-        ]
+        # S1-S4 treatment construction is source-grounded and epistemically
+        # neutral. Benchmark-author evaluator annotations are not model-facing
+        # treatment input.
+        unknowns: list[Unknown] = []
         omission = Omission.create(
             view,
             dimension="task-boundary",
@@ -655,7 +664,7 @@ def _m2_context_records(
             intent,
             view,
             claims=claims,
-            requested_dimensions=["source-context", "task-context"],
+            requested_dimensions=["source-context"],
             covered_dimensions=["source-context"],
             coverage_bindings=[coverage],
             unknowns=unknowns,
@@ -1247,12 +1256,47 @@ def validate_pair_evaluation(
     _require(evaluation["schema"] == "bdb-vnext-m2d-evaluation-v1", "evaluation_schema_mismatch", "unsupported evaluation schema")
     _require(evaluation["scenario_id"] == scenario["scenario_id"] and evaluation["scenario_digest"] == scenario["scenario_digest"], "evaluation_scenario_mismatch", scenario["scenario_id"])
     _require(evaluation["rubric_version"] == RUBRIC_VERSION, "evaluation_rubric_mismatch", scenario["scenario_id"])
+    vectors = evaluation["vector_evaluations"]
+    expected_vector_ids = list(scenario["adjudication_vector_ids"])
+    _require(isinstance(vectors, list) and len(vectors) == len(expected_vector_ids), "evaluation_vector_set_invalid", scenario["scenario_id"])
+    seen_vector_ids: set[str] = set()
+    for vector in vectors:
+        _require(isinstance(vector, Mapping), "evaluation_vector_shape_invalid", scenario["scenario_id"])
+        _require(set(vector) == {"vector_id", "judgment", "evidence", "raw_counts"}, "evaluation_vector_field_set", scenario["scenario_id"])
+        vector_id = vector["vector_id"]
+        _require(isinstance(vector_id, str) and bool(vector_id), "evaluation_vector_id_invalid", scenario["scenario_id"])
+        _require(vector_id in expected_vector_ids, "evaluation_vector_unknown", str(vector_id))
+        _require(vector_id not in seen_vector_ids, "evaluation_vector_duplicate", str(vector_id))
+        seen_vector_ids.add(vector_id)
+        _require(isinstance(vector["judgment"], str), "evaluation_judgment_invalid", str(vector_id))
+        _require(vector["judgment"] in _ALLOWED_JUDGMENTS, "evaluation_judgment_invalid", str(vector_id))
+        _require(isinstance(vector["evidence"], str) and bool(vector["evidence"].strip()), "evaluation_vector_evidence_missing", str(vector_id))
+        _require(isinstance(vector["raw_counts"], Mapping), "evaluation_vector_raw_counts_invalid", str(vector_id))
+        if vector["judgment"] == "N/A":
+            _require("not applicable" in vector["evidence"].casefold() or "does not apply" in vector["evidence"].casefold(), "evaluation_na_reason_missing", str(vector_id))
+    _require(seen_vector_ids == set(expected_vector_ids), "evaluation_vector_set_invalid", scenario["scenario_id"])
+    hard_failures = evaluation["hard_failures"]
+    _require(isinstance(hard_failures, list) and all(isinstance(item, str) and bool(item.strip()) for item in hard_failures), "evaluation_hard_failure_shape_invalid", scenario["scenario_id"])
+    context = evaluation["context_request"]
+    _require(isinstance(context, Mapping) and set(context) == {"required", "outcome", "gap_visible", "requested_exact_evidence", "unrelated_gaps_preserved", "answer_improved_or_narrowed", "protocol_bookkeeping_required"}, "evaluation_context_request_shape_invalid", scenario["scenario_id"])
+    _require(context["outcome"] in _CONTEXT_REQUEST_OUTCOMES, "evaluation_context_outcome_invalid", scenario["scenario_id"])
+    _require(all(isinstance(context[key], bool) for key in ("required", "gap_visible", "requested_exact_evidence", "unrelated_gaps_preserved", "answer_improved_or_narrowed", "protocol_bookkeeping_required")), "evaluation_context_bool_invalid", scenario["scenario_id"])
+    _require(isinstance(evaluation["material_improvement"], bool), "evaluation_material_improvement_invalid", scenario["scenario_id"])
+    _require(isinstance(evaluation["evaluator_evidence"], str) and bool(evaluation["evaluator_evidence"].strip()), "evaluation_evidence_missing", scenario["scenario_id"])
+    if evaluation["material_improvement"]:
+        _require(any(vector["vector_id"] in _CORE_IMPROVEMENT_VECTOR_IDS and vector["judgment"] == "BETTER" for vector in vectors), "evaluation_material_improvement_unsupported", scenario["scenario_id"])
     x = validated_runs.get("X")
     y = validated_runs.get("Y")
     _require(x is not None and y is not None, "evaluation_runs_missing", scenario["scenario_id"])
     _require(evaluation["arm_x_run_digest"] == x["run_digest"] and evaluation["arm_y_run_digest"] == y["run_digest"], "evaluation_run_link_mismatch", scenario["scenario_id"])
     _require(evaluation["evaluation_digest"] == evaluation_digest(evaluation), "evaluation_digest_mismatch", scenario["scenario_id"])
     fairness = derive_fairness_from_runs(x, y)
+    derived_protocol_burden = x["protocol_burden_visible"] or y["protocol_burden_visible"]
+    if scenario["scenario_id"] == "S5":
+        _require(context["protocol_bookkeeping_required"] is derived_protocol_burden, "evaluation_protocol_burden_mismatch", "S5")
+    protocol_vector = next((vector for vector in vectors if vector["vector_id"] == "protocol_burden_visible_to_gpt"), None)
+    if protocol_vector is not None and derived_protocol_burden:
+        _require(protocol_vector["judgment"] != "N/A", "evaluation_protocol_vector_inconsistent", scenario["scenario_id"])
     if scenario["scenario_id"] == "S5" and evaluation["context_request"].get("outcome") == "RESOLVED":
         _require(x["step_count"] == 2 and y["step_count"] == 2, "s5_incomplete_transcript", "S5")
     return {"scenario_id": scenario["scenario_id"], "fairness": fairness, "evaluation": evaluation}

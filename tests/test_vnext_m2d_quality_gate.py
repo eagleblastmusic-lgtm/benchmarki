@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import copy
 import inspect
 import json
 import shutil
 from pathlib import Path
 
+from bdb_shared.evidence import semantic_digest
+from bdb_vnext import m2d_quality_gate as gate_module
 from bdb_vnext.m2d_quality_gate import (
     EVALUATOR_SHEET_SCHEMA,
     ASSET_CONTRACT_VERSION,
@@ -19,12 +22,18 @@ from bdb_vnext.m2d_quality_gate import (
     _quality_policy_from_validated,
     _payload_manifest,
     _sha256_bytes,
+    _m2_context_records,
+    _m2_payload,
+    _materialize_followup,
     _validate_materialized_manifest,
     _validate_prompt_pair,
     _subject_view,
     derive_gate_decision,
+    evaluation_digest,
     evidence_universe_digest,
     scenario_digest,
+    task_text_digest,
+    validate_pair_evaluation,
 )
 
 
@@ -38,7 +47,38 @@ def _scenarios() -> list[dict]:
     ]
 
 
-def _validated_fixture(scenario_id: str, *, material_improvement: bool = False) -> dict:
+def _synthetic_pair(scenario_id: str, *, protocol_burden: bool = False, material_improvement: bool = False) -> tuple[dict, dict[str, dict], dict]:
+    scenario = next(item for item in _scenarios() if item["scenario_id"] == scenario_id)
+    environment_digest = semantic_digest({"synthetic_environment": "GATE_LOGIC_TEST_PASS"})
+    runs: dict[str, dict] = {}
+    for arm_id in ("X", "Y"):
+        run_identity = {"scenario_id": scenario_id, "arm_id": arm_id, "environment_digest": environment_digest}
+        runs[arm_id] = {
+            "scenario_id": scenario_id,
+            "arm_id": arm_id,
+            "run_digest": semantic_digest(run_identity),
+            "environment_digest": environment_digest,
+            "model_id": "operator-selected-visible-model",
+            "reasoning_setting": "operator-selected-reasoning",
+            "repo_view": scenario["repo_view"],
+            "evidence_universe_digest": evidence_universe_digest(scenario),
+            "task_text_digest": task_text_digest(scenario),
+            "step_count": 2 if scenario_id == "S5" else 1,
+            "context_request_used": scenario_id == "S5",
+            "protocol_burden_visible": protocol_burden,
+        }
+    vectors = [
+        {
+            "vector_id": vector_id,
+            "judgment": "EQUIVALENT",
+            "evidence": "Synthetic GATE_LOGIC_TEST_PASS evidence.",
+            "raw_counts": {},
+        }
+        for vector_id in scenario["adjudication_vector_ids"]
+    ]
+    if scenario_id == "S3":
+        vectors[scenario["adjudication_vector_ids"].index("engineering_decision_quality_tradeoffs")]["judgment"] = "BETTER"
+        material_improvement = True
     context = {
         "required": scenario_id == "S5",
         "outcome": "RESOLVED" if scenario_id == "S5" else "NOT_APPLICABLE",
@@ -46,19 +86,32 @@ def _validated_fixture(scenario_id: str, *, material_improvement: bool = False) 
         "requested_exact_evidence": scenario_id == "S5",
         "unrelated_gaps_preserved": scenario_id == "S5",
         "answer_improved_or_narrowed": scenario_id == "S5",
-        "protocol_bookkeeping_required": False,
+        "protocol_bookkeeping_required": protocol_burden if scenario_id == "S5" else False,
     }
-    return {
+    evaluation = {
+        "schema": "bdb-vnext-m2d-evaluation-v1",
         "scenario_id": scenario_id,
-        "fairness": {key: True for key in ("same_model", "same_settings", "same_repo_view", "same_evidence_universe", "same_task", "browser_parity")},
-        "evaluation": {
-            "scenario_id": scenario_id,
-            "vector_evaluations": [{"judgment": "EQUIVALENT"}],
-            "hard_failures": [],
-            "context_request": context,
-            "material_improvement": material_improvement,
-        },
+        "scenario_digest": scenario["scenario_digest"],
+        "arm_x_run_digest": runs["X"]["run_digest"],
+        "arm_y_run_digest": runs["Y"]["run_digest"],
+        "rubric_version": RUBRIC_VERSION,
+        "vector_evaluations": vectors,
+        "hard_failures": [],
+        "context_request": context,
+        "material_improvement": material_improvement,
+        "evaluator_evidence": "Synthetic GATE_LOGIC_TEST_PASS evidence only; not Browser evidence.",
     }
+    evaluation["evaluation_digest"] = evaluation_digest(evaluation)
+    return scenario, runs, evaluation
+
+
+def _expect_evaluation_error(callback, code: str) -> None:
+    try:
+        callback()
+    except M2dValidationError as exc:
+        assert exc.code == code
+    else:
+        raise AssertionError(f"expected {code}")
 
 
 def test_frozen_scenario_packet_has_five_deterministic_identities_and_assets() -> None:
@@ -173,6 +226,114 @@ def test_one_byte_materialized_payload_drift_is_rejected(tmp_path: Path) -> None
         raise AssertionError("tampered payload unexpectedly passed")
 
 
+def test_treatment_inputs_are_source_grounded_and_s5_initial_request_is_not_prebuilt(tmp_path: Path) -> None:
+    source = inspect.getsource(_m2_context_records)
+    for forbidden in ("known_unknowns", "must_see_ground_truth", "source_inference_distinctions", "evaluator_ground_truth", "evaluator_sheet"):
+        assert forbidden not in source
+    view = _subject_view(ROOT)
+    s1_s4 = [item for item in _scenarios() if item["scenario_id"] in {"S1", "S2", "S3", "S4"}]
+    for scenario in s1_s4:
+        payload, _extra = _m2_payload(
+            scenario,
+            view,
+            scenario["arm_construction"]["initial_visible_paths"],
+            phase="INITIAL",
+            runtime_root=tmp_path / scenario["scenario_id"],
+        )
+        text = payload.decode("utf-8")
+        assert "visible_unknowns: 0" in text
+        assert "known_unknowns" not in text
+    s5 = next(item for item in _scenarios() if item["scenario_id"] == "S5")
+    payload, extra = _m2_payload(
+        s5,
+        view,
+        s5["arm_construction"]["initial_visible_paths"],
+        phase="INITIAL",
+        runtime_root=tmp_path / "S5-runtime",
+    )
+    text = payload.decode("utf-8")
+    assert extra["context_request"] is False
+    assert "coverage_status: PARTIAL" in text
+    assert "package-grounding" in text
+    assert "decision-applicability" in text
+    assert "### Natural-language context request" not in text
+    assert not any(path in text for path in s5["context_seed"]["requested_source_paths"])
+    assert "Here is the additional exact source context available" not in text
+    followup = _materialize_followup(view, s5, output=tmp_path / "assets")["context_path"]
+    followup_text = (tmp_path / "assets" / followup).read_text(encoding="utf-8")
+    assert all(path in followup_text for path in s5["context_seed"]["requested_source_paths"])
+
+
+def test_evaluation_vector_and_integrity_contract_rejects_malformed_records() -> None:
+    scenario, runs, valid = _synthetic_pair("S3")
+    missing = copy.deepcopy(valid)
+    missing["vector_evaluations"] = missing["vector_evaluations"][:-1]
+    _expect_evaluation_error(lambda: validate_pair_evaluation(missing, scenario, validated_runs=runs), "evaluation_vector_set_invalid")
+    duplicate = copy.deepcopy(valid)
+    duplicate["vector_evaluations"][-1]["vector_id"] = duplicate["vector_evaluations"][0]["vector_id"]
+    _expect_evaluation_error(lambda: validate_pair_evaluation(duplicate, scenario, validated_runs=runs), "evaluation_vector_duplicate")
+    extra = copy.deepcopy(valid)
+    extra["vector_evaluations"].append(copy.deepcopy(extra["vector_evaluations"][0]))
+    _expect_evaluation_error(lambda: validate_pair_evaluation(extra, scenario, validated_runs=runs), "evaluation_vector_set_invalid")
+    missing_evidence = copy.deepcopy(valid)
+    missing_evidence["vector_evaluations"][0].pop("evidence")
+    _expect_evaluation_error(lambda: validate_pair_evaluation(missing_evidence, scenario, validated_runs=runs), "evaluation_vector_field_set")
+    invalid_judgment = copy.deepcopy(valid)
+    invalid_judgment["vector_evaluations"][0]["judgment"] = "INVALID"
+    _expect_evaluation_error(lambda: validate_pair_evaluation(invalid_judgment, scenario, validated_runs=runs), "evaluation_judgment_invalid")
+    _s4, s4_runs, unsupported_base = _synthetic_pair("S4")
+    unsupported_improvement = copy.deepcopy(unsupported_base)
+    unsupported_improvement["material_improvement"] = True
+    _expect_evaluation_error(lambda: validate_pair_evaluation(unsupported_improvement, _s4, validated_runs=s4_runs), "evaluation_material_improvement_unsupported")
+    wrong_link = copy.deepcopy(valid)
+    wrong_link["arm_x_run_digest"] = semantic_digest({"wrong": "run"})
+    _expect_evaluation_error(lambda: validate_pair_evaluation(wrong_link, scenario, validated_runs=runs), "evaluation_run_link_mismatch")
+    tampered_digest = copy.deepcopy(valid)
+    tampered_digest["evaluation_digest"] = semantic_digest({"tampered": True})
+    _expect_evaluation_error(lambda: validate_pair_evaluation(tampered_digest, scenario, validated_runs=runs), "evaluation_digest_mismatch")
+    s5, protocol_runs, protocol_eval = _synthetic_pair("S5", protocol_burden=True)
+    protocol_eval["context_request"]["protocol_bookkeeping_required"] = False
+    protocol_eval["evaluation_digest"] = evaluation_digest(protocol_eval)
+    _expect_evaluation_error(lambda: validate_pair_evaluation(protocol_eval, s5, validated_runs=protocol_runs), "evaluation_protocol_burden_mismatch")
+
+
+def test_complete_synthetic_evaluation_fixture_is_gate_logic_only() -> None:
+    validated = []
+    for scenario_id in REQUIRED_SCENARIOS:
+        scenario, runs, evaluation = _synthetic_pair(scenario_id)
+        validated.append(validate_pair_evaluation(evaluation, scenario, validated_runs=runs))
+    result = _quality_policy_from_validated(validated)
+    assert result["outcome"] == "PASS"
+    assert result["no_aggregate_score"] is True
+
+
+def test_gate_rejects_environment_drift_before_policy(monkeypatch, tmp_path: Path) -> None:
+    scenarios = {scenario_id: {"scenario_id": scenario_id} for scenario_id in REQUIRED_SCENARIOS}
+    first_environment = "sha256:" + "0" * 64
+    second_environment = "sha256:" + "1" * 64
+
+    def fake_validate(run, _scenario, **_kwargs):
+        return {
+            "scenario_id": run["scenario_id"],
+            "arm_id": run["arm_id"],
+            "run_digest": semantic_digest(run),
+            "environment_digest": first_environment if run["scenario_id"] != "S5" else second_environment,
+        }
+
+    monkeypatch.setattr(gate_module, "validate_arm_run", fake_validate)
+    records = [{"scenario_id": scenario_id, "arm_id": arm_id} for scenario_id in REQUIRED_SCENARIOS for arm_id in ("X", "Y")]
+    result = gate_module.derive_gate_decision(
+        [],
+        run_records=records,
+        scenarios=scenarios,
+        packet_root=tmp_path,
+        materialized_root=tmp_path,
+    )
+    assert result["outcome"] == "INCONCLUSIVE"
+    assert result["reason"] == "INVALID_BROWSER_EVIDENCE"
+    assert "environment_drift" in result["details"]
+
+
 def test_empty_or_partial_browser_evidence_never_passes() -> None:
     empty = derive_gate_decision([])
     assert empty["outcome"] == "READY_FOR_BROWSER_EXECUTION"
@@ -181,13 +342,6 @@ def test_empty_or_partial_browser_evidence_never_passes() -> None:
     assert partial["outcome"] == "INCONCLUSIVE"
     assert partial["reason"] == "INCOMPLETE_BROWSER_EVIDENCE"
     assert "browser_runs_present" not in inspect.signature(derive_gate_decision).parameters
-
-
-def test_GATE_LOGIC_TEST_PASS_is_explicitly_synthetic_only() -> None:
-    validated = [_validated_fixture(scenario_id, material_improvement=scenario_id == "S3") for scenario_id in REQUIRED_SCENARIOS]
-    result = _quality_policy_from_validated(validated)
-    assert result["outcome"] == "PASS"
-    assert result["no_aggregate_score"] is True
 
 
 def test_answer_key_is_not_an_input_to_materializer() -> None:

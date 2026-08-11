@@ -33,6 +33,14 @@ identities in each scenario digest. It does not read evaluator ground truth or
 write production state. S5 additionally freezes one neutral follow-up bundle
 and operator message before any model answer exists.
 
+The initial S5 treatment exposes `PARTIAL` coverage, both seeded visible gaps,
+and only a generic affordance that more exact repository context may be
+requested. It never renders a preconstructed `ContextRequest`, its reason, or
+the follow-up file list. S1--S4 treatment construction uses only the exact
+RepoView, committed source evidence, and generic M2c boundaries; benchmark
+author unknowns, must-see annotations, and source/inference annotations remain
+evaluator-side metadata.
+
 Each paired observation is an immutable run record: exact RepoView, task and
 evidence digests, prompt/payload/manifest digests, operator-selected visible
 ChatGPT `model_id` and reasoning setting, browser attestation, requested source
@@ -43,6 +51,14 @@ requires all ten X/Y runs and five exact run-linked evaluations, and derives
 fairness from those records. There is no `browser_runs_present` or equivalent
 boolean bypass; empty evidence is READY, partial or invalid evidence is never
 PASS, and environment drift is INCONCLUSIVE.
+
+Before policy evaluation, the evaluator validator requires exactly the frozen
+scenario vector set with strict vector fields, allowed judgments, non-empty
+evidence, object-shaped raw counts, and an applicability reason for `N/A`.
+`material_improvement=true` requires a supporting `BETTER` judgment on a core
+improvement vector. S5 `protocol_bookkeeping_required` must equal the derived
+run-level protocol observation, so evaluator prose cannot contradict run
+evidence.
 
 ## Frozen status
 
