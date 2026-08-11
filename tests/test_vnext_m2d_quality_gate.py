@@ -135,7 +135,7 @@ def _v2_run(
     started_at: str | None = None,
     finished_at: str | None = None,
 ) -> tuple[dict, dict, dict]:
-    scenario = _s5_scenario()
+    scenario = copy.deepcopy(_s5_scenario())
     view = _subject_view(ROOT)
     output = tmp_path / "assets"
     initial = _materialize_one(
@@ -147,8 +147,16 @@ def _v2_run(
         phase="INITIAL",
         runtime_root=tmp_path / f"runtime-{arm_id}",
     )
+    prefix = "arm_x" if arm_id == "X" else "arm_y"
+    scenario["browser_assets"][f"{prefix}_initial_payload_manifest_digest"] = initial["manifest_digest"]
+    scenario["browser_assets"][f"{prefix}_initial_payload_manifest_sha256"] = initial["manifest_sha256"]
+    scenario["browser_assets"][f"{prefix}_initial_payload_digest"] = initial["payload_digest"]
     if followup:
-        _materialize_followup(view, scenario, output=output)
+        materialized_followup = _materialize_followup(view, scenario, output=output)
+        scenario["browser_assets"]["s5_followup_payload_manifest_digest"] = materialized_followup["manifest_digest"]
+        scenario["browser_assets"]["s5_followup_payload_manifest_sha256"] = materialized_followup["manifest_sha256"]
+        scenario["browser_assets"]["s5_followup_payload_digest"] = materialized_followup["payload_digest"]
+    scenario["scenario_digest"] = scenario_digest(scenario)
 
     environment = {
         "product": "ChatGPT",
@@ -376,6 +384,10 @@ def test_treatment_inputs_are_source_grounded_and_s5_initial_request_is_not_preb
     assert "coverage_status: PARTIAL" in text
     assert "package-grounding" in text
     assert "decision-applicability" in text
+    assert "### Gap-bound request guidance" in text
+    assert "projection_version: m2c-request-guidance-v1" in text
+    assert "ALREADY BOUND SOURCE BASIS" in text
+    assert gate_module.PACKAGE_GROUNDING_EVIDENCE_REQUIREMENT in text
     assert "### Natural-language context request" not in text
     assert not any(path in text for path in s5["context_seed"]["requested_source_paths"])
     assert "Here is the additional exact source context available" not in text
@@ -402,6 +414,15 @@ def test_s5_initial_package_identity_continues_into_request_and_resolution(tmp_p
     canonical = _build_s5_initial_context(view, s5)
     fixture = _seed_s5_resolution(view, s5, temp_parent=tmp_path)
 
+    assert canonical["affordance"].gap_ids == (canonical["gap"].unknown_id,)
+    assert canonical["affordance"].evidence_requirements == (
+        gate_module.PACKAGE_GROUNDING_EVIDENCE_REQUIREMENT,
+    )
+    guidance = canonical["package"].request_guidance_projection()
+    guided_gap = next(item for item in guidance["unresolved_gaps"] if item["dimension"] == "package-grounding")
+    assert guided_gap["affordances"][0]["evidence_requirements"] == [
+        gate_module.PACKAGE_GROUNDING_EVIDENCE_REQUIREMENT,
+    ]
     assert manifest["m2_context"]["understanding_id"] == canonical["understanding"].understanding_id
     assert manifest["m2_context"]["package_id"] == canonical["package"].package_id
     assert fixture["initial_understanding_id"] == canonical["understanding"].understanding_id

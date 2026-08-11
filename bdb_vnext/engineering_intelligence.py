@@ -51,6 +51,7 @@ M2C_POLICY_VERSION = "m2c-context-policy-v1"
 AFFORDANCE_CONTRACT_VERSION = "m2c-affordance-v2"
 CONTEXT_PACKAGE_CONTRACT_VERSION = "m2c-context-package-v2"
 CONTEXT_REQUEST_CONTRACT_VERSION = "m2c-context-request-v2"
+REQUEST_GUIDANCE_PROJECTION_VERSION = "m2c-request-guidance-v1"
 SEMANTIC_RECORD_CONTENT_TYPE = "application/vnd.bdb-vnext.semantic+json"
 HORIZONS = frozenset({"LOCAL", "COMPONENT", "REPOSITORY"})
 CLAIM_KINDS = frozenset({"FACT", "INFERENCE", "ASSUMPTION", "HYPOTHESIS"})
@@ -1706,13 +1707,20 @@ class ContextPackage:
         } | {
             item.omission_id: item for item in self.omissions
         }
+        visible_gap_dimensions = {item.dimension for item in gap_by_id.values()}
         for affordance in self.affordances:
-            if affordance.gap_ids:
-                if not set(affordance.gap_ids).issubset(gap_by_id):
-                    _fail("affordance_gap_not_visible", "affordance must target only visible package gaps")
-                dimensions = {gap_by_id[gap_id].dimension for gap_id in affordance.gap_ids}
-                if dimensions != {affordance.dimension}:
-                    _fail("affordance_dimension_mismatch", "affordance dimension must match every selected gap")
+            if not affordance.gap_ids:
+                if affordance.dimension in visible_gap_dimensions:
+                    _fail(
+                        "affordance_binding_required",
+                        "an affordance matching a visible gap dimension must bind exact gap IDs and evidence requirements",
+                    )
+                continue
+            if not set(affordance.gap_ids).issubset(gap_by_id):
+                _fail("affordance_gap_not_visible", "affordance must target only visible package gaps")
+            dimensions = {gap_by_id[gap_id].dimension for gap_id in affordance.gap_ids}
+            if dimensions != {affordance.dimension}:
+                _fail("affordance_dimension_mismatch", "affordance dimension must match every selected gap")
         for unknown in self.unknowns:
             if not _same_repo(unknown.repo_view, self.repo_view):
                 _fail("context_package_basis_mismatch", "package unknowns must bind the package RepoView")
@@ -1812,6 +1820,55 @@ class ContextPackage:
     @property
     def gap_ids(self) -> tuple[str, ...]:
         return tuple(item.unknown_id for item in self.unknowns) + tuple(item.omission_id for item in self.omissions)
+
+    def request_guidance_projection(self) -> dict[str, Any]:
+        """Return deterministic request guidance without claiming authority.
+
+        Exact RepoView identity and actually covered dimensions remain visible,
+        while each unresolved gap carries only its applicable bound affordances
+        and semantic evidence requirements. This projection neither resolves a
+        gap nor turns an affordance or request into source authority.
+        """
+
+        affordances_by_gap: dict[str, list[dict[str, Any]]] = {}
+        for affordance in self.affordances:
+            for gap_id in affordance.gap_ids:
+                affordances_by_gap.setdefault(gap_id, []).append(
+                    {
+                        "affordance_id": affordance.affordance_id,
+                        "horizon": affordance.horizon,
+                        "evidence_type": affordance.evidence_type,
+                        "evidence_requirements": list(affordance.evidence_requirements),
+                        "reason": affordance.reason,
+                    }
+                )
+        unresolved_gaps = [
+            {
+                "gap_id": item.unknown_id,
+                "gap_kind": "UNKNOWN",
+                "dimension": item.dimension,
+                "reason": item.reason,
+                "affordances": affordances_by_gap.get(item.unknown_id, []),
+            }
+            for item in self.unknowns
+        ] + [
+            {
+                "gap_id": item.omission_id,
+                "gap_kind": "OMISSION",
+                "dimension": item.dimension,
+                "reason": item.reason,
+                "affordances": affordances_by_gap.get(item.omission_id, []),
+            }
+            for item in self.omissions
+        ]
+        return {
+            "projection_version": REQUEST_GUIDANCE_PROJECTION_VERSION,
+            "source_package_id": self.package_id,
+            "repo_view_basis": self.repo_view.as_dict(),
+            "repo_view_binding_status": "EXACT_COMMITTED_IDENTITY_BOUND",
+            "covered_dimensions": list(self.covered_dimensions),
+            "unresolved_gaps": unresolved_gaps,
+        }
 
     def validate_source_grounding(
         self,
@@ -3264,6 +3321,7 @@ __all__ = [
     "AFFORDANCE_CONTRACT_VERSION",
     "CONTEXT_PACKAGE_CONTRACT_VERSION",
     "CONTEXT_REQUEST_CONTRACT_VERSION",
+    "REQUEST_GUIDANCE_PROJECTION_VERSION",
     "DecisionOption",
     "ENGINEERING_DECISION_SCHEMA",
     "EngineeringDecision",

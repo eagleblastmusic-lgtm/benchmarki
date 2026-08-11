@@ -42,12 +42,32 @@ checked fail-closed. Repository paths may be supplied by a provider/catalog
 when needed, but the model-facing contract does not require transport or
 fragment bookkeeping.
 
+An unbound compatibility affordance may exist only when its dimension does
+not match a visible package gap. If the dimension is already present as an
+unknown or omission, guidance must bind the exact gap IDs and declare its
+semantic evidence requirements; otherwise package construction fails closed.
+This prevents generic repository-source guidance from obscuring the smallest
+unresolved evidence boundary.
+
+`ContextPackage.request_guidance_projection()` is the deterministic
+model-facing view of this distinction. It keeps the exact committed RepoView
+identity and genuinely covered dimensions visible, then lists every unresolved
+gap with only its applicable bound affordances and evidence requirements. The
+projection is guidance only: RepoView and accepted M2b source evidence remain
+authority, and the projected affordance does not close a gap.
+
 The `contract_version` fields on affordances, packages and requests make this
 precision contract explicit. Records without the current contract fields are
 not reinterpreted as the new semantics. An affordance or request never closes
 a gap: a visible gap remains visible until a `ContextResolution` is backed by
 accepted M2b source evidence and the exact RepoView grounding checks succeed.
 Unrelated gaps remain in the resulting package.
+
+This repair does not change the serialized v2 field set or schema. It tightens
+construction of an ambiguous v2 combination that could not provide the
+documented precision guarantee: an unbound affordance sharing a visible gap
+dimension is rejected rather than silently reinterpreted. Unbound compatibility
+guidance for dimensions without a matching visible gap remains supported.
 
 ## Authority and epistemics
 

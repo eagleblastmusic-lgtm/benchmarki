@@ -60,6 +60,8 @@ ASSET_MANIFEST_SCHEMA = "bdb-vnext-m2d-payload-manifest-v1"
 ASSET_CONTRACT_VERSION = "m2d-browser-assets-v1"
 RUN_SCHEMA = "bdb-vnext-m2d-run-v2"
 FOLLOWUP_OPERATOR_MESSAGE = "Here is the additional exact source context available for the requested package-grounding question."
+PACKAGE_GROUNDING_EVIDENCE_REQUIREMENT = "live-accepted-m2b-binding"
+DECISION_APPLICABILITY_EVIDENCE_REQUIREMENT = "current-decision-applicability-basis"
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _ALLOWED_JUDGMENTS = frozenset({"BETTER", "EQUIVALENT", "WORSE", "INCONCLUSIVE", "N/A"})
 _CORE_IMPROVEMENT_VECTOR_IDS = frozenset({
@@ -333,11 +335,14 @@ def _seed_s5_resolution(view: CommittedRepoView, scenario: Mapping[str, Any], *,
             unrelated = initial_context["unrelated"]
             initial = initial_context["understanding"]
             prior = initial_context["package"]
+            affordance = initial_context["affordance"]
             request = ContextRequest.create(
                 prior,
                 gap_ids=[gap.unknown_id],
+                selected_affordance_ids=[affordance.affordance_id],
                 horizon="COMPONENT",
                 requested_dimensions=[seed["gap_dimension"]],
+                requested_evidence_requirements=[PACKAGE_GROUNDING_EVIDENCE_REQUIREMENT],
                 requested_evidence=seed["requested_source_paths"],
                 question="Which exact accepted M2b source edges establish package grounding?",
                 reason="repair only the visible package-grounding gap",
@@ -503,15 +508,21 @@ def _build_s5_initial_context(
         must_see_categories=[],
         unknowns=[gap, unrelated],
     )
+    affordance = ContextAffordance.create(
+        gap_ids=[gap.unknown_id],
+        dimension=seed["gap_dimension"],
+        horizon="COMPONENT",
+        evidence_type="repository-source",
+        evidence_requirements=[PACKAGE_GROUNDING_EVIDENCE_REQUIREMENT],
+        reason=(
+            "Request the live accepted M2b binding contract needed for this unresolved "
+            "package-grounding gap; the exact RepoView identity remains the package basis."
+        ),
+    )
     package = ContextPackage.from_understanding(
         understanding,
         horizon="COMPONENT",
-        affordances=[ContextAffordance.create(
-            dimension=seed["gap_dimension"],
-            horizon="COMPONENT",
-            evidence_type="repository-source",
-            reason="Request exact committed source context when package grounding is incomplete.",
-        )],
+        affordances=[affordance],
     )
     return {
         "intent": basis,
@@ -519,6 +530,7 @@ def _build_s5_initial_context(
         "unrelated": unrelated,
         "understanding": understanding,
         "package": package,
+        "affordance": affordance,
     }
 
 
@@ -606,20 +618,25 @@ def _m2_context_records(
                 horizon="COMPONENT",
                 included_fragment_ids=[fragment.fragment_id for fragment in fragments],
                 affordances=[ContextAffordance.create(
+                    gap_ids=[unrelated.unknown_id],
                     dimension=seed["unrelated_gap_dimension"],
                     horizon="COMPONENT",
                     evidence_type="repository-source",
+                    evidence_requirements=[DECISION_APPLICABILITY_EVIDENCE_REQUIREMENT],
                     reason="Decision applicability remains an explicit visible gap.",
                 )],
             )
             # The request/resolution edge must start from the exact initial
             # package rendered by the model-facing initial treatment.
             prior_package = initial_context["package"]
+            affordance = initial_context["affordance"]
             request = ContextRequest.create(
                 prior_package,
                 gap_ids=[gap.unknown_id],
+                selected_affordance_ids=[affordance.affordance_id],
                 horizon="COMPONENT",
                 requested_dimensions=[seed["gap_dimension"]],
+                requested_evidence_requirements=[PACKAGE_GROUNDING_EVIDENCE_REQUIREMENT],
                 requested_evidence=seed["requested_source_paths"],
                 question="Which exact accepted M2b source edges establish package grounding?",
                 reason="repair only the visible package-grounding gap",
@@ -750,6 +767,10 @@ def _m2_payload(scenario: Mapping[str, Any], view: CommittedRepoView, paths: Seq
     context = _m2_context_records(view, scenario, paths, runtime_root=runtime_root, initial=phase == "INITIAL")
     understanding: RepositoryUnderstandingView = context["understanding"]
     package: ContextPackage = context["package"]
+    request_guidance = package.request_guidance_projection()
+    gap_bound_guidance = [
+        gap for gap in request_guidance["unresolved_gaps"] if gap["affordances"]
+    ]
     lines = [
         "# BDB vNext M2d benchmark context",
         "",
@@ -793,6 +814,19 @@ def _m2_payload(scenario: Mapping[str, Any], view: CommittedRepoView, paths: Seq
     lines.extend(["", "### Context affordances"])
     for affordance in package.affordances:
         lines.append(f"- {affordance.dimension} ({affordance.horizon}): {affordance.reason}")
+    if gap_bound_guidance:
+        lines.extend([
+            "",
+            "### Gap-bound request guidance",
+            f"projection_version: {request_guidance['projection_version']}",
+            "- ALREADY BOUND SOURCE BASIS: the exact committed RepoView identity above remains the package basis; guidance neither replaces source authority nor closes a gap.",
+        ])
+        for gap in gap_bound_guidance:
+            lines.append(f"- UNRESOLVED {gap['dimension']}: {gap['reason']}")
+            for affordance in gap["affordances"]:
+                requirements = ", ".join(affordance["evidence_requirements"])
+                lines.append(f"  - required semantic evidence: {requirements}")
+                lines.append(f"  - request scope: {affordance['evidence_type']} / {affordance['horizon']}")
     if context["context_request"] is not None:
         request: ContextRequest = context["context_request"]
         lines.extend(["", "### Natural-language context request"])

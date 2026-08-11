@@ -764,6 +764,124 @@ def test_context_affordance_request_precision_is_generic_and_fail_closed(tmp_pat
     bindings.close()
 
 
+def test_request_guidance_projection_separates_covered_and_unresolved_evidence(tmp_path: Path) -> None:
+    (
+        _repo,
+        _resource,
+        view,
+        _intent,
+        _content,
+        bindings,
+        ownership_fragment,
+        _ownership,
+        understanding,
+        original_package,
+        recovery_gap,
+        dependency_gap,
+    ) = _seeded(tmp_path)
+    recovery_affordance = ContextAffordance.create(
+        gap_ids=[recovery_gap.unknown_id],
+        dimension="recovery",
+        horizon="COMPONENT",
+        evidence_type="repository-source",
+        evidence_requirements=["live-accepted-binding"],
+        reason="only the live recovery binding remains unresolved",
+    )
+    dependency_affordance = ContextAffordance.create(
+        gap_ids=[dependency_gap.unknown_id],
+        dimension="dependencies",
+        horizon="COMPONENT",
+        evidence_type="repository-source",
+        evidence_requirements=["dependency-contract"],
+        reason="the independent dependency contract also remains unresolved",
+    )
+    package = ContextPackage.from_understanding(
+        understanding,
+        horizon="COMPONENT",
+        included_fragment_ids=[ownership_fragment.fragment_id],
+        affordances=[recovery_affordance, dependency_affordance],
+    )
+
+    projection = package.request_guidance_projection()
+    assert projection["projection_version"] == "m2c-request-guidance-v1"
+    assert projection["source_package_id"] == package.package_id
+    assert projection["repo_view_binding_status"] == "EXACT_COMMITTED_IDENTITY_BOUND"
+    assert projection["repo_view_basis"] == package.repo_view.as_dict()
+    assert projection["covered_dimensions"] == ["ownership"]
+    gaps = {item["dimension"]: item for item in projection["unresolved_gaps"]}
+    assert set(gaps) == {"recovery", "dependencies"}
+    assert gaps["recovery"]["affordances"][0]["evidence_requirements"] == ["live-accepted-binding"]
+    assert gaps["dependencies"]["affordances"][0]["evidence_requirements"] == ["dependency-contract"]
+    assert package.coverage_status == original_package.coverage_status == "BLOCKED"
+    assert set(package.gap_ids) == {recovery_gap.unknown_id, dependency_gap.unknown_id}
+
+    multi_gap_request = ContextRequest.create(
+        package,
+        gap_ids=[recovery_gap.unknown_id, dependency_gap.unknown_id],
+        selected_affordance_ids=[recovery_affordance.affordance_id, dependency_affordance.affordance_id],
+        horizon="COMPONENT",
+        requested_dimensions=["recovery", "dependencies"],
+        requested_evidence_requirements=["live-accepted-binding", "dependency-contract"],
+        requested_evidence=["live recovery binding", "dependency contract"],
+        question="Which exact evidence satisfies the two still-visible gaps?",
+        reason="request both genuinely unresolved dimensions without reopening ownership",
+    )
+    multi_gap_request.validate_source_package(package)
+
+    parsed = ContextPackage.from_mapping(package.as_dict())
+    assert parsed.request_guidance_projection() == projection
+    assert parsed.to_json_bytes() == package.to_json_bytes()
+    bindings.close()
+
+
+def test_unbound_affordance_cannot_shadow_a_visible_gap_dimension(tmp_path: Path) -> None:
+    (
+        _repo,
+        _resource,
+        _view,
+        _intent,
+        _content,
+        bindings,
+        ownership_fragment,
+        _ownership,
+        understanding,
+        _package,
+        _recovery_gap,
+        _dependency_gap,
+    ) = _seeded(tmp_path)
+    ambiguous = ContextAffordance.create(
+        dimension="recovery",
+        horizon="COMPONENT",
+        evidence_type="repository-source",
+        reason="generic source selection would hide the exact recovery evidence gap",
+    )
+    with pytest.raises(EngineeringIntelligenceError) as failure:
+        ContextPackage.from_understanding(
+            understanding,
+            horizon="COMPONENT",
+            included_fragment_ids=[ownership_fragment.fragment_id],
+            affordances=[ambiguous],
+        )
+    assert failure.value.code == "affordance_binding_required"
+
+    compatibility_only = ContextAffordance.create(
+        dimension="future-source-context",
+        horizon="COMPONENT",
+        evidence_type="repository-source",
+        reason="unbound compatibility guidance has no matching visible gap",
+    )
+    compatible_package = ContextPackage.from_understanding(
+        understanding,
+        horizon="COMPONENT",
+        included_fragment_ids=[ownership_fragment.fragment_id],
+        affordances=[compatibility_only],
+    )
+    assert compatible_package.affordances == (compatibility_only,)
+    assert compatibility_only.gap_ids == ()
+    assert compatibility_only.evidence_requirements == ()
+    bindings.close()
+
+
 def test_decision_claim_membership_and_exact_basis_sets(tmp_path: Path) -> None:
     (repo, resource, view, intent, _content, bindings, ownership_fragment, ownership, understanding, package, _gap, _other) = _seeded(tmp_path)
     option_zero = DecisionOption("OPTION_ZERO", "retain the read-only path", ("no writer",), ("gap remains",))
