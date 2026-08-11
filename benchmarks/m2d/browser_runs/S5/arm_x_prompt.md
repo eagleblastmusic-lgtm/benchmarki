@@ -8,7 +8,7 @@ implementation.
 Frozen RepoView: repository `bdb-vnext-benchmark-subject`, commit
 `4b724eda100345969eb236f877dd46f0bb91c0cb`, tree
 `90ddd52fd997cb67a13767145fd387f7e0ad7141`, view
-`sha256:625e76129333136da65e642c91b52693a9e2f4bc8242ff89c3143e2b9e86518`.
+`sha256:625e76129333136da65e642c91b52693a9e2f4bc8242ff89c3143e2b9e86518d`.
 Initial exact source subjects:
 
 - `bdb_vnext/engineering_intelligence.py`

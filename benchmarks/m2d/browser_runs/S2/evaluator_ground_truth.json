@@ -1,7 +1,7 @@
 {
   "schema": "bdb-vnext-m2d-ground-truth-v1",
   "scenario_id": "S2",
-  "scenario_digest": "sha256:6a957fc852cce8eb7f2a832ef83d0314aa07d95cc4f4f1ac098956c8daf00950",
+  "scenario_digest": "sha256:cf7dc3879944e55f3fd8c3e81f85c37d0f42e5791921280e06f0b399915517b8",
   "evidence_universe_digest": "sha256:083c0da0b02333ce6475b4a672b2bda5c13ce658f0f2e1e766c76f2d13208ace",
   "must_see_item_ids": ["S2-MS-01", "S2-MS-02", "S2-MS-03", "S2-MS-04"],
   "hard_failure_vectors": ["stale_or_mixed_repo_view", "source_authority_violation", "material_safety_or_correctness_regression", "protocol_bookkeeping_required"],

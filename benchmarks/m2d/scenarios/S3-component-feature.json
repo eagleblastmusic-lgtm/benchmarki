@@ -36,8 +36,8 @@
   "context_seed": null,
   "browser_assets": {
     "version": "m2d-browser-assets-v1",
-    "arm_x_prompt_sha256": "sha256:3687c13237f7a3b73be8b1e335b87d0ba6cf0a0178db3b534bc544217c5d8e28",
-    "arm_y_prompt_sha256": "sha256:f9cffb175d0d3f813a149dd29067941d5a43194d9cbd360ad54d8d11859fc099",
+    "arm_x_prompt_sha256": "sha256:164f893afd3e68d3a092ffdf81c30abefb9bbdbde9b3d13a735cdf0c79941453",
+    "arm_y_prompt_sha256": "sha256:99c2fe1d0660cf204bcf106a1b6866b044c66c2aa4cb60127e3d3f06865318d8",
     "arm_x_initial_payload_manifest_digest": "sha256:779ac0261edd6ca2156f7c583651a0ec6327d0447ac40a958411a8d24159b072",
     "arm_x_initial_payload_manifest_sha256": "sha256:b947c9dddc73ee53f98e2583a4a316ed55a8c51f540ac651ff58a8a0300df19e",
     "arm_x_initial_payload_digest": "sha256:8834048aed92796808bfa095003f6914705a11a49d5bb837c2578487fa6429ce",
@@ -51,5 +51,5 @@
   },
   "rubric_version": "m2d-rubric-v1",
   "gate_policy_version": "m2d-gate-policy-v1",
-  "scenario_digest": "sha256:450c5ce3366ce14bb60d21ea31c9aac8b40bda4c2fb804fc61aebe5433746c85"
+  "scenario_digest": "sha256:313546052974e512ae8d901054436f3184114a6fcd779042ae2973eb22d1add1"
 }

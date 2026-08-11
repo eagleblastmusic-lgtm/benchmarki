@@ -37,8 +37,8 @@
   "context_seed": { "gap_id": "S5-GAP-PACKAGE-GROUNDING", "gap_dimension": "package-grounding", "gap_reason": "Serialized Understanding and ContextPackage records are present, but exact package source grounding cannot be established from parsing alone.", "requested_source_paths": ["bdb_vnext/content_store.py", "schemas/bdb-vnext-context-package-v1.schema.json", "tests/test_vnext_engineering_intelligence.py"], "unrelated_gap_dimension": "decision-applicability", "unrelated_gap_reason": "Current decision applicability basis is not part of the supplied diagnostic context." },
   "browser_assets": {
     "version": "m2d-browser-assets-v1",
-    "arm_x_prompt_sha256": "sha256:2ff52e87895bb3772dfc994040b95fef1dc94995d3b721321cbb1152c25a9a00",
-    "arm_y_prompt_sha256": "sha256:c7493cbaa5f46bb8d35d51f620f1389d20a23b3dd0c5bc86369b5c6e92e8d388",
+    "arm_x_prompt_sha256": "sha256:7cf372a879e6c243245eb7d9da7e4b9667649d00864956e82c1b7a5bf27c3321",
+    "arm_y_prompt_sha256": "sha256:2d52aaf18486ded087ac96419d000eb496e9a01ba67825dfb99b6cdacc46504b",
     "arm_x_initial_payload_manifest_digest": "sha256:597f64ac4d90895c4fda208feba81988ad7aa4d00aeb7eccd1837ac916559574",
     "arm_x_initial_payload_manifest_sha256": "sha256:95df7e88246ff9994e40b99d7695b3a01b2735aa952bca102f407f7f51cee118",
     "arm_x_initial_payload_digest": "sha256:344584a1e65fb978a1327708ac18a0890c790219a23ce068127a4a05659b41c6",
@@ -52,5 +52,5 @@
   },
   "rubric_version": "m2d-rubric-v1",
   "gate_policy_version": "m2d-gate-policy-v1",
-  "scenario_digest": "sha256:1ca9f7913ea166ff707e4c824d270871b5dde5be30a21959e72fb7be28382991"
+  "scenario_digest": "sha256:2ea43ab94053a16b3495b88e59c21dfb99ea4f0c6a20c2c019d20d94415f3cca"
 }

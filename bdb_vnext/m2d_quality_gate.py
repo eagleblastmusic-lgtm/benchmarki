@@ -71,6 +71,7 @@ _CORE_IMPROVEMENT_VECTOR_IDS = frozenset({
     "rework_required",
 })
 _CONTEXT_REQUEST_OUTCOMES = frozenset({"NOT_APPLICABLE", "NOT_REQUESTED", "RESOLVED", "DENIED", "UNAVAILABLE", "INCONCLUSIVE"})
+_EXACT_SHA256_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])sha256:[0-9a-f]{64}(?![A-Za-z0-9])")
 
 
 class M2dValidationError(ValueError):
@@ -1374,8 +1375,10 @@ def _validate_prompt_pair(scenario: Mapping[str, Any], run_dir: Path) -> None:
     x_text = x.read_text(encoding="utf-8")
     y_text = y.read_text(encoding="utf-8")
     forbidden = ("evaluator_ground_truth", "answer_key", "preferred option", "BASELINE_FLAT_CONTEXT_V1", "M2_VNEXT_CONTEXT_PACKAGE_V1")
+    expected_view_id = scenario["repo_view"]["view_id"]
     for text in (x_text, y_text):
         _require(scenario["repo_view"]["commit_oid"] in text, "prompt_basis_missing", scenario["scenario_id"])
+        _require(expected_view_id in _EXACT_SHA256_TOKEN_RE.findall(text), "prompt_basis_mismatch", scenario["scenario_id"])
         for item in scenario["arm_construction"]["initial_visible_paths"]:
             _require(item in text, "prompt_source_missing", item)
         _require(not any(term in text for term in forbidden), "prompt_leaks_arm_or_answer_key", scenario["scenario_id"])

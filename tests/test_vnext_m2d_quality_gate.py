@@ -159,6 +159,31 @@ def test_one_byte_prompt_drift_is_rejected(tmp_path: Path) -> None:
         raise AssertionError("tampered prompt unexpectedly passed")
 
 
+def test_all_frozen_prompts_use_exact_full_repo_view_token() -> None:
+    for scenario in _scenarios():
+        view_id = scenario["repo_view"]["view_id"]
+        run_dir = ROOT / "benchmarks" / "m2d" / "browser_runs" / scenario["scenario_id"]
+        for arm_id in ("x", "y"):
+            prompt = (run_dir / f"arm_{arm_id}_prompt.md").read_text(encoding="utf-8")
+            assert view_id in gate_module._EXACT_SHA256_TOKEN_RE.findall(prompt)
+
+
+def test_truncated_repo_view_token_is_rejected_fail_closed(tmp_path: Path) -> None:
+    scenario = _scenarios()[0]
+    source = ROOT / "benchmarks" / "m2d" / "browser_runs" / scenario["scenario_id"]
+    run_dir = tmp_path / scenario["scenario_id"]
+    shutil.copytree(source, run_dir)
+    prompt = run_dir / "arm_x_prompt.md"
+    original = prompt.read_text(encoding="utf-8")
+    canonical = scenario["repo_view"]["view_id"]
+    assert original.count(canonical) == 1
+    prompt.write_text(original.replace(canonical, canonical[:-1], 1), encoding="utf-8")
+    _expect_evaluation_error(
+        lambda: _validate_prompt_pair(scenario, run_dir),
+        "prompt_basis_mismatch",
+    )
+
+
 def test_one_byte_materialized_payload_drift_is_rejected(tmp_path: Path) -> None:
     scenario = _scenarios()[0]
     initial_paths = list(scenario["arm_construction"]["initial_visible_paths"])

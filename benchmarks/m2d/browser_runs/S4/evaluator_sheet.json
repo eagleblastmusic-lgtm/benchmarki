@@ -1,7 +1,7 @@
 {
   "schema": "bdb-vnext-m2d-evaluator-sheet-v1",
   "scenario_id": "S4",
-  "scenario_digest": "sha256:e2f993ab23df9d52f55143d30dcfc70e2fdd9fa7df37a307186ef464a1043d68",
+  "scenario_digest": "sha256:8f4b0f11b0c2fff85520c76c850c52810df62b0e5bc5ba1feb5d44a141545809",
   "arm_x_run_digest": "",
   "arm_y_run_digest": "",
   "vector_judgments": {},
