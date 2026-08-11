@@ -38,6 +38,7 @@ _KNOWN_PROVIDER_IDS = (
     _composition.COMPOSITION_PROVIDER_ID,
     _composition.CONTROL_PROVIDER_ID,
     _composition.ADMISSION_PROVIDER_ID,
+    _composition.WORK_KERNEL_PROVIDER_ID,
     _composition.NATIVE_PROVIDER_ID,
     _composition.BROWSER_PROVIDER_ID,
     _composition.CONTROL_CENTER_PROVIDER_ID,

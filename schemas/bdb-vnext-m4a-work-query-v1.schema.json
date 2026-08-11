@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-m4a-work-query-v1",
+  "title": "BDB vNext M4a canonical WorkItem query v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "authority",
+    "protocol_generation",
+    "work",
+    "active_run",
+    "last_run",
+    "active_wait",
+    "lease",
+    "resource_claim",
+    "recent_facts",
+    "query_digest"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-vnext-m4a-work-query-v1" },
+    "authority": { "const": "devmaster.bdb.vnext.work-kernel" },
+    "protocol_generation": { "const": "bdb-vnext-protocol-v1" },
+    "work": { "$ref": "#/$defs/work" },
+    "active_run": { "anyOf": [{ "$ref": "#/$defs/run" }, { "type": "null" }] },
+    "last_run": { "anyOf": [{ "$ref": "#/$defs/run" }, { "type": "null" }] },
+    "active_wait": { "anyOf": [{ "$ref": "#/$defs/wait" }, { "type": "null" }] },
+    "lease": { "anyOf": [{ "$ref": "#/$defs/lease" }, { "type": "null" }] },
+    "resource_claim": { "anyOf": [{ "$ref": "#/$defs/claim" }, { "type": "null" }] },
+    "recent_facts": { "type": "array", "items": { "$ref": "#/$defs/fact" } },
+    "query_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  },
+  "$defs": {
+    "work": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "work_id", "task_id", "kind", "disposition", "state_version", "created_order", "updated_order", "created_at", "updated_at"],
+      "properties": {
+        "schema": { "const": "bdb-vnext-m4a-work-kernel-v1" },
+        "work_id": { "type": "string" },
+        "task_id": { "type": "string" },
+        "kind": { "type": "string" },
+        "disposition": { "enum": ["READY", "RUNNING", "WAITING", "TERMINAL", "CANCELLED"] },
+        "state_version": { "type": "integer", "minimum": 0 },
+        "created_order": { "type": "integer", "minimum": 1 },
+        "updated_order": { "type": "integer", "minimum": 1 },
+        "created_at": { "type": "number" },
+        "updated_at": { "type": "number" }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "run_id", "work_id", "status", "outcome", "effect_certainty", "lease_id", "fence", "started_order", "ended_order"],
+      "properties": {
+        "schema": { "const": "bdb-vnext-m4a-work-kernel-v1" },
+        "run_id": { "type": "string" },
+        "work_id": { "type": "string" },
+        "status": { "enum": ["ACTIVE", "FINISHED"] },
+        "outcome": { "anyOf": [{ "enum": ["SUCCEEDED", "FAILED", "ABORTED", "UNKNOWN"] }, { "type": "null" }] },
+        "effect_certainty": { "enum": ["NOT_ASSESSED", "CERTAIN", "POSSIBLE", "UNKNOWN"] },
+        "lease_id": { "type": "string" },
+        "fence": { "type": "integer", "minimum": 1 },
+        "started_order": { "type": "integer", "minimum": 1 },
+        "ended_order": { "anyOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] }
+      }
+    },
+    "wait": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "wait_id", "work_id", "reason", "status", "created_order", "resolved_order", "resolution"],
+      "properties": {
+        "schema": { "const": "bdb-vnext-m4a-work-kernel-v1" },
+        "wait_id": { "type": "string" },
+        "work_id": { "type": "string" },
+        "reason": { "type": "string" },
+        "status": { "enum": ["OPEN", "RESOLVED"] },
+        "created_order": { "type": "integer", "minimum": 1 },
+        "resolved_order": { "anyOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] },
+        "resolution": { "anyOf": [{ "type": "string" }, { "type": "null" }] }
+      }
+    },
+    "lease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "lease_id", "work_id", "owner_id", "fence", "state", "acquired_at", "expires_at"],
+      "properties": {
+        "schema": { "const": "bdb-vnext-m4a-work-kernel-v1" },
+        "lease_id": { "type": "string" },
+        "work_id": { "type": "string" },
+        "owner_id": { "type": "string" },
+        "fence": { "type": "integer", "minimum": 1 },
+        "state": { "enum": ["ACTIVE", "RELEASED", "EXPIRED"] },
+        "acquired_at": { "type": "number" },
+        "expires_at": { "type": "number" }
+      }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "resource_key", "work_id", "lease_id", "fence", "state", "claimed_order"],
+      "properties": {
+        "schema": { "const": "bdb-vnext-m4a-work-kernel-v1" },
+        "resource_key": { "type": "string" },
+        "work_id": { "type": "string" },
+        "lease_id": { "type": "string" },
+        "fence": { "type": "integer", "minimum": 1 },
+        "state": { "enum": ["HELD", "RELEASED"] },
+        "claimed_order": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "fact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "fact_id", "work_id", "state_version", "kind", "from_disposition", "to_disposition", "causal_digest", "payload", "created_order"],
+      "properties": {
+        "schema": { "const": "bdb-vnext-m4a-work-kernel-v1" },
+        "fact_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "work_id": { "type": "string" },
+        "state_version": { "type": "integer", "minimum": 0 },
+        "kind": { "type": "string" },
+        "from_disposition": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+        "to_disposition": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+        "causal_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "payload": { "type": "object" },
+        "created_order": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

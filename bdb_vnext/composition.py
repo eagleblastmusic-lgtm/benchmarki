@@ -38,6 +38,7 @@ CONTROL_CENTER_COMPONENT_ID = "devmaster.bdb.vnext.control-center"
 COMPOSITION_PROVIDER_ID = "devmaster.bdb.vnext.composition-manifest"
 CONTROL_PROVIDER_ID = "devmaster.bdb.vnext.control-store"
 ADMISSION_PROVIDER_ID = "devmaster.bdb.vnext.admission-authority"
+WORK_KERNEL_PROVIDER_ID = "devmaster.bdb.vnext.work-kernel"
 NATIVE_PROVIDER_ID = "devmaster.bdb.vnext.native-transport"
 BROWSER_PROVIDER_ID = "devmaster.bdb.vnext.browser-transport"
 CONTROL_CENTER_PROVIDER_ID = "devmaster.bdb.vnext.control-center-query"
@@ -512,6 +513,12 @@ def _provider_registry() -> list[dict[str, Any]]:
             "canonical_admission_authority",
             "reserved_disabled",
         ),
+        _provider(
+            WORK_KERNEL_PROVIDER_ID,
+            RUNTIME_ID,
+            "canonical_work_kernel",
+            "reserved_disabled",
+        ),
         _provider(NATIVE_PROVIDER_ID, NATIVE_COMPONENT_ID, "native_transport", "active_read_only"),
         _provider(BROWSER_PROVIDER_ID, BROWSER_COMPONENT_ID, "browser_transport", "active_read_only"),
         _provider(
@@ -529,6 +536,7 @@ def _composition_edges() -> list[dict[str, str]]:
         {"from": BROWSER_PROVIDER_ID, "to": NATIVE_PROVIDER_ID},
         {"from": NATIVE_PROVIDER_ID, "to": ADMISSION_PROVIDER_ID},
         {"from": ADMISSION_PROVIDER_ID, "to": CONTROL_PROVIDER_ID},
+        {"from": WORK_KERNEL_PROVIDER_ID, "to": CONTROL_PROVIDER_ID},
         {"from": CONTROL_CENTER_PROVIDER_ID, "to": CONTROL_PROVIDER_ID},
     ]
 

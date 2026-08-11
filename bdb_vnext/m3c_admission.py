@@ -29,6 +29,7 @@ from bdb_vnext.m3a_submission import (
     M3aError,
     ShadowSubmissionRequest,
     ShadowSubmissionStore,
+    ShadowTask,
 )
 from bdb_vnext.m3b_browser_admission import (
     AdmissionEnvelope,
@@ -311,6 +312,12 @@ class CanonicalVNextAdmissionAuthority:
     def control_database_path(self) -> Path:
         return self._store.database_path
 
+    @property
+    def runtime_root(self) -> Path:
+        """The exact isolated root shared by vNext shadow substrates."""
+
+        return self._store.root
+
     def _ensure_control_marker(self) -> None:
         expected = {
             "schema": M3C_CONTROL_SCHEMA,
@@ -410,6 +417,14 @@ class CanonicalVNextAdmissionAuthority:
                 details={"stored_digest": receipt.request_digest, "received_digest": request_digest},
             )
         return receipt
+
+    def task(self, task_id: str) -> ShadowTask | None:
+        """Read canonical M3 Task identity without creating another authority."""
+
+        try:
+            return self._store.task(task_id)
+        except M3aError as exc:
+            _fail(exc.code, str(exc), details=exc.details)
 
     def query(self, submission_key: str, request_digest: str) -> CanonicalAdmissionQuery | None:
         receipt = self.lookup(submission_key, request_digest)

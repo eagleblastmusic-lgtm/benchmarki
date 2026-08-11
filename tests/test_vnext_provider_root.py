@@ -20,6 +20,7 @@ from bdb_vnext.composition import (
     CONTROL_PROVIDER_ID,
     NATIVE_PROVIDER_ID,
     REPO_VIEW_PROVIDER_ID,
+    WORK_KERNEL_PROVIDER_ID,
     build_vnext_composition_manifest,
 )
 from bdb_vnext.context_transport import (
@@ -49,6 +50,7 @@ RESERVED_IDS = {
     ADMISSION_PROVIDER_ID,
     CONTROL_PROVIDER_ID,
     CONTROL_CENTER_PROVIDER_ID,
+    WORK_KERNEL_PROVIDER_ID,
 }
 BOUND_TRANSPORT_IDS = {BROWSER_PROVIDER_ID, NATIVE_PROVIDER_ID}
 
