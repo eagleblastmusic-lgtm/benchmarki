@@ -325,21 +325,12 @@ def _seed_s5_resolution(view: CommittedRepoView, scenario: Mapping[str, Any], *,
         root = Path(raw_root)
         content_store = ImmutableContentStore(root)
         with DurableBindingStore(root, content_store=content_store) as bindings:
-            intent = IntentBasis(
-                "m2d:S5",
-                "v1",
-                semantic_digest({"scenario": "S5", "commit": FROZEN_COMMIT}),
-            )
-            gap = Unknown.create(view, subject="ContextPackage grounding", dimension=seed["gap_dimension"], reason=seed["gap_reason"])
-            unrelated = Unknown.create(view, subject="decision applicability", dimension=seed["unrelated_gap_dimension"], reason=seed["unrelated_gap_reason"])
-            initial = RepositoryUnderstandingView.create(
-                intent,
-                view,
-                requested_dimensions=[seed["gap_dimension"], seed["unrelated_gap_dimension"]],
-                must_see_categories=[seed["gap_dimension"]],
-                unknowns=[gap, unrelated],
-            )
-            prior = ContextPackage.from_understanding(initial, horizon="COMPONENT")
+            initial_context = _build_s5_initial_context(view, scenario)
+            intent = initial_context["intent"]
+            gap = initial_context["gap"]
+            unrelated = initial_context["unrelated"]
+            initial = initial_context["understanding"]
+            prior = initial_context["package"]
             request = ContextRequest.create(
                 prior,
                 gap_ids=[gap.unknown_id],
@@ -423,11 +414,16 @@ def _seed_s5_resolution(view: CommittedRepoView, scenario: Mapping[str, Any], *,
             _require(resolution.outcome == "RESOLVED", "s5_resolution_not_resolved", "S5 fixture did not resolve")
             return {
                 "initial_coverage_status": initial.coverage_status,
+                "initial_understanding_id": initial.understanding_id,
+                "initial_package_id": prior.package_id,
                 "initial_gap_id": gap.unknown_id,
                 "unrelated_gap_id": unrelated.unknown_id,
                 "request_id": request.request_id,
+                "request_source_package_id": request.source_package_id,
                 "resulting_coverage_status": resulting.coverage_status,
                 "resolution_id": resolution.resolution_id,
+                "resolution_prior_package_id": resolution.prior_package_id,
+                "resolution_resulting_package_id": resolution.resulting_package_id,
                 "resolved_gap_ids": list(resolution.resolved_gap_ids),
                 "unresolved_gap_ids": list(resolution.unresolved_gap_ids),
             }
@@ -468,6 +464,62 @@ def _new_m2_intent(scenario: Mapping[str, Any]) -> IntentBasis:
     )
 
 
+def _build_s5_initial_context(
+    view: CommittedRepoView,
+    scenario: Mapping[str, Any],
+    *,
+    intent: IntentBasis | None = None,
+) -> dict[str, Any]:
+    """Construct the one canonical, model-facing S5 initial package.
+
+    This helper intentionally stops at the immutable partial ContextPackage.
+    A ContextRequest is created only by the internal follow-up fixture after
+    this exact package has been rendered to the treatment manifest.
+    """
+
+    seed = scenario.get("context_seed")
+    _require(scenario["scenario_id"] == "S5" and seed is not None, "context_seed_missing", "S5 must carry a context seed")
+    basis = _new_m2_intent(scenario) if intent is None else intent
+    gap = Unknown.create(
+        view,
+        subject="ContextPackage grounding",
+        dimension=seed["gap_dimension"],
+        reason=seed["gap_reason"],
+    )
+    unrelated = Unknown.create(
+        view,
+        subject="decision applicability",
+        dimension=seed["unrelated_gap_dimension"],
+        reason=seed["unrelated_gap_reason"],
+    )
+    understanding = RepositoryUnderstandingView.create(
+        basis,
+        view,
+        # Keep the initial package genuinely partial and leak-free: visible
+        # unknowns are preserved, but no task-specific request is predeclared.
+        requested_dimensions=[],
+        must_see_categories=[],
+        unknowns=[gap, unrelated],
+    )
+    package = ContextPackage.from_understanding(
+        understanding,
+        horizon="COMPONENT",
+        affordances=[ContextAffordance.create(
+            dimension=seed["gap_dimension"],
+            horizon="COMPONENT",
+            evidence_type="repository-source",
+            reason="Request exact committed source context when package grounding is incomplete.",
+        )],
+    )
+    return {
+        "intent": basis,
+        "gap": gap,
+        "unrelated": unrelated,
+        "understanding": understanding,
+        "package": package,
+    }
+
+
 def _m2_context_records(
     view: CommittedRepoView,
     scenario: Mapping[str, Any],
@@ -502,44 +554,14 @@ def _m2_context_records(
 
         seed = scenario.get("context_seed")
         if scenario["scenario_id"] == "S5":
-            _require(seed is not None, "context_seed_missing", "S5 must carry a context seed")
-            gap = Unknown.create(
-                view,
-                subject="ContextPackage grounding",
-                dimension=seed["gap_dimension"],
-                reason=seed["gap_reason"],
-            )
-            unrelated = Unknown.create(
-                view,
-                subject="decision applicability",
-                dimension=seed["unrelated_gap_dimension"],
-                reason=seed["unrelated_gap_reason"],
-            )
+            initial_context = _build_s5_initial_context(view, scenario, intent=intent)
+            gap = initial_context["gap"]
+            unrelated = initial_context["unrelated"]
             if initial:
-                understanding = RepositoryUnderstandingView.create(
-                    intent,
-                    view,
-                    # Keep the initial package genuinely partial rather than
-                    # mechanically BLOCKED: the two seeded unknowns are
-                    # visible, but no task-specific requested dimension or
-                    # must-see coverage is predeclared to the model.
-                    requested_dimensions=[],
-                    must_see_categories=[],
-                    unknowns=[gap, unrelated],
-                )
-                package = ContextPackage.from_understanding(
-                    understanding,
-                    horizon="COMPONENT",
-                    affordances=[ContextAffordance.create(
-                        dimension=seed["gap_dimension"],
-                        horizon="COMPONENT",
-                        evidence_type="repository-source",
-                        reason="Request exact committed source context when package grounding is incomplete.",
-                    )],
-                )
                 return {
-                    "understanding": understanding,
-                    "package": package,
+                    "understanding": initial_context["understanding"],
+                    "package": initial_context["package"],
+                    "initial_context": initial_context,
                     "claims": (),
                     "evidences": tuple(evidences),
                     "fragments": tuple(fragments),
@@ -588,16 +610,9 @@ def _m2_context_records(
                     reason="Decision applicability remains an explicit visible gap.",
                 )],
             )
-            # Rebuild the prior package/request in the same disposable store so
-            # the resolution edge is a real M2c ContextResolution contract.
-            prior = RepositoryUnderstandingView.create(
-                intent,
-                view,
-                requested_dimensions=[seed["gap_dimension"], seed["unrelated_gap_dimension"]],
-                must_see_categories=[seed["gap_dimension"]],
-                unknowns=[gap, unrelated],
-            )
-            prior_package = ContextPackage.from_understanding(prior, horizon="COMPONENT")
+            # The request/resolution edge must start from the exact initial
+            # package rendered by the model-facing initial treatment.
+            prior_package = initial_context["package"]
             request = ContextRequest.create(
                 prior_package,
                 gap_ids=[gap.unknown_id],
@@ -626,6 +641,7 @@ def _m2_context_records(
             return {
                 "understanding": resulting_understanding,
                 "package": resulting_package,
+                "initial_context": initial_context,
                 "claims": (claim,),
                 "evidences": tuple(evidences),
                 "fragments": tuple(fragments),
@@ -1299,7 +1315,13 @@ def validate_pair_evaluation(
         _require(protocol_vector["judgment"] != "N/A", "evaluation_protocol_vector_inconsistent", scenario["scenario_id"])
     if scenario["scenario_id"] == "S5" and evaluation["context_request"].get("outcome") == "RESOLVED":
         _require(x["step_count"] == 2 and y["step_count"] == 2, "s5_incomplete_transcript", "S5")
-    return {"scenario_id": scenario["scenario_id"], "fairness": fairness, "evaluation": evaluation}
+    derived_hard_failures = ["protocol_bookkeeping_required"] if derived_protocol_burden else []
+    return {
+        "scenario_id": scenario["scenario_id"],
+        "fairness": fairness,
+        "evaluation": evaluation,
+        "derived_hard_failures": derived_hard_failures,
+    }
 
 
 def materialize_packet(
@@ -1415,8 +1437,17 @@ def _quality_policy_from_validated(evaluations: Sequence[Mapping[str, Any]]) -> 
         if not all(fairness.values()):
             return {"outcome": "INCONCLUSIVE", "reason": f"derived fairness failure in {scenario_id}", "no_aggregate_score": True}
         evaluation = item["evaluation"]
-        if evaluation["hard_failures"]:
-            return {"outcome": "FAIL", "reason": f"hard failure in {scenario_id}", "no_aggregate_score": True}
+        effective_hard_failures = list(dict.fromkeys([
+            *evaluation["hard_failures"],
+            *item.get("derived_hard_failures", []),
+        ]))
+        if effective_hard_failures:
+            return {
+                "outcome": "FAIL",
+                "reason": f"hard failure in {scenario_id}",
+                "effective_hard_failures": effective_hard_failures,
+                "no_aggregate_score": True,
+            }
     for scenario_id in ("S1", "S2"):
         judgments = [item["judgment"] for item in by_id[scenario_id]["evaluation"]["vector_evaluations"]]
         if any(value == "WORSE" for value in judgments):

@@ -19,12 +19,15 @@ from bdb_vnext.m2d_quality_gate import (
     REQUIRED_SCENARIOS,
     RUBRIC_VERSION,
     SCENARIO_SCHEMA,
+    _build_s5_initial_context,
     _quality_policy_from_validated,
     _payload_manifest,
     _sha256_bytes,
     _m2_context_records,
     _m2_payload,
     _materialize_followup,
+    _materialize_one,
+    _seed_s5_resolution,
     _validate_materialized_manifest,
     _validate_prompt_pair,
     _subject_view,
@@ -264,6 +267,36 @@ def test_treatment_inputs_are_source_grounded_and_s5_initial_request_is_not_preb
     assert all(path in followup_text for path in s5["context_seed"]["requested_source_paths"])
 
 
+def test_s5_initial_package_identity_continues_into_request_and_resolution(tmp_path: Path) -> None:
+    s5 = next(item for item in _scenarios() if item["scenario_id"] == "S5")
+    view = _subject_view(ROOT)
+    initial_paths = list(s5["arm_construction"]["initial_visible_paths"])
+    output = tmp_path / "assets"
+    materialized = _materialize_one(
+        view,
+        s5,
+        output=output,
+        arm_id="Y",
+        paths=initial_paths,
+        phase="INITIAL",
+        runtime_root=tmp_path / "materialize-runtime",
+    )
+    manifest = json.loads((output / materialized["manifest_path"]).read_text(encoding="utf-8"))
+    canonical = _build_s5_initial_context(view, s5)
+    fixture = _seed_s5_resolution(view, s5, temp_parent=tmp_path)
+
+    assert manifest["m2_context"]["understanding_id"] == canonical["understanding"].understanding_id
+    assert manifest["m2_context"]["package_id"] == canonical["package"].package_id
+    assert fixture["initial_understanding_id"] == canonical["understanding"].understanding_id
+    assert fixture["initial_package_id"] == canonical["package"].package_id
+    assert fixture["request_source_package_id"] == fixture["initial_package_id"]
+    assert fixture["resolution_prior_package_id"] == fixture["request_source_package_id"]
+    assert fixture["resolution_resulting_package_id"] is not None
+    assert fixture["initial_gap_id"] in fixture["resolved_gap_ids"]
+    assert fixture["initial_gap_id"] not in fixture["unresolved_gap_ids"]
+    assert fixture["unrelated_gap_id"] in fixture["unresolved_gap_ids"]
+
+
 def test_evaluation_vector_and_integrity_contract_rejects_malformed_records() -> None:
     scenario, runs, valid = _synthetic_pair("S3")
     missing = copy.deepcopy(valid)
@@ -295,6 +328,39 @@ def test_evaluation_vector_and_integrity_contract_rejects_malformed_records() ->
     protocol_eval["context_request"]["protocol_bookkeeping_required"] = False
     protocol_eval["evaluation_digest"] = evaluation_digest(protocol_eval)
     _expect_evaluation_error(lambda: validate_pair_evaluation(protocol_eval, s5, validated_runs=protocol_runs), "evaluation_protocol_burden_mismatch")
+
+
+def _complete_validated_synthetic(*, protocol_scenario: str | None = None) -> list[dict]:
+    validated = []
+    for scenario_id in REQUIRED_SCENARIOS:
+        scenario, runs, evaluation = _synthetic_pair(
+            scenario_id,
+            protocol_burden=scenario_id == protocol_scenario,
+            material_improvement=scenario_id == "S3",
+        )
+        if scenario_id == "S1" and protocol_scenario == "S1":
+            runs["X"]["protocol_burden_visible"] = False
+            runs["Y"]["protocol_burden_visible"] = True
+        validated.append(validate_pair_evaluation(evaluation, scenario, validated_runs=runs))
+    return validated
+
+
+def test_s1_protocol_burden_derived_failure_cannot_be_hidden_by_equivalent_vector() -> None:
+    result = _quality_policy_from_validated(_complete_validated_synthetic(protocol_scenario="S1"))
+    assert result["outcome"] == "FAIL"
+    assert result["effective_hard_failures"] == ["protocol_bookkeeping_required"]
+
+
+def test_s3_material_improvement_cannot_override_derived_protocol_failure() -> None:
+    result = _quality_policy_from_validated(_complete_validated_synthetic(protocol_scenario="S3"))
+    assert result["outcome"] == "FAIL"
+    assert result["effective_hard_failures"] == ["protocol_bookkeeping_required"]
+
+
+def test_s5_consistent_protocol_burden_is_still_a_derived_hard_failure() -> None:
+    result = _quality_policy_from_validated(_complete_validated_synthetic(protocol_scenario="S5"))
+    assert result["outcome"] == "FAIL"
+    assert result["effective_hard_failures"] == ["protocol_bookkeeping_required"]
 
 
 def test_complete_synthetic_evaluation_fixture_is_gate_logic_only() -> None:
