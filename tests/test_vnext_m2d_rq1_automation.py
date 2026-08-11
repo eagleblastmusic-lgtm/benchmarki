@@ -140,6 +140,29 @@ def test_s5_subset_request_and_context_package_binding_are_gate_compatible(tmp_p
     assert finalized["record"]["run_record"]["conversation_steps"][1]["prompt_digest"] is None
 
 
+def test_s5_out_of_universe_request_without_followup_remains_evaluator_visible(tmp_path: Path, materialized_root: Path) -> None:
+    materialized = materialized_root
+    prepared = prepare_run(ROOT, PACKET, materialized, tmp_path / "plans", scenario_id="S5", arm_id="Y", attempt_id="dry-out-of-universe")
+    observation = _observation("Exact raw out-of-universe request.")
+    observation["context_request_used"] = True
+    observation["requested_source_paths"] = ["bdb_vnext/repo_view.py", "bdb_vnext/content_store.py"]
+    finalized = finalize_capture(
+        prepared["plan"],
+        observation,
+        output_root=tmp_path / "captures",
+        repo_root=ROOT,
+        packet_root=PACKET,
+        materialized_root=materialized,
+    )
+    record = finalized["record"]
+    assert record["status"] == "FINALIZED"
+    assert record["run_record"]["conversation_steps"][-1]["phase"] == "INITIAL"
+    assert record["run_record"]["requested_source_paths"] == observation["requested_source_paths"]
+    assert record["run_record"]["conversation_steps"][0]["assistant_answer_markdown"] == observation["steps"][0]["assistant_answer_markdown"]
+    checked = validate_capture_record(finalized["path"], repo_root=ROOT, packet_root=PACKET, materialized_root=materialized)
+    assert checked["evaluator_eligible"] is True
+
+
 def test_browser_api_synthetic_and_moving_checkout_substitutions_fail_closed(tmp_path: Path, materialized_root: Path) -> None:
     materialized = materialized_root
     prepared = prepare_run(ROOT, PACKET, materialized, tmp_path / "plans", scenario_id="S1", arm_id="X", attempt_id="dry-4")

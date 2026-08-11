@@ -75,9 +75,10 @@ prepared plan. The observation supplied to `finalize_capture` must attest:
 - UTC Browser-observed run, submission, completion, and finalization times;
 - every raw answer step unchanged as UTF-8 Markdown, including its digest and
   processing duration;
-- S5 context-request flag and the exact paths actually requested. A requested
-  path must be inside the frozen S5 follow-up universe; the frozen validator's
-  subset semantics are preserved.
+- S5 context-request flag and the exact paths actually requested. A one-step
+  observation preserves an out-of-universe request as evaluator-visible
+  evidence and does not admit a follow-up; the frozen-universe subset check
+  applies only when a FOLLOWUP step is present.
 
 Missing completion, partial answer, duplicate capture, unexpected model or
 setting, API fallback, synthetic substitution, moving-ref substitution,

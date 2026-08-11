@@ -471,9 +471,9 @@ def _expected_context_paths(plan: Mapping[str, Any], observation: Mapping[str, A
     followup = plan.get("followup_context")
     _require(isinstance(followup, Mapping), "s5_followup_binding_missing", "S5 follow-up binding is required")
     frozen = set(followup.get("source_paths", []))
-    _require(set(paths).issubset(frozen), "requested_paths_outside_frozen_universe", "observed S5 request is outside the frozen follow-up universe")
     _require(len(observation["steps"]) in {1, 2}, "s5_step_count_invalid", "S5 has one or two steps")
     if len(observation["steps"]) == 2:
+        _require(set(paths).issubset(frozen), "requested_paths_outside_frozen_universe", "observed S5 follow-up request is outside the frozen follow-up universe")
         _require(observation["steps"][1]["phase"] == "FOLLOWUP", "s5_followup_missing", "second S5 step must be FOLLOWUP")
 
 
