@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -138,6 +139,75 @@ def test_lease_handoff_advances_fence_and_invalidates_stale_worker(tmp_path: Pat
         assert run.fence == new.fence
 
 
+def test_lease_handoff_rebinds_held_resource_to_the_new_fence(tmp_path: Path) -> None:
+    with stack(tmp_path) as (_composition, kernel, task_id):
+        item = kernel.create_work_item("work:claim-handoff", task_id)
+        old = kernel.acquire_lease(item.work_id, "lease:claim-old", "worker:claim-old", ttl_seconds=1, now=0)
+        original = kernel.claim_resource(item.work_id, "resource:handoff", old.lease_id, old.fence, now=0)
+
+        new = kernel.acquire_lease(item.work_id, "lease:claim-new", "worker:claim-new", ttl_seconds=30, now=2)
+        query = kernel.query(item.work_id, now=2)
+        assert query is not None and query.resource_claim is not None
+        assert query.resource_claim.resource_key == original.resource_key
+        assert query.resource_claim.lease_id == new.lease_id
+        assert query.resource_claim.fence == new.fence
+
+        with pytest.raises(M4aError) as stale:
+            kernel.release_resource(item.work_id, original.resource_key, old.lease_id, old.fence, now=2)
+        assert stale.value.code == "stale_lease"
+        assert kernel.release_resource(item.work_id, original.resource_key, new.lease_id, new.fence, now=2).state == "RELEASED"
+
+
+def test_lease_release_requires_explicit_resource_release(tmp_path: Path) -> None:
+    with stack(tmp_path) as (_composition, kernel, task_id):
+        item = kernel.create_work_item("work:claim-release", task_id)
+        lease = kernel.acquire_lease(item.work_id, "lease:claim-release", "worker:claim-release")
+        kernel.claim_resource(item.work_id, "resource:release", lease.lease_id, lease.fence)
+
+        with pytest.raises(M4aError) as held:
+            kernel.release_lease(item.work_id, lease.lease_id, lease.fence)
+        assert held.value.code == "resource_claim_held"
+
+        kernel.release_resource(item.work_id, "resource:release", lease.lease_id, lease.fence)
+        assert kernel.release_lease(item.work_id, lease.lease_id, lease.fence).state == "RELEASED"
+
+
+def test_workitem_has_at_most_one_held_resource_claim(tmp_path: Path) -> None:
+    with stack(tmp_path) as (_composition, kernel, task_id):
+        item = kernel.create_work_item("work:one-claim", task_id)
+        lease = kernel.acquire_lease(item.work_id, "lease:one-claim", "worker:one-claim")
+        kernel.claim_resource(item.work_id, "resource:first", lease.lease_id, lease.fence)
+
+        with pytest.raises(M4aError) as conflict:
+            kernel.claim_resource(item.work_id, "resource:second", lease.lease_id, lease.fence)
+        assert conflict.value.code == "work_resource_conflict"
+        assert kernel.query(item.work_id).resource_claim.resource_key == "resource:first"  # type: ignore[union-attr]
+
+
+def test_new_fence_cannot_complete_or_wait_an_old_fence_run(tmp_path: Path) -> None:
+    with stack(tmp_path) as (_composition, kernel, task_id):
+        item = kernel.create_work_item("work:run-owner", task_id)
+        old = kernel.acquire_lease(item.work_id, "lease:run-old", "worker:run-old", ttl_seconds=1, now=0)
+        kernel.claim_resource(item.work_id, "resource:run-owner", old.lease_id, old.fence, now=0)
+        run = kernel.start_run(item.work_id, "run:owned-old", old.lease_id, old.fence, 0, now=0)
+        new = kernel.acquire_lease(item.work_id, "lease:run-new", "worker:run-new", ttl_seconds=30, now=2)
+
+        with pytest.raises(M4aError) as finish:
+            kernel.finish_run(item.work_id, run.run_id, new.lease_id, new.fence, 1, outcome="UNKNOWN", now=2)
+        assert finish.value.code == "run_ownership_mismatch"
+
+        with pytest.raises(M4aError) as waiting:
+            kernel.enter_wait(item.work_id, "wait:new-owner", "reconciliation", new.lease_id, new.fence, 1, now=2)
+        assert waiting.value.code == "run_ownership_mismatch"
+
+        with pytest.raises(M4aError) as release:
+            kernel.release_resource(item.work_id, "resource:run-owner", new.lease_id, new.fence, now=2)
+        assert release.value.code == "resource_reconciliation_required"
+        query = kernel.query(item.work_id, now=2)
+        assert query is not None and query.work.disposition == "RUNNING"
+        assert query.active_run == run
+
+
 def test_two_claimers_and_resource_claim_are_deterministic(tmp_path: Path) -> None:
     with stack(tmp_path) as (_composition, kernel, task_id):
         first = kernel.create_work_item("work:claim-a", task_id)
@@ -245,6 +315,58 @@ def test_query_schema_digest_store_boundary_and_provider_are_explicit(tmp_path: 
         provider = next(item for item in manifest["composition"]["providers"] if item["provider_id"] == WORK_KERNEL_PROVIDER_ID)
         assert provider["state"] == "reserved_disabled"
         assert provider["writer_enabled"] is False
+
+
+def test_canonical_query_cannot_mix_rows_across_concurrent_commit(tmp_path: Path) -> None:
+    with stack(tmp_path) as (composition, kernel, task_id):
+        item = kernel.create_work_item("work:query-snapshot", task_id)
+        lease = kernel.acquire_lease(item.work_id, "lease:query-snapshot", "worker:query-snapshot")
+        writer = WorkKernelStore.open(
+            tmp_path / "vnext",
+            task_authority=composition.authority,
+            legacy_root=tmp_path / "legacy",
+            clock=lambda: 100.0,
+        )
+        original_work_row = kernel._work_row
+        transition_done = threading.Event()
+        transition_errors: list[Exception] = []
+        transition_thread: threading.Thread | None = None
+        first_read = True
+
+        def transition() -> None:
+            try:
+                writer.start_run(item.work_id, "run:query-snapshot", lease.lease_id, lease.fence, 0)
+            except Exception as exc:  # pragma: no cover - asserted below
+                transition_errors.append(exc)
+            finally:
+                transition_done.set()
+
+        def pause_after_current_row(work_id: str):
+            nonlocal first_read, transition_thread
+            row = original_work_row(work_id)
+            if first_read:
+                first_read = False
+                transition_thread = threading.Thread(target=transition)
+                transition_thread.start()
+                assert transition_done.wait(timeout=5)
+            return row
+
+        kernel._work_row = pause_after_current_row  # type: ignore[method-assign]
+        try:
+            snapshot = kernel.query(item.work_id)
+        finally:
+            kernel._work_row = original_work_row  # type: ignore[method-assign]
+            if transition_thread is not None:
+                transition_thread.join(timeout=5)
+            writer.close()
+
+        assert not transition_errors
+        assert snapshot is not None
+        assert snapshot.work.disposition == "READY"
+        assert snapshot.active_run is None
+        current = kernel.query(item.work_id)
+        assert current is not None and current.work.disposition == "RUNNING"
+        assert current.active_run is not None and current.active_run.run_id == "run:query-snapshot"
 
 
 def test_no_legacy_tables_or_alternate_workitem_writer_are_supported() -> None:

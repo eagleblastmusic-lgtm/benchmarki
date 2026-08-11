@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from bdb_vnext.m3c_admission import (
     M3C_SCHEMA,
     M3C_WRITER_ID,
     CanonicalNativeAdmissionBridge,
+    CanonicalVNextAdmissionAuthority,
     M3cError,
     open_vnext_admission_composition,
     scan_supported_vnext_admission_paths,
@@ -144,6 +146,90 @@ def test_kill_switch_stops_new_admission_but_keeps_query_and_state(tmp_path: Pat
         assert stack.client.submit(blocked).status == "ACCEPTED"
 
 
+def test_kill_switch_is_linearized_with_cross_process_admission_transaction(tmp_path: Path) -> None:
+    runtime = tmp_path / "vnext"
+    legacy = tmp_path / "legacy"
+    store_a = ShadowSubmissionStore(runtime, shadow=True, legacy_root=legacy)
+    store_b = ShadowSubmissionStore(runtime, shadow=True, legacy_root=legacy, busy_timeout_ms=2_000)
+    authority_a = CanonicalVNextAdmissionAuthority(store_a)
+    authority_b = CanonicalVNextAdmissionAuthority(store_b)
+    # Process-local locks do not coordinate independent Native Host processes.
+    authority_a._lock = threading.RLock()
+    authority_b._lock = threading.RLock()
+    original_admit = store_a.admit
+    guard_entered = threading.Event()
+    release_guard = threading.Event()
+    disable_started = threading.Event()
+    disable_finished = threading.Event()
+    admitted: list[object] = []
+    errors: list[Exception] = []
+    disable_errors: list[Exception] = []
+
+    def guarded_admit(request: ShadowSubmissionRequest, **kwargs: object):
+        admission_guard = kwargs.get("admission_guard")
+        if admission_guard is None:
+            # Old behavior: admission pauses after the process-local check but
+            # before acquiring the canonical SQLite write transaction.
+            guard_entered.set()
+            assert release_guard.wait(timeout=5)
+        else:
+            assert callable(admission_guard)
+
+            def blocking_guard() -> None:
+                guard_entered.set()
+                assert release_guard.wait(timeout=5)
+                admission_guard()
+
+            kwargs["admission_guard"] = blocking_guard
+        return original_admit(request, **kwargs)  # type: ignore[arg-type]
+
+    store_a.admit = guarded_admit  # type: ignore[method-assign]
+
+    def submit() -> None:
+        try:
+            admitted.append(authority_a.admit(make_request("browser:m3c-linearized")))
+        except Exception as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    def disable() -> None:
+        disable_started.set()
+        try:
+            authority_b.disable_intake()
+        except Exception as exc:  # pragma: no cover - asserted below
+            disable_errors.append(exc)
+        finally:
+            disable_finished.set()
+
+    submit_thread = threading.Thread(target=submit)
+    disable_thread = threading.Thread(target=disable)
+    try:
+        submit_thread.start()
+        assert guard_entered.wait(timeout=5)
+        disable_thread.start()
+        assert disable_started.wait(timeout=5)
+        disable_was_serialized = not disable_finished.wait(timeout=0.25)
+    finally:
+        release_guard.set()
+        submit_thread.join(timeout=5)
+        disable_thread.join(timeout=5)
+        authority_a.close()
+        authority_b.close()
+
+    assert disable_was_serialized
+    assert not errors
+    assert not disable_errors
+    assert not submit_thread.is_alive()
+    assert not disable_thread.is_alive()
+    assert len(admitted) == 1
+    assert disable_finished.is_set()
+
+    with ShadowSubmissionStore(runtime, shadow=True, legacy_root=legacy) as store:
+        verifier = CanonicalVNextAdmissionAuthority(store)
+        with pytest.raises(M3cError) as caught:
+            verifier.admit(make_request("browser:m3c-after-linearized-disable"))
+        assert caught.value.code == "admission_disabled"
+
+
 def test_kill_after_canonical_commit_preserves_task_for_reconciliation(tmp_path: Path) -> None:
     request = make_request("browser:m3c-kill-after-commit")
     with open_stack(tmp_path) as stack:
@@ -165,7 +251,11 @@ def test_database_busy_is_explicit_and_does_not_fake_acceptance(tmp_path: Path) 
                 with pytest.raises(M3cError) as caught:
                     stack.authority.admit(request)
                 assert caught.value.code == "database_busy"
+                with pytest.raises(M3cError) as kill_switch:
+                    stack.authority.disable_intake()
+                assert kill_switch.value.code == "database_busy"
             assert stack.query(request.submission_key, request.computed_digest()) is None
+            assert stack.authority.admission_enabled is True
         finally:
             holder.close()
 

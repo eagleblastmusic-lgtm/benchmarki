@@ -368,6 +368,10 @@ class CanonicalVNextAdmissionAuthority:
             _fail("kill_switch_invalid", "M3c kill switch document is malformed")
         return current
 
+    def _assert_intake_enabled(self) -> None:
+        if not self._kill_switch()["admission_enabled"]:
+            _fail("admission_disabled", "vNext admission is disabled by the kill switch")
+
     @property
     def admission_enabled(self) -> bool:
         with self._lock:
@@ -377,9 +381,16 @@ class CanonicalVNextAdmissionAuthority:
         if not isinstance(enabled, bool):
             _fail("invalid_kill_switch", "admission kill switch requires a boolean")
         with self._lock:
-            current = self._kill_switch()
-            current["admission_enabled"] = enabled
-            _write_canonical(self._kill_switch_path, current)
+            try:
+                # The same SQLite write boundary used by canonical admission
+                # linearizes this external control file across Native Host
+                # processes; process-local locks alone are insufficient.
+                with self._store.hold_write_lock():
+                    current = self._kill_switch()
+                    current["admission_enabled"] = enabled
+                    _write_canonical(self._kill_switch_path, current)
+            except M3aError as exc:
+                _fail(exc.code, str(exc), details=exc.details)
 
     def disable_intake(self) -> None:
         self.set_intake_enabled(False)
@@ -396,10 +407,13 @@ class CanonicalVNextAdmissionAuthority:
         if not isinstance(request, ShadowSubmissionRequest):
             _fail("invalid_canonical_request", "canonical admission requires an M3a request")
         with self._lock:
-            if not self._kill_switch()["admission_enabled"]:
-                _fail("admission_disabled", "vNext admission is disabled by the kill switch")
+            self._assert_intake_enabled()
             try:
-                return self._store.admit(request, failpoint=failpoint)
+                return self._store.admit(
+                    request,
+                    failpoint=failpoint,
+                    admission_guard=self._assert_intake_enabled,
+                )
             except M3aError as exc:
                 _fail(exc.code, str(exc), details=exc.details)
 

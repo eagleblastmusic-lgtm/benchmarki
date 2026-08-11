@@ -468,6 +468,12 @@ class WorkKernelStore:
             CREATE INDEX IF NOT EXISTS m4a_runs_by_work ON m4a_runs(work_id, started_order);
             CREATE INDEX IF NOT EXISTS m4a_waits_by_work ON m4a_waits(work_id, created_order);
             CREATE INDEX IF NOT EXISTS m4a_facts_by_work ON m4a_transition_facts(work_id, state_version);
+            CREATE UNIQUE INDEX IF NOT EXISTS m4a_one_active_run_per_work
+                ON m4a_runs(work_id) WHERE status='ACTIVE';
+            CREATE UNIQUE INDEX IF NOT EXISTS m4a_one_open_wait_per_work
+                ON m4a_waits(work_id) WHERE status='OPEN';
+            CREATE UNIQUE INDEX IF NOT EXISTS m4a_one_held_resource_per_work
+                ON m4a_resource_claims(work_id) WHERE state='HELD';
         """
         try:
             with self._lock:
@@ -478,13 +484,14 @@ class WorkKernelStore:
     def _now(self, value: float | None = None) -> float:
         return _finite_time(self._clock() if value is None else value, field="now")
 
-    def _map_sqlite(self, exc: sqlite3.DatabaseError, *, action: str) -> NoReturn:
+    def _map_sqlite(self, exc: sqlite3.DatabaseError, *, action: str, write: bool = True) -> NoReturn:
         message = str(exc).lower()
         if "busy" in message or "locked" in message:
             _fail("database_busy", f"M4a database is busy during {action}")
         if "constraint" in message or "unique" in message or "foreign key" in message:
             _fail("storage_conflict", f"M4a database constraint rejected {action}")
-        _fail("database_write_failed", f"M4a database failed during {action}")
+        code = "database_write_failed" if write else "database_read_failed"
+        _fail(code, f"M4a database failed during {action}")
 
     def _write(self, operation: Callable[[], Any], *, failpoint: FailPoint | None = None) -> Any:
         if failpoint == "before_transaction":
@@ -762,6 +769,13 @@ class WorkKernelStore:
                     "UPDATE m4a_leases SET lease_id=?,owner_id=?,fence=?,state='ACTIVE',acquired_at=?,expires_at=? WHERE work_id=?",
                     (lease_id, owner_id, fence, timestamp, timestamp + ttl, work_id),
                 )
+                # A lease handoff preserves the exclusive resource reservation
+                # while transferring its authority to the new fence.  Expiry
+                # alone must never make an ambiguous resource silently free.
+                self._connection.execute(
+                    "UPDATE m4a_resource_claims SET lease_id=?,fence=? WHERE work_id=? AND state='HELD'",
+                    (lease_id, fence, work_id),
+                )
             row = self._lease_row(work_id)
             assert row is not None
             return self._lease(row, now=timestamp)
@@ -782,6 +796,16 @@ class WorkKernelStore:
 
         def operation() -> LeaseRecord:
             row = self._require_lease(work_id, lease_id, fence, now=timestamp)
+            held = self._connection.execute(
+                "SELECT resource_key FROM m4a_resource_claims WHERE work_id=? AND state='HELD'",
+                (work_id,),
+            ).fetchone()
+            if held is not None:
+                _fail(
+                    "resource_claim_held",
+                    "WorkItem lease cannot be released while its resource claim is held",
+                    details={"resource_key": str(held[0])},
+                )
             self._connection.execute("UPDATE m4a_leases SET state='RELEASED' WHERE work_id=?", (work_id,))
             result = self._lease(self._lease_row(work_id), now=timestamp)  # type: ignore[arg-type]
             return result
@@ -807,6 +831,19 @@ class WorkKernelStore:
             if str(work[3]) in {"TERMINAL", "CANCELLED"}:
                 _fail("invalid_transition", "terminal WorkItem cannot claim a resource")
             self._require_lease(work_id, lease_id, fence, now=timestamp)
+            work_claim = self._connection.execute(
+                "SELECT resource_key,work_id,lease_id,fence,state,claimed_order FROM m4a_resource_claims "
+                "WHERE work_id=? AND state='HELD'",
+                (work_id,),
+            ).fetchone()
+            if work_claim is not None:
+                if (
+                    str(work_claim[0]) == resource_key
+                    and str(work_claim[2]) == lease_id
+                    and int(work_claim[3]) == fence
+                ):
+                    return self._claim(work_claim)
+                _fail("work_resource_conflict", "WorkItem already holds another resource")
             current = self._connection.execute(
                 "SELECT resource_key,work_id,lease_id,fence,state,claimed_order FROM m4a_resource_claims WHERE resource_key=?",
                 (resource_key,),
@@ -853,6 +890,15 @@ class WorkKernelStore:
                 _fail("stale_resource_claim", "resource claim is no longer current")
             if str(row[4]) == "RELEASED":
                 return self._claim(row)
+            active = self._connection.execute(
+                "SELECT lease_id,fence FROM m4a_runs WHERE work_id=? AND status='ACTIVE'",
+                (work_id,),
+            ).fetchone()
+            if active is not None and (str(active[0]) != lease_id or int(active[1]) != fence):
+                _fail(
+                    "resource_reconciliation_required",
+                    "resource cannot be released while an older fenced Run remains active",
+                )
             self._connection.execute("UPDATE m4a_resource_claims SET state='RELEASED' WHERE resource_key=?", (resource_key,))
             return self._claim(self._connection.execute("SELECT resource_key,work_id,lease_id,fence,state,claimed_order FROM m4a_resource_claims WHERE resource_key=?", (resource_key,)).fetchone())  # type: ignore[arg-type]
 
@@ -928,9 +974,14 @@ class WorkKernelStore:
             if str(row[3]) != "RUNNING":
                 _fail("invalid_transition", "only RUNNING WorkItems can enter a Wait")
             self._require_lease(work_id, lease_id, fence, now=timestamp)
-            active = self._connection.execute("SELECT run_id FROM m4a_runs WHERE work_id=? AND status='ACTIVE'", (work_id,)).fetchone()
+            active = self._connection.execute(
+                "SELECT run_id,lease_id,fence FROM m4a_runs WHERE work_id=? AND status='ACTIVE'",
+                (work_id,),
+            ).fetchone()
             if active is None:
                 _fail("active_run_missing", "RUNNING WorkItem has no active Run")
+            if str(active[1]) != lease_id or int(active[2]) != fence:
+                _fail("run_ownership_mismatch", "current lease/fence does not own the active Run")
             order = self._next_order()
             self._connection.execute(
                 "INSERT INTO m4a_waits(wait_id,work_id,reason,status,created_order,resolved_order,resolution) VALUES (?,?,?,?,?,NULL,NULL)",
@@ -1014,9 +1065,16 @@ class WorkKernelStore:
             if str(row[3]) not in {"RUNNING", "READY"}:
                 _fail("invalid_transition", "only RUNNING or wait-resumed READY WorkItems can finish a Run")
             self._require_lease(work_id, lease_id, fence, now=timestamp)
-            active = self._connection.execute("SELECT run_id FROM m4a_runs WHERE work_id=? AND status='ACTIVE'", (work_id,)).fetchone()
+            active = self._connection.execute(
+                "SELECT run_id,lease_id,fence FROM m4a_runs WHERE work_id=? AND status='ACTIVE'",
+                (work_id,),
+            ).fetchone()
             if active is None:
                 _fail("active_run_missing", "WorkItem has no active Run to finish")
+            if str(active[0]) != run_id:
+                _fail("active_run_mismatch", "another Run is active for the WorkItem")
+            if str(existing[5]) != lease_id or int(existing[6]) != fence:
+                _fail("run_ownership_mismatch", "current lease/fence does not own the active Run")
             order = self._next_order()
             self._connection.execute("UPDATE m4a_runs SET status='FINISHED',outcome=?,effect_certainty=?,ended_order=? WHERE run_id=? AND status='ACTIVE'", (outcome, effect_certainty, order, run_id))
             version = self._bump_work(row, disposition="TERMINAL", order=order, now=timestamp)
@@ -1049,7 +1107,22 @@ class WorkKernelStore:
         work_id = _text(work_id, field="work_id")
         timestamp = self._now(now)
         with self._lock:
-            return self._query_locked(work_id, now=timestamp)
+            owns_snapshot = not self._connection.in_transaction
+            try:
+                if owns_snapshot:
+                    self._connection.execute("BEGIN DEFERRED")
+                result = self._query_locked(work_id, now=timestamp)
+                if owns_snapshot:
+                    self._connection.commit()
+                return result
+            except M4aError:
+                if owns_snapshot and self._connection.in_transaction:
+                    self._connection.rollback()
+                raise
+            except sqlite3.DatabaseError as exc:
+                if owns_snapshot and self._connection.in_transaction:
+                    self._connection.rollback()
+                self._map_sqlite(exc, action="canonical query", write=False)
 
     def facts(self, work_id: str) -> tuple[TransitionFact, ...]:
         work_id = _text(work_id, field="work_id")

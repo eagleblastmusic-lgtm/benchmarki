@@ -16,7 +16,7 @@ import re
 import sqlite3
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -432,6 +432,7 @@ class ShadowSubmissionStore:
         request: ShadowSubmissionRequest,
         *,
         failpoint: Literal["before_commit", "after_commit"] | None = None,
+        admission_guard: Callable[[], None] | None = None,
     ) -> AdmissionReceipt:
         if not isinstance(request, ShadowSubmissionRequest):
             _fail("invalid_canonical_request", "admit requires ShadowSubmissionRequest")
@@ -446,6 +447,8 @@ class ShadowSubmissionStore:
         with self._connection_lock:
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
+                if admission_guard is not None:
+                    admission_guard()
                 existing = self._existing(request.submission_key)
                 if existing is not None:
                     receipt = self._check_existing(request, existing)
@@ -527,6 +530,14 @@ class ShadowSubmissionStore:
                 if "locked" in text or "busy" in text:
                     _fail("database_busy", "M3a shadow database is busy")
                 _fail("sqlite_write_failed", "M3a shadow admission could not commit")
+            except sqlite3.DatabaseError:
+                if self._connection.in_transaction:
+                    self._connection.rollback()
+                _fail("sqlite_write_failed", "M3a shadow admission could not commit")
+            except Exception:
+                if self._connection.in_transaction:
+                    self._connection.rollback()
+                raise
 
     def tombstone(self, request: ShadowSubmissionRequest, *, reason: str) -> AdmissionReceipt:
         if not isinstance(reason, str) or not reason.strip() or len(reason) > 256:
@@ -599,7 +610,13 @@ class ShadowSubmissionStore:
         """Hold a transaction for the bounded DB-busy test."""
 
         with self._connection_lock:
-            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as exc:
+                text = str(exc).lower()
+                if "locked" in text or "busy" in text:
+                    _fail("database_busy", "M3a shadow database is busy")
+                _fail("sqlite_write_failed", "M3a shadow write transaction could not begin")
             try:
                 yield
             finally:
