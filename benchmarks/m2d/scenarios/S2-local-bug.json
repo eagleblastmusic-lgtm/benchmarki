@@ -33,7 +33,22 @@
   "adjudication_vector_ids": ["semantic_correctness", "repository_understanding_must_see_coverage", "root_cause_or_ownership_accuracy", "explicit_unknowns_uncertainty", "constraint_violations", "validation_relevance_missed_risks", "rework_required", "browser_continuity", "protocol_burden_visible_to_gpt"],
   "arm_construction": { "version": "m2d-arm-construction-v1", "baseline_type": "BASELINE_FLAT_CONTEXT_V1", "m2_type": "M2_VNEXT_CONTEXT_PACKAGE_V1", "initial_visible_paths": ["bdb_vnext/repo_view.py", "bdb_vnext/content_store.py", "bdb_vnext/engineering_intelligence.py", "tests/test_vnext_engineering_intelligence.py"] },
   "context_seed": null,
+  "browser_assets": {
+    "version": "m2d-browser-assets-v1",
+    "arm_x_prompt_sha256": "sha256:bd14baad6450b4726aa9cfd2c3e734238fd031ad2dd4eac90ac0145178e4b131",
+    "arm_y_prompt_sha256": "sha256:3c6cab2766550dffc0cb28ea54b942587f75bfda291fbb0ad3cd21caea10fe91",
+    "arm_x_initial_payload_manifest_digest": "sha256:d4c3be2e44e70b0e5c989a5adf76039aa95068993c8916a060186def6fd59b61",
+    "arm_x_initial_payload_manifest_sha256": "sha256:b5995b64f27e05115f6c611fa43013956a1a600472e9a62d7f9eb725595dc3d7",
+    "arm_x_initial_payload_digest": "sha256:aeb4715aeda23c5eb5494efe66439946c74183e57b42aaaafb2870308e6dbd03",
+    "arm_y_initial_payload_manifest_digest": "sha256:48c57e7acc3e829fedb9e13507383723f1d6913137f03e9392f98c067e04e877",
+    "arm_y_initial_payload_manifest_sha256": "sha256:8cdcfaf3ba05145a0525faa2f2339dc7d785da99a6a151255c329d57a4b01d6c",
+    "arm_y_initial_payload_digest": "sha256:17c4e5917d242340a0f47d27413f82889133d45ae2722fa157b02af5f6998e3b",
+    "s5_followup_operator_message_sha256": null,
+    "s5_followup_payload_manifest_digest": null,
+    "s5_followup_payload_manifest_sha256": null,
+    "s5_followup_payload_digest": null
+  },
   "rubric_version": "m2d-rubric-v1",
   "gate_policy_version": "m2d-gate-policy-v1",
-  "scenario_digest": "sha256:ab8e39eeeb6d2cfe14b6641b214cd8713d81e09891565e216c6486a737c69ec1"
+  "scenario_digest": "sha256:a41ec0b6543322d5d7e9e8fe9e86da5542915f7ce8f6053471e3f13a2a9d8832"
 }

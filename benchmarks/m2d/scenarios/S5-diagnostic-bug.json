@@ -35,7 +35,22 @@
   "adjudication_vector_ids": ["semantic_correctness", "repository_understanding_must_see_coverage", "root_cause_or_ownership_accuracy", "explicit_unknowns_uncertainty", "constraint_violations", "validation_relevance_missed_risks", "rework_required", "browser_continuity", "protocol_burden_visible_to_gpt", "operator_explainability"],
   "arm_construction": { "version": "m2d-arm-construction-v1", "baseline_type": "BASELINE_FLAT_CONTEXT_V1", "m2_type": "M2_VNEXT_CONTEXT_PACKAGE_V1", "initial_visible_paths": ["bdb_vnext/engineering_intelligence.py", "docs/m2c-vnext-engineering-intelligence.md"] },
   "context_seed": { "gap_id": "S5-GAP-PACKAGE-GROUNDING", "gap_dimension": "package-grounding", "gap_reason": "Serialized Understanding and ContextPackage records are present, but exact package source grounding cannot be established from parsing alone.", "requested_source_paths": ["bdb_vnext/content_store.py", "schemas/bdb-vnext-context-package-v1.schema.json", "tests/test_vnext_engineering_intelligence.py"], "unrelated_gap_dimension": "decision-applicability", "unrelated_gap_reason": "Current decision applicability basis is not part of the supplied diagnostic context." },
+  "browser_assets": {
+    "version": "m2d-browser-assets-v1",
+    "arm_x_prompt_sha256": "sha256:2ff52e87895bb3772dfc994040b95fef1dc94995d3b721321cbb1152c25a9a00",
+    "arm_y_prompt_sha256": "sha256:c7493cbaa5f46bb8d35d51f620f1389d20a23b3dd0c5bc86369b5c6e92e8d388",
+    "arm_x_initial_payload_manifest_digest": "sha256:597f64ac4d90895c4fda208feba81988ad7aa4d00aeb7eccd1837ac916559574",
+    "arm_x_initial_payload_manifest_sha256": "sha256:95df7e88246ff9994e40b99d7695b3a01b2735aa952bca102f407f7f51cee118",
+    "arm_x_initial_payload_digest": "sha256:344584a1e65fb978a1327708ac18a0890c790219a23ce068127a4a05659b41c6",
+    "arm_y_initial_payload_manifest_digest": "sha256:825ce31d6beb4ba013a6c1fef6edd27600cb64b4aa055828b164f0d38890646a",
+    "arm_y_initial_payload_manifest_sha256": "sha256:61fa6ec65be4c1f2e6bb0d54322cdc8ba0515033d93cbad65c65d1594592c4b6",
+    "arm_y_initial_payload_digest": "sha256:d9ba84e2ada73570c361b79f90fedf033068f4fbe2d384036e119ba59f0084fd",
+    "s5_followup_operator_message_sha256": "sha256:d9e30becefbd33db9ad3babfaec85020b12b2006aef71e9c5cd3f1840d903725",
+    "s5_followup_payload_manifest_digest": "sha256:c7ee7708da5e4b36a9ddfb1adc012f46dc99a00b0910a844b0c89474919eeacd",
+    "s5_followup_payload_manifest_sha256": "sha256:f8a0ff168cf3299a864be9eba275257394d31744753ca7d180390fbcdb8b6b83",
+    "s5_followup_payload_digest": "sha256:eca7926422228de090de1911a0f03945389daafb692678c41ae8b7aa9666b1e4"
+  },
   "rubric_version": "m2d-rubric-v1",
   "gate_policy_version": "m2d-gate-policy-v1",
-  "scenario_digest": "sha256:b9a467e7a110c6391cfe26a442160a476512f58d7de940f6397718e53bf21e8e"
+  "scenario_digest": "sha256:8e7d08aea4b9fca0522bca547fab1a26c1b200bcdff6e577645085d8851251e6"
 }

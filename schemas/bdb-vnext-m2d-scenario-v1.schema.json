@@ -4,7 +4,7 @@
   "title": "BDB vNext M2d frozen benchmark scenario v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "scenario_version", "scenario_id", "scenario_family", "task_text", "repo_view", "evidence_universe", "must_see_ground_truth", "known_constraints", "known_unknowns", "source_inference_distinctions", "adjudication_vector_ids", "arm_construction", "context_seed", "rubric_version", "gate_policy_version", "scenario_digest"],
+  "required": ["schema", "scenario_version", "scenario_id", "scenario_family", "task_text", "repo_view", "evidence_universe", "must_see_ground_truth", "known_constraints", "known_unknowns", "source_inference_distinctions", "adjudication_vector_ids", "arm_construction", "context_seed", "rubric_version", "gate_policy_version", "browser_assets", "scenario_digest"],
   "properties": {
     "schema": { "const": "bdb-vnext-m2d-scenario-v1" },
     "scenario_version": { "$ref": "#/$defs/identifier" },
@@ -22,6 +22,7 @@
     "context_seed": { "oneOf": [{ "$ref": "#/$defs/contextSeed" }, { "type": "null" }] },
     "rubric_version": { "$ref": "#/$defs/identifier" },
     "gate_policy_version": { "$ref": "#/$defs/identifier" },
+    "browser_assets": { "$ref": "#/$defs/browserAssets" },
     "scenario_digest": { "$ref": "#/$defs/digest" }
   },
   "$defs": {
@@ -86,6 +87,25 @@
         "requested_source_paths": { "type": "array", "minItems": 1, "items": { "type": "string" }, "uniqueItems": true },
         "unrelated_gap_dimension": { "$ref": "#/$defs/identifier" },
         "unrelated_gap_reason": { "$ref": "#/$defs/text" }
+      }
+    },
+    "browserAssets": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "arm_x_prompt_sha256", "arm_y_prompt_sha256", "arm_x_initial_payload_manifest_digest", "arm_x_initial_payload_manifest_sha256", "arm_x_initial_payload_digest", "arm_y_initial_payload_manifest_digest", "arm_y_initial_payload_manifest_sha256", "arm_y_initial_payload_digest", "s5_followup_operator_message_sha256", "s5_followup_payload_manifest_digest", "s5_followup_payload_manifest_sha256", "s5_followup_payload_digest"],
+      "properties": {
+        "version": { "const": "m2d-browser-assets-v1" },
+        "arm_x_prompt_sha256": { "$ref": "#/$defs/digest" },
+        "arm_y_prompt_sha256": { "$ref": "#/$defs/digest" },
+        "arm_x_initial_payload_manifest_digest": { "$ref": "#/$defs/digest" },
+        "arm_x_initial_payload_manifest_sha256": { "$ref": "#/$defs/digest" },
+        "arm_x_initial_payload_digest": { "$ref": "#/$defs/digest" },
+        "arm_y_initial_payload_manifest_digest": { "$ref": "#/$defs/digest" },
+        "arm_y_initial_payload_manifest_sha256": { "$ref": "#/$defs/digest" },
+        "arm_y_initial_payload_digest": { "$ref": "#/$defs/digest" },
+        "s5_followup_operator_message_sha256": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+        "s5_followup_payload_manifest_digest": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+        "s5_followup_payload_manifest_sha256": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+        "s5_followup_payload_digest": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] }
       }
     }
   }

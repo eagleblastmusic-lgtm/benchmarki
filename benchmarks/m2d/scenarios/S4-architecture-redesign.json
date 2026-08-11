@@ -37,7 +37,22 @@
   "adjudication_vector_ids": ["semantic_correctness", "repository_understanding_must_see_coverage", "engineering_decision_quality_tradeoffs", "explicit_unknowns_uncertainty", "constraint_violations", "validation_relevance_missed_risks", "maintainability_simplicity", "rework_required", "browser_continuity", "protocol_burden_visible_to_gpt", "operator_explainability"],
   "arm_construction": { "version": "m2d-arm-construction-v1", "baseline_type": "BASELINE_FLAT_CONTEXT_V1", "m2_type": "M2_VNEXT_CONTEXT_PACKAGE_V1", "initial_visible_paths": ["bdb_vnext/repo_view.py", "bdb_vnext/content_store.py", "bdb_vnext/context_transport.py", "bdb_vnext/engineering_intelligence.py", "bdb_vnext/composition.py", "docs/m2b-vnext-typed-context-transport.md", "docs/m2c-vnext-engineering-intelligence.md"] },
   "context_seed": null,
+  "browser_assets": {
+    "version": "m2d-browser-assets-v1",
+    "arm_x_prompt_sha256": "sha256:bbc8ea904e2720f742ab30f6d1375351ef40f6968aa566b44d39b34e26c44fa4",
+    "arm_y_prompt_sha256": "sha256:26aba35bccc954b80eb79b49fa4d4a3435935bc7998d1e2f380e55a7e1aa9396",
+    "arm_x_initial_payload_manifest_digest": "sha256:f2f36520e94380831d4e4afb73462c5c5ecff60f6f379defe5037d8e71c96ae3",
+    "arm_x_initial_payload_manifest_sha256": "sha256:e5cf8fd6967365b70f741679ae9473c1ef882ad2a67051034758a864901e81cd",
+    "arm_x_initial_payload_digest": "sha256:26dd04ac9e64f9a2e316744b19900598f49cb68e6871806dabd4b7111746d715",
+    "arm_y_initial_payload_manifest_digest": "sha256:b1c5247cdbde54a55c1a8749e251cc2c7f469fe9226d9407c1c7c3c4051dfd62",
+    "arm_y_initial_payload_manifest_sha256": "sha256:e15a82b4379dc4ef008be33466579d07587a0fc1678cb1e95b896398a136ee0d",
+    "arm_y_initial_payload_digest": "sha256:aeb2d99d6cb7e8d6a37152a7af1abfacab4b06bae9b1aa9beb5167022d44f94c",
+    "s5_followup_operator_message_sha256": null,
+    "s5_followup_payload_manifest_digest": null,
+    "s5_followup_payload_manifest_sha256": null,
+    "s5_followup_payload_digest": null
+  },
   "rubric_version": "m2d-rubric-v1",
   "gate_policy_version": "m2d-gate-policy-v1",
-  "scenario_digest": "sha256:a9668623bb5078c663feebf15302e37cfdad2bcc352f62ea019a511cc64d752a"
+  "scenario_digest": "sha256:c313b19106cd2b217318b07aa3dc8c82de2733158237c0712b96c495f727ce86"
 }

@@ -34,7 +34,22 @@
   "adjudication_vector_ids": ["semantic_correctness", "repository_understanding_must_see_coverage", "engineering_decision_quality_tradeoffs", "explicit_unknowns_uncertainty", "constraint_violations", "validation_relevance_missed_risks", "maintainability_simplicity", "rework_required", "browser_continuity", "protocol_burden_visible_to_gpt"],
   "arm_construction": { "version": "m2d-arm-construction-v1", "baseline_type": "BASELINE_FLAT_CONTEXT_V1", "m2_type": "M2_VNEXT_CONTEXT_PACKAGE_V1", "initial_visible_paths": ["bdb_vnext/engineering_intelligence.py", "bdb_vnext/content_store.py", "bdb_vnext/context_transport.py", "tests/test_vnext_engineering_intelligence.py", "docs/m2c-vnext-engineering-intelligence.md"] },
   "context_seed": null,
+  "browser_assets": {
+    "version": "m2d-browser-assets-v1",
+    "arm_x_prompt_sha256": "sha256:3687c13237f7a3b73be8b1e335b87d0ba6cf0a0178db3b534bc544217c5d8e28",
+    "arm_y_prompt_sha256": "sha256:f9cffb175d0d3f813a149dd29067941d5a43194d9cbd360ad54d8d11859fc099",
+    "arm_x_initial_payload_manifest_digest": "sha256:779ac0261edd6ca2156f7c583651a0ec6327d0447ac40a958411a8d24159b072",
+    "arm_x_initial_payload_manifest_sha256": "sha256:b947c9dddc73ee53f98e2583a4a316ed55a8c51f540ac651ff58a8a0300df19e",
+    "arm_x_initial_payload_digest": "sha256:8834048aed92796808bfa095003f6914705a11a49d5bb837c2578487fa6429ce",
+    "arm_y_initial_payload_manifest_digest": "sha256:b48aeef02fcbcb72d220a07848d0338f2c0484a3aee88c7cf797c04619866b02",
+    "arm_y_initial_payload_manifest_sha256": "sha256:dadff77bb2dd466beeeb7f07e4326b218ac3f529dbbdbbdedc852ff9323d2e95",
+    "arm_y_initial_payload_digest": "sha256:032fcd74e281a1ceef72898ec832571d315ee2b1c7476cd7d875c93dea017267",
+    "s5_followup_operator_message_sha256": null,
+    "s5_followup_payload_manifest_digest": null,
+    "s5_followup_payload_manifest_sha256": null,
+    "s5_followup_payload_digest": null
+  },
   "rubric_version": "m2d-rubric-v1",
   "gate_policy_version": "m2d-gate-policy-v1",
-  "scenario_digest": "sha256:558f25fb8dec03d767742f52fb9117116ca04dbf9edf122bac9df59ec92be37b"
+  "scenario_digest": "sha256:3f03267defa50211cbb04a2b2be78b07d83ed4eb81310fb161cd4777658f4d11"
 }

@@ -34,7 +34,22 @@
   "adjudication_vector_ids": ["semantic_correctness", "repository_understanding_must_see_coverage", "constraint_violations", "validation_relevance_missed_risks", "maintainability_simplicity", "rework_required", "browser_continuity", "protocol_burden_visible_to_gpt"],
   "arm_construction": { "version": "m2d-arm-construction-v1", "baseline_type": "BASELINE_FLAT_CONTEXT_V1", "m2_type": "M2_VNEXT_CONTEXT_PACKAGE_V1", "initial_visible_paths": ["bdb_vnext/engineering_intelligence.py", "schemas/bdb-vnext-repository-understanding-v1.schema.json", "tests/test_vnext_engineering_intelligence.py", "docs/m2c-vnext-engineering-intelligence.md"] },
   "context_seed": null,
+  "browser_assets": {
+    "version": "m2d-browser-assets-v1",
+    "arm_x_prompt_sha256": "sha256:206573af9faa7d7d8202578e356cc83a5e2865328089d54549e81914e6479e12",
+    "arm_y_prompt_sha256": "sha256:82de2d63975fe0f905f9aa0015690a516e71a83d8bf35617aa11ea599be532a1",
+    "arm_x_initial_payload_manifest_digest": "sha256:6604f6e4dd8bc99c7f69cf3f178034401867aa678b9c0b19fe94038f40446fb3",
+    "arm_x_initial_payload_manifest_sha256": "sha256:1a54d19d972cdf8af0f94a3b92e65f03e7c8f0d67c1d5ff397de1e269c61a57b",
+    "arm_x_initial_payload_digest": "sha256:df1a4a77a772e5393dc0c3984a114786ce2fefc7c9f1f40ce9c39a479a32235f",
+    "arm_y_initial_payload_manifest_digest": "sha256:f06ac308c19c0b6dfdfd8153279840607f882b40c81b2e7fcfd11b5c5be6aecb",
+    "arm_y_initial_payload_manifest_sha256": "sha256:0f31c73b9ad81cdc1a6c7474891d6a3432062a58ac8507dd71361325d549c399",
+    "arm_y_initial_payload_digest": "sha256:ec4a512b7f694c9dc8c43e59d1c7f13e210cf684de353175990f58a55a524eba",
+    "s5_followup_operator_message_sha256": null,
+    "s5_followup_payload_manifest_digest": null,
+    "s5_followup_payload_manifest_sha256": null,
+    "s5_followup_payload_digest": null
+  },
   "rubric_version": "m2d-rubric-v1",
   "gate_policy_version": "m2d-gate-policy-v1",
-  "scenario_digest": "sha256:ed25a04c8d0aa4acf420b09cb6c73ef943ff4806d3ad17ee472b1d25cbbdf3a0"
+  "scenario_digest": "sha256:750674215a162ae1af07256bad848b23d1ec97cae841d95106dcbc777dd4ac74"
 }

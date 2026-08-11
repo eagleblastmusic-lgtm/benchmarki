@@ -4,7 +4,7 @@
   "title": "BDB vNext M2d Browser arm run v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "scenario_id", "scenario_digest", "arm_id", "arm_type", "repo_view", "evidence_universe_digest", "model", "browser", "task_text_digest", "started_at", "finished_at", "answer_markdown", "answer_sha256", "context_request_used", "protocol_burden_visible", "run_digest"],
+  "required": ["schema", "scenario_id", "scenario_digest", "arm_id", "arm_type", "repo_view", "evidence_universe_digest", "task_text_digest", "environment", "environment_digest", "conversation_steps", "context_request_used", "requested_source_paths", "protocol_burden_visible", "run_digest"],
   "properties": {
     "schema": { "const": "bdb-vnext-m2d-run-v1" },
     "scenario_id": { "pattern": "^S[1-5]$", "type": "string" },
@@ -13,13 +13,10 @@
     "arm_type": { "enum": ["BASELINE_FLAT_CONTEXT_V1", "M2_VNEXT_CONTEXT_PACKAGE_V1"] },
     "repo_view": { "$ref": "#/$defs/repoView" },
     "evidence_universe_digest": { "$ref": "#/$defs/digest" },
-    "model": { "$ref": "#/$defs/model" },
-    "browser": { "$ref": "#/$defs/browser" },
     "task_text_digest": { "$ref": "#/$defs/digest" },
-    "started_at": { "$ref": "#/$defs/timestamp" },
-    "finished_at": { "$ref": "#/$defs/timestamp" },
-    "answer_markdown": { "type": "string", "minLength": 1, "maxLength": 200000 },
-    "answer_sha256": { "$ref": "#/$defs/digest" },
+    "environment": { "$ref": "#/$defs/environment" },
+    "environment_digest": { "$ref": "#/$defs/digest" },
+    "conversation_steps": { "type": "array", "minItems": 1, "maxItems": 2, "items": { "$ref": "#/$defs/step" } },
     "context_request_used": { "type": "boolean" },
     "requested_source_paths": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
     "protocol_burden_visible": { "type": "boolean" },
@@ -37,17 +34,26 @@
         "tree_oid": { "pattern": "^[0-9a-f]{40,64}$", "type": "string" }, "view_id": { "$ref": "#/$defs/digest" }
       }
     },
-    "model": {
+    "environment": {
       "type": "object", "additionalProperties": false,
-      "required": ["product", "model_id", "reasoning_setting"],
-      "properties": { "product": { "const": "ChatGPT" }, "model_id": { "type": "string", "minLength": 1 }, "reasoning_setting": { "type": "string", "minLength": 1 } }
-    },
-    "browser": {
-      "type": "object", "additionalProperties": false,
-      "required": ["surface", "fresh_conversation", "same_visible_capability_class", "api_used"],
+      "required": ["product", "mode", "model_id", "reasoning_setting", "surface", "fresh_conversation", "same_visible_capability_class", "api_used"],
       "properties": {
-        "surface": { "const": "normal_chatgpt_browser" }, "fresh_conversation": { "type": "boolean" },
-        "same_visible_capability_class": { "type": "boolean" }, "api_used": { "const": false }
+        "product": { "const": "ChatGPT" }, "mode": { "type": "string", "minLength": 1 }, "model_id": { "type": "string", "minLength": 1 },
+        "reasoning_setting": { "type": "string", "minLength": 1 }, "surface": { "const": "normal_chatgpt_browser" },
+        "fresh_conversation": { "const": true }, "same_visible_capability_class": { "const": true }, "api_used": { "const": false }
+      }
+    },
+    "step": {
+      "type": "object", "additionalProperties": false,
+      "required": ["phase", "started_at", "finished_at", "prompt_digest", "payload_manifest_digest", "payload_digest", "operator_message_digest", "assistant_answer_markdown", "assistant_answer_sha256"],
+      "properties": {
+        "phase": { "enum": ["INITIAL", "FOLLOWUP"] },
+        "started_at": { "$ref": "#/$defs/timestamp" }, "finished_at": { "$ref": "#/$defs/timestamp" },
+        "prompt_digest": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+        "payload_manifest_digest": { "$ref": "#/$defs/digest" }, "payload_digest": { "$ref": "#/$defs/digest" },
+        "operator_message_digest": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+        "assistant_answer_markdown": { "type": "string", "minLength": 1, "maxLength": 200000 },
+        "assistant_answer_sha256": { "$ref": "#/$defs/digest" }
       }
     }
   }
