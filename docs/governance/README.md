@@ -7,6 +7,7 @@ Navigation index only. The linked documents are authoritative records in their s
 - [Etap 3 — Adversarial Architecture Review / Freeze v1](./BDB_ETAP3_ADVERSARIAL_ARCHITECTURE_REVIEW_FREEZE_V1_2026-08-09.md) — frozen canonical architecture authority.
 - [Etap 5 — Implementation Readiness / Migration Plan Freeze v1](./BDB_ETAP5_IMPLEMENTATION_READINESS_MIGRATION_PLAN_FREEZE_V1_2026-08-09.md) — frozen historical readiness record.
 - [Etap 6 — Canonical Execution Map / AI Implementation Playbook v1](./BDB_ETAP6_CANONICAL_EXECUTION_MAP_AI_IMPLEMENTATION_PLAYBOOK_V1_2026-08-09.md) — frozen execution guidance; only still-applicable portions remain in force.
+- [Plan delta — Deferred M2d Requalification](./BDB_PLAN_DELTA_DEFERRED_M2D_REQUALIFICATION_V1_2026-08-11.md) — scoped accepted dependency delta; M3a/M3b shadow exception only, with M2D-RQ1 hard gate before M3c.
 - [Plan v1.1.2 — BDB Next 1.0 Independent Side-by-Side Product Override](./BDB_MIGRATION_EXECUTION_PLAN_V1_1_2_BDB_NEXT_1_0_SIDE_BY_SIDE_PRODUCT_OVERRIDE_2026-08-09.md) — current canonical product/topology and late-stage execution override.
 - [Plan v1.1.1 — Canonical Parallel vNext Execution Override](./BDB_MIGRATION_EXECUTION_PLAN_V1_1_1_CANONICAL_PARALLEL_VNEXT_EXECUTION_OVERRIDE_2026-08-09.md) — current canonical execution override.
 - [Plan v1.1 — Parallel vNext Build](../BDB_MIGRATION_EXECUTION_PLAN_V1_1_PARALLEL_VNEXT_BUILD.md) — retained existing plan, unchanged.
@@ -15,12 +16,13 @@ Navigation index only. The linked documents are authoritative records in their s
 
 1. Fresh observed repo/runtime/external authority.
 2. Etap 3 — Architecture Freeze v1.
-3. Plan v1.1.2 — BDB Next 1.0 Independent Side-by-Side Product Override.
-4. Plan v1.1.1 — Canonical Parallel vNext Execution Override.
-5. Plan v1.1 — Parallel vNext Build.
-6. Still-applicable portions of Etap 6.
-7. Still-applicable portions of Etap 5.
-8. Latest verified Execution Handoff — evidence/status, not governance authority.
+3. Scoped Plan delta — Deferred M2d Requalification, only for M2d→M3c dependency semantics.
+4. Plan v1.1.2 — BDB Next 1.0 Independent Side-by-Side Product Override.
+5. Plan v1.1.1 — Canonical Parallel vNext Execution Override.
+6. Plan v1.1 — Parallel vNext Build.
+7. Still-applicable portions of Etap 6.
+8. Still-applicable portions of Etap 5.
+9. Latest verified Execution Handoff — evidence/status, not governance authority.
 
 ## Execution snapshot
 
@@ -32,6 +34,8 @@ Navigation index only. The linked documents are authoritative records in their s
 - R0b = `STOP / RECONCILIATION_REQUIRED / LEGACY EVIDENCE`; not a blocker for target-only vNext construction.
 - M1a-vNext = `DONE`; implementation commit = `de340e2564b233b8b395bdcc1dc96e8f733f44a7`
 - M2a / M1b-vNext / X1-vNext = `DONE`; X1 = `FINAL ACCEPT`
+- M2c = `ACCEPT_WITH_FINDINGS / REMEDIATED_UNREQUALIFIED`; M2d Attempt 2 = `FAIL` historical and immutable.
+- deferred M2d requalification = `PLAN FREEZE DISCREPANCY ACCEPTED`; M3a/M3b are bounded shadow exceptions only; `M2D-RQ1` is required before M3c.
 - governance packet introduction commit = `688d2be232a8dbbcb8cc982847d6df23d6a30858`; current `bdb-vnext` HEAD must always be established by fresh inspection under source precedence
 - vNext runtime/writer/activation = `OFF / OFF / OFF`
-- next READY EU = `X2 — NOT STARTED`
+- next READY EU = `M3a — bounded shadow implementation under the accepted deferred-M2d governance exception`
