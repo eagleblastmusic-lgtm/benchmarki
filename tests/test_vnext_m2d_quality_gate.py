@@ -28,6 +28,10 @@ from bdb_vnext.m2d_quality_gate import (
     _materialize_followup,
     _materialize_one,
     _seed_s5_resolution,
+    _S5_ACTUALLY_INCOMPLETE,
+    _S5_LEGAL_ONE_STEP,
+    _S5_LEGAL_TWO_STEP,
+    _s5_transcript_state,
     _validate_materialized_manifest,
     _validate_prompt_pair,
     _subject_view,
@@ -71,6 +75,7 @@ def _synthetic_pair(scenario_id: str, *, protocol_burden: bool = False, material
             "task_text_digest": task_text_digest(scenario),
             "step_count": 2 if scenario_id == "S5" else 1,
             "context_request_used": scenario_id == "S5",
+            "requested_source_paths": list(scenario["context_seed"]["requested_source_paths"]) if scenario_id == "S5" else [],
             "protocol_burden_visible": protocol_burden,
         }
     vectors = [
@@ -118,6 +123,14 @@ def _expect_evaluation_error(callback, code: str) -> None:
         assert exc.code == code
     else:
         raise AssertionError(f"expected {code}")
+
+
+def _refresh_synthetic_pair(evaluation: dict, runs: dict[str, dict]) -> None:
+    for run in runs.values():
+        run["run_digest"] = run_digest(run)
+    evaluation["arm_x_run_digest"] = runs["X"]["run_digest"]
+    evaluation["arm_y_run_digest"] = runs["Y"]["run_digest"]
+    evaluation["evaluation_digest"] = evaluation_digest(evaluation)
 
 
 def _s5_scenario() -> dict:
@@ -466,6 +479,87 @@ def test_evaluation_vector_and_integrity_contract_rejects_malformed_records() ->
     protocol_eval["context_request"]["protocol_bookkeeping_required"] = False
     protocol_eval["evaluation_digest"] = evaluation_digest(protocol_eval)
     _expect_evaluation_error(lambda: validate_pair_evaluation(protocol_eval, s5, validated_runs=protocol_runs), "evaluation_protocol_burden_mismatch")
+
+
+def test_s5_asymmetric_legal_one_and_two_step_transcripts_validate() -> None:
+    scenario, runs, evaluation = _synthetic_pair("S5")
+    runs["X"]["step_count"] = 1
+    runs["X"]["requested_source_paths"] = [
+        "bdb_vnext/content_store.py",
+        "bdb_vnext/context_transport.py",
+    ]
+    _refresh_synthetic_pair(evaluation, runs)
+
+    assert _s5_transcript_state(runs["X"], scenario) == _S5_LEGAL_ONE_STEP
+    assert _s5_transcript_state(runs["Y"], scenario) == _S5_LEGAL_TWO_STEP
+    validated = validate_pair_evaluation(evaluation, scenario, validated_runs=runs)
+    assert validated["s5_transcript_states"] == {
+        "X": _S5_LEGAL_ONE_STEP,
+        "Y": _S5_LEGAL_TWO_STEP,
+    }
+
+
+def test_s5_both_legal_two_step_transcripts_validate() -> None:
+    scenario, runs, evaluation = _synthetic_pair("S5")
+
+    assert _s5_transcript_state(runs["X"], scenario) == _S5_LEGAL_TWO_STEP
+    assert _s5_transcript_state(runs["Y"], scenario) == _S5_LEGAL_TWO_STEP
+    validated = validate_pair_evaluation(evaluation, scenario, validated_runs=runs)
+    assert validated["s5_transcript_states"] == {
+        "X": _S5_LEGAL_TWO_STEP,
+        "Y": _S5_LEGAL_TWO_STEP,
+    }
+
+
+def test_s5_required_followup_missing_is_incomplete() -> None:
+    scenario, runs, evaluation = _synthetic_pair("S5")
+    runs["X"]["step_count"] = 1
+    runs["X"]["requested_source_paths"] = ["bdb_vnext/content_store.py"]
+    _refresh_synthetic_pair(evaluation, runs)
+
+    assert _s5_transcript_state(runs["X"], scenario) == _S5_ACTUALLY_INCOMPLETE
+    _expect_evaluation_error(
+        lambda: validate_pair_evaluation(evaluation, scenario, validated_runs=runs),
+        "s5_incomplete_transcript",
+    )
+
+
+def test_s5_out_of_universe_request_remains_one_step_evaluator_visible(tmp_path: Path) -> None:
+    requested = ["bdb_vnext/content_store.py", "bdb_vnext/context_transport.py"]
+    run, scenario, output = _v2_run(
+        tmp_path,
+        arm_id="Y",
+        context_request_used=True,
+        requested_source_paths=requested,
+    )
+    validated = validate_arm_run(
+        run,
+        scenario,
+        packet_root=ROOT / "benchmarks" / "m2d",
+        materialized_root=output,
+    )
+
+    assert validated["step_count"] == 1
+    assert _s5_transcript_state(validated, scenario) == _S5_LEGAL_ONE_STEP
+
+
+def test_s5_historical_inconclusive_one_step_disposition_is_preserved() -> None:
+    scenario, runs, evaluation = _synthetic_pair("S5")
+    runs["X"]["step_count"] = 1
+    runs["X"]["requested_source_paths"] = [
+        "bdb_vnext/content_store.py",
+        "bdb_vnext/context_transport.py",
+    ]
+    evaluation["context_request"].update({
+        "outcome": "INCONCLUSIVE",
+        "requested_exact_evidence": False,
+        "answer_improved_or_narrowed": False,
+    })
+    _refresh_synthetic_pair(evaluation, runs)
+
+    validated = validate_pair_evaluation(evaluation, scenario, validated_runs=runs)
+    assert validated["evaluation"]["context_request"]["outcome"] == "INCONCLUSIVE"
+    assert validated["s5_transcript_states"]["X"] == _S5_LEGAL_ONE_STEP
 
 
 def _complete_validated_synthetic(*, protocol_scenario: str | None = None) -> list[dict]:

@@ -74,6 +74,9 @@ _CORE_IMPROVEMENT_VECTOR_IDS = frozenset({
     "rework_required",
 })
 _CONTEXT_REQUEST_OUTCOMES = frozenset({"NOT_APPLICABLE", "NOT_REQUESTED", "RESOLVED", "DENIED", "UNAVAILABLE", "INCONCLUSIVE"})
+_S5_LEGAL_ONE_STEP = "LEGAL_ONE_STEP"
+_S5_LEGAL_TWO_STEP = "LEGAL_TWO_STEP"
+_S5_ACTUALLY_INCOMPLETE = "ACTUALLY_INCOMPLETE"
 _EXACT_SHA256_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])sha256:[0-9a-f]{64}(?![A-Za-z0-9])")
 
 
@@ -1291,6 +1294,7 @@ def validate_arm_run(
         "task_text_digest": run["task_text_digest"],
         "step_count": len(steps),
         "context_request_used": run["context_request_used"],
+        "requested_source_paths": list(run["requested_source_paths"]),
         "protocol_burden_visible": run["protocol_burden_visible"],
     }
 
@@ -1316,6 +1320,36 @@ def _evaluation_identity_payload(evaluation: Mapping[str, Any]) -> dict[str, Any
 
 def evaluation_digest(evaluation: Mapping[str, Any]) -> str:
     return semantic_digest(_evaluation_identity_payload(evaluation))
+
+
+def _s5_transcript_state(run: Mapping[str, Any], scenario: Mapping[str, Any]) -> str:
+    """Classify one S5 transcript without judging the answer quality.
+
+    A request containing any path outside the frozen follow-up universe cannot
+    receive the operator follow-up, so a completed one-step observation is
+    evaluator-visible evidence.  A request wholly inside that universe admits
+    a follow-up and is incomplete until the second step is present.
+    """
+
+    if scenario["scenario_id"] != "S5":
+        raise ValueError("S5 transcript classification is only defined for S5")
+    step_count = run.get("step_count")
+    requested_paths = run.get("requested_source_paths")
+    if not isinstance(step_count, int) or step_count < 1:
+        return _S5_ACTUALLY_INCOMPLETE
+    if not isinstance(requested_paths, (list, tuple)):
+        return _S5_ACTUALLY_INCOMPLETE
+    if not all(isinstance(path, str) and path for path in requested_paths):
+        return _S5_ACTUALLY_INCOMPLETE
+    if step_count == 2:
+        frozen_paths = set(scenario["context_seed"]["requested_source_paths"])
+        return _S5_LEGAL_TWO_STEP if set(requested_paths).issubset(frozen_paths) else _S5_ACTUALLY_INCOMPLETE
+    if step_count != 1:
+        return _S5_ACTUALLY_INCOMPLETE
+    if not run.get("context_request_used"):
+        return _S5_LEGAL_ONE_STEP
+    frozen_paths = set(scenario["context_seed"]["requested_source_paths"])
+    return _S5_ACTUALLY_INCOMPLETE if set(requested_paths).issubset(frozen_paths) else _S5_LEGAL_ONE_STEP
 
 
 def validate_pair_evaluation(
@@ -1373,14 +1407,27 @@ def validate_pair_evaluation(
     protocol_vector = next((vector for vector in vectors if vector["vector_id"] == "protocol_burden_visible_to_gpt"), None)
     if protocol_vector is not None and derived_protocol_burden:
         _require(protocol_vector["judgment"] != "N/A", "evaluation_protocol_vector_inconsistent", scenario["scenario_id"])
-    if scenario["scenario_id"] == "S5" and evaluation["context_request"].get("outcome") == "RESOLVED":
-        _require(x["step_count"] == 2 and y["step_count"] == 2, "s5_incomplete_transcript", "S5")
+    transcript_states: dict[str, str] | None = None
+    if scenario["scenario_id"] == "S5":
+        transcript_states = {
+            "X": _s5_transcript_state(x, scenario),
+            "Y": _s5_transcript_state(y, scenario),
+        }
+        if evaluation["context_request"].get("outcome") == "RESOLVED":
+            incomplete = [arm for arm, state in transcript_states.items() if state == _S5_ACTUALLY_INCOMPLETE]
+            _require(
+                not incomplete,
+                "s5_incomplete_transcript",
+                "S5",
+                transcript_states=transcript_states,
+            )
     derived_hard_failures = ["protocol_bookkeeping_required"] if derived_protocol_burden else []
     return {
         "scenario_id": scenario["scenario_id"],
         "fairness": fairness,
         "evaluation": evaluation,
         "derived_hard_failures": derived_hard_failures,
+        "s5_transcript_states": transcript_states,
     }
 
 
