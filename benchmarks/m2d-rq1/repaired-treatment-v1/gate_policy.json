@@ -1,0 +1,28 @@
+{
+  "schema": "bdb-vnext-m2d-gate-policy-v1",
+  "gate_policy_version": "m2d-gate-policy-v1",
+  "required_scenarios": ["S1", "S2", "S3", "S4", "S5"],
+  "small_task_scenarios": ["S1", "S2"],
+  "complex_task_scenarios": ["S3", "S4", "S5"],
+  "required_context_request_scenario": "S5",
+  "required_browser_surface": "normal_chatgpt_browser",
+  "baseline_arm_type": "BASELINE_FLAT_CONTEXT_V1",
+  "m2_arm_type": "M2_VNEXT_CONTEXT_PACKAGE_V1",
+  "hard_failure_vectors": [
+    "source_authority_violation",
+    "stale_or_mixed_repo_view",
+    "fabricated_fact_treated_as_source",
+    "hidden_material_must_see_omission",
+    "silent_unknown_suppression",
+    "material_safety_or_correctness_regression",
+    "different_evidence_universe",
+    "different_model_or_capability",
+    "browser_path_degraded",
+    "protocol_bookkeeping_required"
+  ],
+  "small_task_rule": "ARM Y must be BETTER or EQUIVALENT on task-relevant vectors, with no hard failure, material correctness regression, material Browser regression, or materially greater avoidable procedure/rework.",
+  "complex_task_rule": "At least one of S3/S4/S5 must show a material ARM Y improvement in must-see coverage, root cause/ownership, explicit unknowns, constraints, trade-offs, source-vs-inference discipline, or avoidable rework, with no hard failure.",
+  "context_request_rule": "S5 must show a visible gap, an exact evidence request, a resolved ContextResolution, preserved unrelated gaps, and an improved or safely narrowed answer.",
+  "no_aggregate_score": true,
+  "outcomes": ["PASS", "FAIL", "INCONCLUSIVE", "READY_FOR_BROWSER_EXECUTION"]
+}

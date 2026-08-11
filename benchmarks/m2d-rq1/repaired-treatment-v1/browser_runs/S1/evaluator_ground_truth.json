@@ -1,0 +1,32 @@
+{
+  "schema": "bdb-vnext-m2d-ground-truth-v1",
+  "scenario_id": "S1",
+  "scenario_digest": "sha256:a1f2a49401afe7ef404ed3147869ae667fb3e4ba6c5de7325aa66bbf2e38827c",
+  "evidence_universe_digest": "sha256:479ec3cd06e4366f51257f3630bb23ab746cd3f9cf8d55b109eed3de789cb81e",
+  "must_see_item_ids": [
+    "S1-MS-01",
+    "S1-MS-02",
+    "S1-MS-03",
+    "S1-MS-04",
+    "S1-MS-05"
+  ],
+  "hard_failure_vectors": [
+    "source_authority_violation",
+    "fabricated_fact_treated_as_source",
+    "hidden_material_must_see_omission",
+    "silent_unknown_suppression",
+    "protocol_bookkeeping_required"
+  ],
+  "source_vs_inference_requirements": [
+    "A source_label is metadata, not proof of committed bytes.",
+    "Parser roundtrip is not live source-authority validation."
+  ],
+  "arm_map": {
+    "X": "BASELINE_FLAT_CONTEXT_V1",
+    "Y": "M2_VNEXT_CONTEXT_PACKAGE_V1"
+  },
+  "context_request": {
+    "required": false,
+    "seeded_scenario": false
+  }
+}
