@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-presentation-witness-v1",
+  "type": "object",
+  "required": ["schema", "witness_id", "binding_id", "publication_id", "consumer_id", "conversation_id", "result_digest", "marker", "raw_ref", "observed_at"],
+  "properties": {
+    "schema": {"const": "bdb-vnext-presentation-witness-v1"},
+    "witness_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "binding_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "publication_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "consumer_id": {"type": "string"},
+    "conversation_id": {"type": "string"},
+    "result_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "marker": {"type": "string"},
+    "raw_ref": {"type": "object"},
+    "observed_at": {"type": "string"}
+  },
+  "additionalProperties": false
+}

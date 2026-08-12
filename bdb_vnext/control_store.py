@@ -46,7 +46,7 @@ def _fail(code: str, message: str) -> NoReturn:
     raise ControlStoreError(code, message)
 
 
-def _schema_checksum(*, include_m4b: bool = True, include_m4c: bool = True) -> str:
+def _schema_checksum(*, include_m4b: bool = True, include_m4c: bool = True, include_n4: bool = True) -> str:
     tables = {
         "m2": ["m2b_accepted_bindings"],
         "m3": [
@@ -79,6 +79,14 @@ def _schema_checksum(*, include_m4b: bool = True, include_m4c: bool = True) -> s
             "m4c_disposition_heads",
             "m4c_evidence_gaps",
         ]
+    if include_n4:
+        tables["n4"] = [
+            "n4_publications",
+            "n4_consumer_bindings",
+            "n4_consumer_cursors",
+            "n4_presentation_witnesses",
+            "n4_resume_capsules",
+        ]
     return semantic_digest(
         {
             "schema": CONTROL_IDENTITY_SCHEMA,
@@ -88,8 +96,9 @@ def _schema_checksum(*, include_m4b: bool = True, include_m4c: bool = True) -> s
 
 
 CONTROL_SCHEMA_CHECKSUM = _schema_checksum()
-CONTROL_PRE_N3_SCHEMA_CHECKSUM = _schema_checksum(include_m4c=False)
-CONTROL_PRE_N2_SCHEMA_CHECKSUM = _schema_checksum(include_m4b=False, include_m4c=False)
+CONTROL_PRE_N4_SCHEMA_CHECKSUM = _schema_checksum(include_n4=False)
+CONTROL_PRE_N3_SCHEMA_CHECKSUM = _schema_checksum(include_m4c=False, include_n4=False)
+CONTROL_PRE_N2_SCHEMA_CHECKSUM = _schema_checksum(include_m4b=False, include_m4c=False, include_n4=False)
 
 
 def expected_identity() -> dict[str, str]:
@@ -151,9 +160,11 @@ def ensure_identity(connection: sqlite3.Connection) -> dict[str, str]:
     if rows and rows != expected:
         legacy_n3 = dict(expected)
         legacy_n3["schema_checksum"] = CONTROL_PRE_N3_SCHEMA_CHECKSUM
+        legacy_n4 = dict(expected)
+        legacy_n4["schema_checksum"] = CONTROL_PRE_N4_SCHEMA_CHECKSUM
         legacy_n2 = dict(expected)
         legacy_n2["schema_checksum"] = CONTROL_PRE_N2_SCHEMA_CHECKSUM
-        if rows != legacy_n3 and rows != legacy_n2:
+        if rows != legacy_n4 and rows != legacy_n3 and rows != legacy_n2:
             _fail("control_identity_mismatch", "Control DB identity differs from the canonical vNext generation")
         try:
             connection.execute(
@@ -283,6 +294,7 @@ __all__ = [
     "CONTROL_METADATA_TABLE",
     "CONTROL_MIGRATION_ID",
     "CONTROL_SCHEMA_CHECKSUM",
+    "CONTROL_PRE_N4_SCHEMA_CHECKSUM",
     "CONTROL_PRE_N2_SCHEMA_CHECKSUM",
     "CONTROL_PRE_N3_SCHEMA_CHECKSUM",
     "ControlStoreError",

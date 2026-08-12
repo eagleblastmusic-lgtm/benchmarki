@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-resume-capsule-v1",
+  "type": "object",
+  "required": ["schema", "capsule_id", "source_consumer_id", "target_consumer_id", "publication_id", "content_ref", "payload_digest"],
+  "properties": {
+    "schema": {"const": "bdb-vnext-resume-capsule-v1"},
+    "capsule_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "source_consumer_id": {"type": "string"},
+    "target_consumer_id": {"type": "string"},
+    "publication_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "content_ref": {"type": "object"},
+    "payload_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "created_at": {"type": "string"}
+  },
+  "additionalProperties": false
+}

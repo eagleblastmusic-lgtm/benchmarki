@@ -349,6 +349,8 @@ class VNextControlPlane:
     work_kernel: Any
     candidate_store: Any
     evidence_store: Any
+    publication_store: Any
+    operator_query: Any
 
     @property
     def candidate(self) -> Any:
@@ -360,7 +362,18 @@ class VNextControlPlane:
     def evidence(self) -> Any:
         return self.evidence_store
 
+    @property
+    def publication(self) -> Any:
+        return self.publication_store
+
+    @property
+    def query(self) -> Any:
+        """The read-only canonical N4 operator query boundary."""
+
+        return self.operator_query
+
     def close(self) -> None:
+        self.publication_store.close()
         self.evidence_store.close()
         self.candidate_store.close()
         self.work_kernel.close()
@@ -754,6 +767,7 @@ class VNextCompositionRoot:
         from bdb_vnext.content_store import DurableBindingStore
         from bdb_vnext.candidate import CandidateStore
         from bdb_vnext.m4c_evidence import EvidenceStore
+        from bdb_vnext.n4_publication import CanonicalOperatorQuery, PublicationStore
         from bdb_vnext.m3c_admission import _open_vnext_admission_composition
         from bdb_vnext.m4a_work_kernel import WorkKernelStore
 
@@ -761,6 +775,7 @@ class VNextCompositionRoot:
         admission = None
         candidate = None
         evidence = None
+        publication = None
         work_kernel = None
         try:
             bindings = DurableBindingStore(self._runtime_root)
@@ -781,8 +796,26 @@ class VNextCompositionRoot:
                 work_kernel=work_kernel,
             )
             evidence = EvidenceStore(self._runtime_root, content_store=bindings.content_store, candidate_store=candidate)
-            return VNextControlPlane(self, bindings, admission, work_kernel, candidate, evidence)
+            publication = PublicationStore(
+                self._runtime_root,
+                content_store=bindings.content_store,
+                task_authority=admission.authority,
+                work_kernel=work_kernel,
+                candidate_store=candidate,
+                evidence_store=evidence,
+            )
+            operator_query = CanonicalOperatorQuery(
+                self,
+                admission=admission,
+                work_kernel=work_kernel,
+                candidate_store=candidate,
+                evidence_store=evidence,
+                publication_store=publication,
+            )
+            return VNextControlPlane(self, bindings, admission, work_kernel, candidate, evidence, publication, operator_query)
         except Exception:
+            if publication is not None:
+                publication.close()
             if evidence is not None:
                 evidence.close()
             if candidate is not None:

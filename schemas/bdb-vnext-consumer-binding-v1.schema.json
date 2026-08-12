@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-consumer-binding-v1",
+  "type": "object",
+  "required": ["schema", "binding_id", "publication_id", "consumer_id", "consumer_kind", "generation", "presentation"],
+  "properties": {
+    "schema": {"const": "bdb-vnext-consumer-binding-v1"},
+    "binding_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "publication_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "consumer_id": {"type": "string"},
+    "consumer_kind": {"enum": ["BROWSER", "OPERATOR"]},
+    "conversation_id": {"type": ["string", "null"]},
+    "profile_id": {"type": ["string", "null"]},
+    "generation": {"type": "string"},
+    "intent_revision_id": {"type": "string"},
+    "cursor_sequence": {"type": "integer", "minimum": 0},
+    "cursor_publication_id": {"type": ["string", "null"]},
+    "presentation": {"enum": ["PRESENTED", "UNKNOWN"]},
+    "presentation_reason": {"type": ["string", "null"]},
+    "witness_id": {"type": ["string", "null"]},
+    "updated_at": {"type": "string"}
+  },
+  "additionalProperties": false
+}

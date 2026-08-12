@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-n4-operator-view-v1",
+  "type": "object",
+  "required": ["schema", "contract_version", "generation", "freshness", "subject", "task", "work", "evidence", "publications", "consumer_bindings", "resume", "future", "query_digest"],
+  "properties": {
+    "schema": {"const": "bdb-vnext-n4-operator-view-v1"},
+    "contract_version": {"type": "string"},
+    "generation": {"type": "string"},
+    "freshness": {"type": "object", "required": ["state", "watermark"]},
+    "subject": {"type": "object", "required": ["kind", "state"]},
+    "task": {"type": "object"},
+    "work": {"type": "object"},
+    "evidence": {"type": "object"},
+    "publications": {"type": "array"},
+    "consumer_bindings": {"type": "array"},
+    "resume": {"type": "object"},
+    "future": {"type": "object"},
+    "query_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

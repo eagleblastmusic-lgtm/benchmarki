@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-publication-v1",
+  "type": "object",
+  "required": ["schema", "publication_id", "task_id", "work_id", "intent_revision_id", "result_ref", "result_digest", "consumer_id", "consumer_kind", "generation", "sequence"],
+  "properties": {
+    "schema": {"const": "bdb-vnext-publication-v1"},
+    "publication_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "request_id": {"type": "string"},
+    "task_id": {"type": "string"},
+    "work_id": {"type": "string"},
+    "intent_revision_id": {"type": "string"},
+    "result_ref": {"type": "object"},
+    "result_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "candidate_id": {"type": ["string", "null"]},
+    "candidate_view_id": {"type": ["string", "null"]},
+    "evidence_id": {"type": ["string", "null"]},
+    "evaluation_id": {"type": ["string", "null"]},
+    "disposition_id": {"type": ["string", "null"]},
+    "consumer_id": {"type": "string"},
+    "consumer_kind": {"enum": ["BROWSER", "OPERATOR"]},
+    "conversation_id": {"type": ["string", "null"]},
+    "profile_id": {"type": ["string", "null"]},
+    "generation": {"type": "string"},
+    "sequence": {"type": "integer", "minimum": 1},
+    "created_at": {"type": "string"}
+  },
+  "additionalProperties": false
+}

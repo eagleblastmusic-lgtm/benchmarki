@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-consumer-cursor-v1",
+  "type": "object",
+  "required": ["schema", "consumer_id", "generation", "sequence"],
+  "properties": {
+    "schema": {"const": "bdb-vnext-consumer-cursor-v1"},
+    "consumer_id": {"type": "string"},
+    "generation": {"type": "string"},
+    "sequence": {"type": "integer", "minimum": 0},
+    "publication_id": {"type": ["string", "null"]},
+    "updated_at": {"type": "string"}
+  },
+  "additionalProperties": false
+}
