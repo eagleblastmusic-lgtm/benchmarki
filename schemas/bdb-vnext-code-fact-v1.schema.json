@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-code-fact-provider-v1",
+  "title": "BDB vNext source-bound CodeFact provider result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "repo_view", "provider_id", "provider_version", "configuration_digest", "language", "source_paths", "facts", "covered_dimensions", "gaps", "materialization_digest"],
+  "properties": {
+    "schema": {"const": "bdb-vnext-code-fact-provider-v1"},
+    "repo_view": {"$ref": "bdb-vnext-repo-view-v1.schema.json"},
+    "provider_id": {"type": "string", "minLength": 1},
+    "provider_version": {"type": "string", "minLength": 1},
+    "configuration_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "language": {"type": "string", "minLength": 1},
+    "source_paths": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "facts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema", "fact_id", "repo_view", "provider_id", "provider_version", "configuration_digest", "language", "coverage", "path", "source_object_id", "kind", "name", "range", "details"],
+        "properties": {
+          "schema": {"const": "bdb-vnext-code-fact-v1"},
+          "fact_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "repo_view": {"$ref": "bdb-vnext-repo-view-v1.schema.json"},
+          "provider_id": {"type": "string", "minLength": 1},
+          "provider_version": {"type": "string", "minLength": 1},
+          "configuration_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "language": {"type": "string", "minLength": 1},
+          "coverage": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "path": {"type": "string", "minLength": 1},
+          "source_object_id": {"type": "string", "minLength": 1},
+          "kind": {"type": "string", "minLength": 1},
+          "name": {"type": "string", "minLength": 1},
+          "range": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["start_line", "start_column", "end_line", "end_column"],
+            "properties": {
+              "start_line": {"type": "integer", "minimum": 0},
+              "start_column": {"type": "integer", "minimum": 0},
+              "end_line": {"type": "integer", "minimum": 0},
+              "end_column": {"type": "integer", "minimum": 0}
+            }
+          },
+          "details": {"type": "object"}
+        }
+      }
+    },
+    "covered_dimensions": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "gaps": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "materialization_digest": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}

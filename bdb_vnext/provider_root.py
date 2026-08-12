@@ -751,6 +751,37 @@ class VNextCompositionRoot:
     def query(self, resource: RepositoryResource, view: CommittedRepoView) -> RepoViewQuery:
         return self.repo_view_provider().query(resource, view)
 
+    def fallback_code_fact_provider(self) -> Any:
+        """Return the removable lower-coverage EI provider through this root."""
+
+        from bdb_vnext.code_intelligence import FallbackCodeFactProvider
+
+        return FallbackCodeFactProvider()
+
+    def tree_sitter_code_fact_provider(self) -> Any:
+        """Return the optional exact Python syntax provider through this root."""
+
+        from bdb_vnext.code_intelligence import TreeSitterPythonProvider
+
+        return TreeSitterPythonProvider()
+
+    def lsp_code_fact_provider(
+        self,
+        command: Iterable[str],
+        *,
+        server_identity: str,
+        timeout_seconds: float = 8.0,
+    ) -> Any:
+        """Construct one explicit read-only LSP adapter; no discovery is used."""
+
+        from bdb_vnext.code_intelligence import LspCodeFactProvider
+
+        return LspCodeFactProvider(
+            tuple(command),
+            server_identity=server_identity,
+            timeout_seconds=timeout_seconds,
+        )
+
     def open_control_plane(
         self,
         *,
