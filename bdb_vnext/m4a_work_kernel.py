@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Literal, NoReturn
 
 from bdb_shared.evidence import canonical_json_bytes, semantic_digest
+from bdb_vnext.control_store import assert_database_path, ensure_identity
 from bdb_vnext.composition import VNextLayout
 from bdb_vnext.m3c_admission import (
     M3C_PROTOCOL_GENERATION,
@@ -40,13 +41,13 @@ M4A_QUERY_SCHEMA = "bdb-vnext-m4a-work-query-v1"
 M4A_WRITER_ID = "m4a-vnext-work-kernel-writer"
 M4A_AUTHORITY_ID = "devmaster.bdb.vnext.work-kernel"
 M4A_PROTOCOL_GENERATION = M3C_PROTOCOL_GENERATION
-M4A_DATABASE_NAME = "m4a-work-kernel.db"
+M4A_DATABASE_NAME = "control.db"
 M4A_BUSY_TIMEOUT_MS = 250
 M4A_MAX_FACT_BYTES = 64 * 1024
 
-WorkDisposition = Literal["READY", "RUNNING", "WAITING", "TERMINAL", "CANCELLED"]
+WorkDisposition = Literal["READY", "RUNNING", "WAITING", "FINISHED"]
 RunStatus = Literal["ACTIVE", "FINISHED"]
-RunOutcome = Literal["SUCCEEDED", "FAILED", "ABORTED", "UNKNOWN"]
+RunOutcome = Literal["SUCCEEDED", "FAILED", "CANCELLED"]
 EffectCertainty = Literal["NOT_ASSESSED", "CERTAIN", "POSSIBLE", "UNKNOWN"]
 WaitStatus = Literal["OPEN", "RESOLVED"]
 LeaseState = Literal["ACTIVE", "RELEASED", "EXPIRED"]
@@ -318,7 +319,7 @@ class WorkKernelStore:
             _fail("task_authority_mismatch", "M3 authority and M4a store must share the exact vNext root")
         self.task_authority = task_authority
         self.control_root = self.root / "control"
-        self.database_path = self.control_root / M4A_DATABASE_NAME
+        self.database_path = assert_database_path(self.root, self.control_root / M4A_DATABASE_NAME)
         self.config_path = self.control_root / "m4a-work-kernel.json"
         self._busy_timeout_ms = busy_timeout_ms
         self._clock = clock or time.time
@@ -332,6 +333,7 @@ class WorkKernelStore:
                 isolation_level=None,
             )
             self._configure()
+            ensure_identity(self._connection)
             self._ensure_config()
             self._ensure_schema()
         except M4aError:
@@ -397,6 +399,7 @@ class WorkKernelStore:
             _fail("store_config_write_failed", "M4a config could not be written")
 
     def _ensure_schema(self) -> None:
+        self._migrate_legacy_disposition_schema()
         sql = """
             CREATE TABLE IF NOT EXISTS m4a_sequence (
                 id INTEGER PRIMARY KEY CHECK(id = 1),
@@ -407,7 +410,7 @@ class WorkKernelStore:
                 work_id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL,
                 kind TEXT NOT NULL,
-                disposition TEXT NOT NULL CHECK(disposition IN ('READY','RUNNING','WAITING','TERMINAL','CANCELLED')),
+                disposition TEXT NOT NULL CHECK(disposition IN ('READY','RUNNING','WAITING','FINISHED')),
                 state_version INTEGER NOT NULL CHECK(state_version >= 0),
                 created_order INTEGER NOT NULL,
                 updated_order INTEGER NOT NULL,
@@ -418,7 +421,7 @@ class WorkKernelStore:
                 run_id TEXT PRIMARY KEY,
                 work_id TEXT NOT NULL REFERENCES m4a_work_items(work_id),
                 status TEXT NOT NULL CHECK(status IN ('ACTIVE','FINISHED')),
-                outcome TEXT CHECK(outcome IN ('SUCCEEDED','FAILED','ABORTED','UNKNOWN')),
+                outcome TEXT CHECK(outcome IN ('SUCCEEDED','FAILED','CANCELLED')),
                 effect_certainty TEXT NOT NULL CHECK(effect_certainty IN ('NOT_ASSESSED','CERTAIN','POSSIBLE','UNKNOWN')),
                 lease_id TEXT NOT NULL,
                 fence INTEGER NOT NULL CHECK(fence > 0),
@@ -480,6 +483,107 @@ class WorkKernelStore:
                 self._connection.executescript(sql)
         except sqlite3.DatabaseError as exc:
             _fail("schema_init_failed", "M4a Work Kernel schema could not be initialized")
+
+    def _migrate_legacy_disposition_schema(self) -> None:
+        """Map the completed M4a TERMINAL vocabulary without guessing state."""
+
+        row = self._connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='m4a_work_items'"
+        ).fetchone()
+        sql = "" if row is None or row[0] is None else str(row[0]).upper()
+        if "TERMINAL" not in sql:
+            return
+        try:
+            rows = self._connection.execute(
+                "SELECT work_id,disposition FROM m4a_work_items ORDER BY work_id"
+            ).fetchall()
+            for work_id, disposition in rows:
+                if str(disposition) != "CANCELLED":
+                    continue
+                try:
+                    outcome_row = self._connection.execute(
+                        "SELECT outcome FROM m4a_runs WHERE work_id=? ORDER BY started_order DESC LIMIT 1",
+                        (work_id,),
+                    ).fetchone()
+                except sqlite3.DatabaseError:
+                    outcome_row = None
+                if outcome_row is None or str(outcome_row[0]) != "CANCELLED":
+                    _fail(
+                        "lifecycle_migration_ambiguity",
+                        "legacy CANCELLED disposition has no exact terminal outcome",
+                        details={"work_id": str(work_id)},
+                    )
+            run_schema_row = self._connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='m4a_runs'"
+            ).fetchone()
+            run_sql = "" if run_schema_row is None or run_schema_row[0] is None else str(run_schema_row[0]).upper()
+            migrate_runs = "ABORTED" in run_sql or "UNKNOWN" in run_sql
+            if migrate_runs:
+                invalid_run = self._connection.execute(
+                    "SELECT run_id,outcome FROM m4a_runs WHERE outcome IS NOT NULL AND outcome NOT IN ('SUCCEEDED','FAILED','CANCELLED') LIMIT 1"
+                ).fetchone()
+                if invalid_run is not None:
+                    _fail(
+                        "lifecycle_migration_ambiguity",
+                        "legacy Run outcome cannot be represented by the frozen terminal outcome axis",
+                        details={"run_id": str(invalid_run[0]), "outcome": str(invalid_run[1])},
+                    )
+            self._connection.execute("PRAGMA foreign_keys=OFF")
+            self._connection.execute("BEGIN IMMEDIATE")
+            self._connection.execute(
+                "CREATE TABLE m4a_work_items_n1 ("
+                "work_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, kind TEXT NOT NULL,"
+                "disposition TEXT NOT NULL CHECK(disposition IN ('READY','RUNNING','WAITING','FINISHED')),"
+                "state_version INTEGER NOT NULL CHECK(state_version >= 0),"
+                "created_order INTEGER NOT NULL, updated_order INTEGER NOT NULL,"
+                "created_at REAL NOT NULL, updated_at REAL NOT NULL)"
+            )
+            self._connection.execute(
+                "INSERT INTO m4a_work_items_n1(work_id,task_id,kind,disposition,state_version,created_order,updated_order,created_at,updated_at) "
+                "SELECT work_id,task_id,kind,CASE WHEN disposition IN ('TERMINAL','CANCELLED') THEN 'FINISHED' ELSE disposition END,"
+                "state_version,created_order,updated_order,created_at,updated_at FROM m4a_work_items"
+            )
+            self._connection.execute("DROP TABLE m4a_work_items")
+            self._connection.execute("ALTER TABLE m4a_work_items_n1 RENAME TO m4a_work_items")
+            if migrate_runs:
+                self._connection.execute(
+                    "CREATE TABLE m4a_runs_n1 ("
+                    "run_id TEXT PRIMARY KEY, work_id TEXT NOT NULL REFERENCES m4a_work_items(work_id),"
+                    "status TEXT NOT NULL CHECK(status IN ('ACTIVE','FINISHED')),"
+                    "outcome TEXT CHECK(outcome IN ('SUCCEEDED','FAILED','CANCELLED')),"
+                    "effect_certainty TEXT NOT NULL CHECK(effect_certainty IN ('NOT_ASSESSED','CERTAIN','POSSIBLE','UNKNOWN')),"
+                    "lease_id TEXT NOT NULL, fence INTEGER NOT NULL CHECK(fence > 0),"
+                    "started_order INTEGER NOT NULL, ended_order INTEGER, UNIQUE(work_id, run_id))"
+                )
+                self._connection.execute(
+                    "INSERT INTO m4a_runs_n1 SELECT run_id,work_id,status,outcome,effect_certainty,lease_id,fence,started_order,ended_order FROM m4a_runs"
+                )
+                self._connection.execute("DROP TABLE m4a_runs")
+                self._connection.execute("ALTER TABLE m4a_runs_n1 RENAME TO m4a_runs")
+            if self._connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='m4a_transition_facts'"
+            ).fetchone() is not None:
+                self._connection.execute(
+                    "UPDATE m4a_transition_facts SET "
+                    "from_disposition=CASE WHEN from_disposition IN ('TERMINAL','CANCELLED') THEN 'FINISHED' ELSE from_disposition END, "
+                    "to_disposition=CASE WHEN to_disposition IN ('TERMINAL','CANCELLED') THEN 'FINISHED' ELSE to_disposition END"
+                )
+            self._connection.commit()
+        except M4aError:
+            if self._connection.in_transaction:
+                self._connection.rollback()
+            self._connection.execute("PRAGMA foreign_keys=ON")
+            raise
+        except sqlite3.DatabaseError as exc:
+            if self._connection.in_transaction:
+                self._connection.rollback()
+            self._connection.execute("PRAGMA foreign_keys=ON")
+            _fail("lifecycle_migration_failed", "legacy WorkItem disposition migration failed")
+        finally:
+            try:
+                self._connection.execute("PRAGMA foreign_keys=ON")
+            except sqlite3.DatabaseError:
+                pass
 
     def _now(self, value: float | None = None) -> float:
         return _finite_time(self._clock() if value is None else value, field="now")
@@ -828,7 +932,7 @@ class WorkKernelStore:
 
         def operation() -> ResourceClaim:
             work = self._require_work(work_id)
-            if str(work[3]) in {"TERMINAL", "CANCELLED"}:
+            if str(work[3]) == "FINISHED":
                 _fail("invalid_transition", "terminal WorkItem cannot claim a resource")
             self._require_lease(work_id, lease_id, fence, now=timestamp)
             work_claim = self._connection.execute(
@@ -1046,7 +1150,7 @@ class WorkKernelStore:
     ) -> RunRecord:
         work_id = _text(work_id, field="work_id")
         run_id = _text(run_id, field="run_id")
-        if outcome not in {"SUCCEEDED", "FAILED", "ABORTED", "UNKNOWN"}:
+        if outcome not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
             _fail("invalid_run_outcome", "Run outcome is unsupported")
         if effect_certainty not in {"NOT_ASSESSED", "CERTAIN", "POSSIBLE", "UNKNOWN"}:
             _fail("invalid_effect_certainty", "effect certainty is unsupported")
@@ -1077,8 +1181,8 @@ class WorkKernelStore:
                 _fail("run_ownership_mismatch", "current lease/fence does not own the active Run")
             order = self._next_order()
             self._connection.execute("UPDATE m4a_runs SET status='FINISHED',outcome=?,effect_certainty=?,ended_order=? WHERE run_id=? AND status='ACTIVE'", (outcome, effect_certainty, order, run_id))
-            version = self._bump_work(row, disposition="TERMINAL", order=order, now=timestamp)
-            self._append_fact(work_id=work_id, state_version=version, kind="run_finished", from_disposition=str(row[3]), to_disposition="TERMINAL", payload={"run_id": run_id, "outcome": outcome, "effect_certainty": effect_certainty}, created_order=order)
+            version = self._bump_work(row, disposition="FINISHED", order=order, now=timestamp)
+            self._append_fact(work_id=work_id, state_version=version, kind="run_finished", from_disposition=str(row[3]), to_disposition="FINISHED", payload={"run_id": run_id, "outcome": outcome, "effect_certainty": effect_certainty}, created_order=order)
             return self._run(self._connection.execute("SELECT run_id,work_id,status,outcome,effect_certainty,lease_id,fence,started_order,ended_order FROM m4a_runs WHERE run_id=?", (run_id,)).fetchone())  # type: ignore[arg-type]
 
         return self._write(operation, failpoint=failpoint)

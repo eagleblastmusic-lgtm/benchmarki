@@ -207,6 +207,7 @@ def test_shadow_store_has_no_legacy_receipt_or_spool_tables(tmp_path: Path) -> N
             for row in store._connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
         assert names == {
+            "vnext_control_metadata",
             "m3a_submissions",
             "m3a_tasks",
             "m3a_intent_revisions",

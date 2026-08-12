@@ -13,6 +13,7 @@ import json
 import os
 import re
 import stat
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -29,10 +30,16 @@ from bdb_vnext.composition import (
     VNextCompositionError,
     observe_bundle,
 )
+from bdb_vnext.control_store import (
+    ControlStoreError,
+    backup_identity,
+    validate_identity_document,
+)
 
 
 BUNDLE_SCHEMA = "bdb-vnext-runtime-bundle-v1"
 BACKUP_SCHEMA = "bdb-vnext-backup-manifest-v1"
+CONTROL_BACKUP_SCHEMA = "bdb-vnext-backup-manifest-v2"
 RESULT_SCHEMA = "bdb-vnext-bootstrap-result-v1"
 HEALTH_SCHEMA = "bdb-vnext-health-v1"
 RESTORE_RECEIPT_SCHEMA = "bdb-vnext-restore-receipt-v1"
@@ -675,23 +682,35 @@ def _actual_backup_files(root: Path) -> set[str]:
 
 
 def _validate_backup_document(document: Mapping[str, Any]) -> None:
+    schema = document.get("schema")
+    expected_fields = {
+        "schema",
+        "runtime_id",
+        "backup_id",
+        "source_root",
+        "required_control_schema",
+        "source_quiesced",
+        "subjects",
+        "sqlite_pair",
+        "manifest_sha256",
+    }
+    if schema == CONTROL_BACKUP_SCHEMA:
+        expected_fields.add("control_identity")
     _exact_keys(
         document,
-        {
-            "schema",
-            "runtime_id",
-            "backup_id",
-            "source_root",
-            "required_control_schema",
-            "source_quiesced",
-            "subjects",
-            "sqlite_pair",
-            "manifest_sha256",
-        },
+        expected_fields,
         field="backup_manifest",
     )
-    if document["schema"] != BACKUP_SCHEMA or document["runtime_id"] != RUNTIME_ID:
+    if schema not in {BACKUP_SCHEMA, CONTROL_BACKUP_SCHEMA} or document["runtime_id"] != RUNTIME_ID:
         _fail("invalid_backup_manifest", "backup schema or runtime identity is wrong")
+    if document["schema"] == CONTROL_BACKUP_SCHEMA:
+        if "control_identity" not in document:
+            _fail("invalid_backup_manifest", "unified Control DB backup is missing its identity")
+        identity = document["control_identity"]
+        if not isinstance(identity, Mapping):
+            _fail("invalid_backup_manifest", "control_identity must be an object")
+    elif "control_identity" in document:
+        _fail("invalid_backup_manifest", "v1 backup cannot carry a v2 Control DB identity")
     backup_id = document["backup_id"]
     if not isinstance(backup_id, str) or _ATTEMPT_ID.fullmatch(backup_id) is None:
         _fail("invalid_backup_manifest", "backup_id is invalid")
@@ -779,6 +798,18 @@ def _verify_backup_contents(root: Path, *, require_directory_name: bool) -> Back
     expected_files.add(_BACKUP_MANIFEST_NAME)
     if _actual_backup_files(root) != expected_files:
         _fail("backup_integrity_failure", "backup contains missing or foreign files")
+    if document["schema"] == CONTROL_BACKUP_SCHEMA:
+        try:
+            config_subject = next(subject for subject in observed_subjects if subject["name"] == "config")
+            config_files = config_subject["files"]
+            if config_subject["state"] != "present" or len(config_files) != 1:
+                _fail("backup_control_identity_invalid", "unified backup config identity is missing")
+            validate_identity_document(
+                document["control_identity"],
+                config_sha256=str(config_files[0]["sha256"]),
+            )
+        except ControlStoreError as exc:
+            _fail(exc.code, str(exc))
     return BackupArtifact(root, str(document["manifest_sha256"]), dict(document))
 
 
@@ -798,6 +829,7 @@ def create_coordinated_backup(
     source_is_quiesced: bool,
     copy_file: CopyFile | None = None,
     before_publish: PathHook | None = None,
+    include_control_identity: bool = False,
 ) -> BackupArtifact:
     """Publish one all-or-nothing backup directory on the same filesystem."""
 
@@ -817,6 +849,24 @@ def create_coordinated_backup(
 
     subjects, first_signature = _snapshot_declared(source)
     sqlite_pair = _sqlite_pair_document(source, subjects)
+    control_identity: dict[str, Any] | None = None
+    if include_control_identity:
+        control_path = _subject_path(source, DECLARED_VNEXT_BACKUP_SUBJECTS[0])
+        if not control_path.is_file():
+            _fail("control_identity_unavailable", "unified Control DB is required for a v2 backup")
+        try:
+            connection = sqlite3.connect(str(control_path))
+            try:
+                control_identity = backup_identity(
+                    connection,
+                    config_path=_subject_path(source, DECLARED_VNEXT_BACKUP_SUBJECTS[3]),
+                )
+            finally:
+                connection.close()
+        except ControlStoreError as exc:
+            _fail(exc.code, str(exc))
+        except sqlite3.DatabaseError as exc:
+            _fail("control_identity_unavailable", "unified Control DB identity could not be read")
     destination_root.mkdir(parents=True, exist_ok=True)
     final = destination_root / backup_id
     if final.exists():
@@ -841,7 +891,7 @@ def create_coordinated_backup(
         if first_signature != second_signature or subjects != second_subjects:
             _fail("moving_backup_source", "declared vNext resources changed during coordinated backup")
         payload: dict[str, Any] = {
-            "schema": BACKUP_SCHEMA,
+            "schema": CONTROL_BACKUP_SCHEMA if include_control_identity else BACKUP_SCHEMA,
             "runtime_id": RUNTIME_ID,
             "backup_id": backup_id,
             "source_root": str(source),
@@ -850,6 +900,8 @@ def create_coordinated_backup(
             "subjects": subjects,
             "sqlite_pair": sqlite_pair,
         }
+        if control_identity is not None:
+            payload["control_identity"] = control_identity
         document = {**payload, "manifest_sha256": _sha256_document(payload)}
         _write_new_json(staging / _BACKUP_MANIFEST_NAME, document)
         _verify_backup_contents(staging, require_directory_name=False)
@@ -886,6 +938,18 @@ def _verify_restored(root: Path, manifest: Mapping[str, Any]) -> str:
     }
     if _actual_backup_files(root) != expected_files:
         _fail("restore_integrity_failure", "restored target contains missing or foreign files")
+    if manifest["schema"] == CONTROL_BACKUP_SCHEMA:
+        try:
+            config_subject = next(subject for subject in observed_subjects if subject["name"] == "config")
+            config_files = config_subject["files"]
+            if config_subject["state"] != "present" or len(config_files) != 1:
+                _fail("restore_control_identity_invalid", "restored config identity is missing")
+            validate_identity_document(
+                manifest["control_identity"],
+                config_sha256=str(config_files[0]["sha256"]),
+            )
+        except ControlStoreError as exc:
+            _fail(exc.code, str(exc))
     identity = {
         "backup_manifest_sha256": manifest["manifest_sha256"],
         "subjects": observed_subjects,

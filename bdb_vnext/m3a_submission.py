@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Iterator, Literal, NoReturn
 
 from bdb_shared.evidence import canonical_json_bytes, semantic_digest
+from bdb_vnext.control_store import assert_database_path, ensure_identity
 
 
 M3A_SCHEMA = "bdb-vnext-m3a-submission-v1"
@@ -253,7 +254,8 @@ class ShadowSubmissionStore:
         self.config_root = self.root / "config"
         self.control_root.mkdir(parents=True, exist_ok=True)
         self.config_root.mkdir(parents=True, exist_ok=True)
-        self.database_path = self.control_root / "m3a-shadow.db"
+        # M3 owns only its table namespace; the physical DB is shared.
+        self.database_path = assert_database_path(self.root, self.control_root / "control.db")
         self.config_path = self.config_root / "m3a-shadow.json"
         self._busy_timeout_ms = busy_timeout_ms
         self._connection = sqlite3.connect(
@@ -264,6 +266,13 @@ class ShadowSubmissionStore:
         )
         self._connection_lock = threading.RLock()
         self._configure()
+        try:
+            ensure_identity(self._connection)
+        except Exception as exc:
+            self._connection.close()
+            if hasattr(exc, "code"):
+                _fail(str(getattr(exc, "code")), str(exc))
+            raise
         self._ensure_config()
         self._ensure_schema()
 
@@ -369,6 +378,12 @@ class ShadowSubmissionStore:
     @property
     def writer_id(self) -> str:
         return M3A_WRITER_ID
+
+    @property
+    def control_connection(self) -> sqlite3.Connection:
+        """Internal M3 control-plane connection; callers do not get raw SQL APIs."""
+
+        return self._connection
 
     def _task_id(self, request: ShadowSubmissionRequest) -> str:
         if request.task_id is not None:

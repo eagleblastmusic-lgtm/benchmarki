@@ -336,36 +336,96 @@ class CanonicalVNextAdmissionAuthority:
         _write_canonical(self._control_marker, expected)
 
     def _ensure_kill_switch(self) -> None:
-        expected = {
+        expected_static = {
             "schema": M3C_KILL_SWITCH_SCHEMA,
             "authority_id": M3C_AUTHORITY_ID,
             "protocol_generation": M3C_PROTOCOL_GENERATION,
             "writer_id": M3C_WRITER_ID,
-            "admission_enabled": True,
         }
+        connection = self._store.control_connection
+        try:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS m3c_kill_switch ("
+                "id INTEGER PRIMARY KEY CHECK(id = 1),"
+                "schema TEXT NOT NULL, authority_id TEXT NOT NULL,"
+                "protocol_generation TEXT NOT NULL, writer_id TEXT NOT NULL,"
+                "admission_enabled INTEGER NOT NULL CHECK(admission_enabled IN (0,1)))"
+            )
+            row = connection.execute(
+                "SELECT schema,authority_id,protocol_generation,writer_id,admission_enabled "
+                "FROM m3c_kill_switch WHERE id=1"
+            ).fetchone()
+        except Exception as exc:
+            _fail("kill_switch_invalid", "M3c kill-switch state could not be read")
         if self._kill_switch_path.exists():
             current = _read_object(self._kill_switch_path, code="kill_switch_invalid")
-            if (
-                current.get("schema") != expected["schema"]
-                or current.get("authority_id") != expected["authority_id"]
-                or current.get("protocol_generation") != expected["protocol_generation"]
-                or current.get("writer_id") != expected["writer_id"]
-                or not isinstance(current.get("admission_enabled"), bool)
+            if any(current.get(key) != value for key, value in expected_static.items()) or not isinstance(
+                current.get("admission_enabled"), bool
             ):
                 _fail("kill_switch_invalid", "M3c kill switch identity differs")
-            return
-        _write_canonical(self._kill_switch_path, expected)
+            file_enabled = bool(current["admission_enabled"])
+        else:
+            file_enabled = True
+        if row is None:
+            try:
+                connection.execute(
+                    "INSERT INTO m3c_kill_switch(id,schema,authority_id,protocol_generation,writer_id,admission_enabled) "
+                    "VALUES (1,?,?,?,?,?)",
+                    (
+                        expected_static["schema"],
+                        expected_static["authority_id"],
+                        expected_static["protocol_generation"],
+                        expected_static["writer_id"],
+                        int(file_enabled),
+                    ),
+                )
+                connection.commit()
+            except Exception as exc:
+                _fail("kill_switch_invalid", "M3c kill-switch state could not be initialized")
+            enabled = file_enabled
+        else:
+            observed = {
+                "schema": str(row[0]),
+                "authority_id": str(row[1]),
+                "protocol_generation": str(row[2]),
+                "writer_id": str(row[3]),
+            }
+            if observed != expected_static or int(row[4]) not in {0, 1}:
+                _fail("kill_switch_invalid", "M3c kill switch database identity differs")
+            enabled = bool(row[4])
+        self._write_kill_switch_projection(enabled)
+
+    def _write_kill_switch_projection(self, enabled: bool) -> None:
+        _write_canonical(
+            self._kill_switch_path,
+            {
+                "schema": M3C_KILL_SWITCH_SCHEMA,
+                "authority_id": M3C_AUTHORITY_ID,
+                "protocol_generation": M3C_PROTOCOL_GENERATION,
+                "writer_id": M3C_WRITER_ID,
+                "admission_enabled": bool(enabled),
+            },
+        )
 
     def _kill_switch(self) -> dict[str, Any]:
-        current = _read_object(self._kill_switch_path, code="kill_switch_invalid")
-        if set(current) != {
-            "schema",
-            "authority_id",
-            "protocol_generation",
-            "writer_id",
-            "admission_enabled",
-        } or not isinstance(current.get("admission_enabled"), bool):
-            _fail("kill_switch_invalid", "M3c kill switch document is malformed")
+        try:
+            row = self._store.control_connection.execute(
+                "SELECT schema,authority_id,protocol_generation,writer_id,admission_enabled "
+                "FROM m3c_kill_switch WHERE id=1"
+            ).fetchone()
+        except Exception as exc:
+            _fail("kill_switch_invalid", "M3c kill-switch state could not be read")
+        if row is None:
+            _fail("kill_switch_invalid", "M3c kill-switch row is missing")
+        current = {
+            "schema": str(row[0]),
+            "authority_id": str(row[1]),
+            "protocol_generation": str(row[2]),
+            "writer_id": str(row[3]),
+            "admission_enabled": bool(row[4]),
+        }
+        if current["schema"] != M3C_KILL_SWITCH_SCHEMA or current["authority_id"] != M3C_AUTHORITY_ID or current["protocol_generation"] != M3C_PROTOCOL_GENERATION or current["writer_id"] != M3C_WRITER_ID:
+            _fail("kill_switch_invalid", "M3c kill switch database identity differs")
         return current
 
     def _assert_intake_enabled(self) -> None:
@@ -387,8 +447,12 @@ class CanonicalVNextAdmissionAuthority:
                 # processes; process-local locks alone are insufficient.
                 with self._store.hold_write_lock():
                     current = self._kill_switch()
-                    current["admission_enabled"] = enabled
-                    _write_canonical(self._kill_switch_path, current)
+                    self._store.control_connection.execute(
+                        "UPDATE m3c_kill_switch SET admission_enabled=? WHERE id=1",
+                        (int(enabled),),
+                    )
+                    self._store.control_connection.commit()
+                    self._write_kill_switch_projection(enabled)
             except M3aError as exc:
                 _fail(exc.code, str(exc), details=exc.details)
 
@@ -522,13 +586,13 @@ class CanonicalVNextAdmissionComposition:
         self.close()
 
 
-def open_vnext_admission_composition(
+def _open_vnext_admission_composition(
     runtime_root: str | Path,
     *,
     legacy_root: str | Path,
     existing_outbox: bool = False,
 ) -> CanonicalVNextAdmissionComposition:
-    """Open the only supported internal vNext admission composition."""
+    """Internal constructor used by :class:`VNextCompositionRoot`."""
 
     authority = CanonicalVNextAdmissionAuthority.open(runtime_root, legacy_root=legacy_root)
     try:
@@ -544,6 +608,21 @@ def open_vnext_admission_composition(
     except Exception:
         authority.close()
         raise
+
+
+def open_vnext_admission_composition(
+    runtime_root: str | Path,
+    *,
+    legacy_root: str | Path,
+    existing_outbox: bool = False,
+) -> CanonicalVNextAdmissionComposition:
+    """Test-fixture compatibility helper; production code enters via the root."""
+
+    return _open_vnext_admission_composition(
+        runtime_root,
+        legacy_root=legacy_root,
+        existing_outbox=existing_outbox,
+    )
 
 
 __all__ = [

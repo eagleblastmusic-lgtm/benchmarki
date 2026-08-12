@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:bdb:schema:vnext-backup-manifest:v2",
+  "title": "BDB vNext unified Control DB backup manifest v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "runtime_id",
+    "backup_id",
+    "source_root",
+    "required_control_schema",
+    "source_quiesced",
+    "subjects",
+    "sqlite_pair",
+    "control_identity",
+    "manifest_sha256"
+  ],
+  "properties": {
+    "schema": {"const": "bdb-vnext-backup-manifest-v2"},
+    "runtime_id": {"const": "devmaster.bdb.vnext.runtime"},
+    "backup_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "source_root": {"type": "string", "minLength": 1},
+    "required_control_schema": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+    "source_quiesced": {"const": true},
+    "subjects": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {"$ref": "bdb-vnext-backup-manifest-v1.schema.json#/$defs/subjectBase"}
+    },
+    "sqlite_pair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["database_state", "wal_state", "page_size"],
+      "properties": {
+        "database_state": {"enum": ["present", "declared_absent"]},
+        "wal_state": {"enum": ["present", "declared_absent"]},
+        "page_size": {"oneOf": [{"type": "integer", "minimum": 512, "maximum": 65536}, {"type": "null"}]}
+      }
+    },
+    "control_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "store_id", "generation_id", "config_generation", "migration_id", "schema_checksum", "config_sha256", "identity_sha256"],
+      "properties": {
+        "schema": {"const": "bdb-vnext-control-identity-v1"},
+        "store_id": {"type": "string"},
+        "generation_id": {"type": "string"},
+        "config_generation": {"type": "string"},
+        "migration_id": {"type": "string"},
+        "schema_checksum": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "config_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "identity_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "manifest_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}

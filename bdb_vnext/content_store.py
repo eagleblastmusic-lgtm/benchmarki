@@ -21,6 +21,12 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Literal, NoReturn
 
 from bdb_shared.evidence import canonical_json_bytes
+from bdb_vnext.control_store import (
+    CONTROL_BUSY_TIMEOUT_MS,
+    assert_database_path,
+    configure_connection as configure_control_connection,
+    ensure_identity,
+)
 from bdb_vnext.repo_view import CommittedRepoView
 
 
@@ -611,14 +617,14 @@ class AcceptedBinding:
 
 
 class DurableBindingStore:
-    """Minimal isolated SQLite binding substrate, not the future Control Store."""
+    """Typed M2 binding repository in the shared vNext Control DB."""
 
     def __init__(self, root: str | Path, *, content_store: ImmutableContentStore | None = None) -> None:
         self.root = _absolute_root(root)
         self.content_store = content_store or ImmutableContentStore(self.root)
         if self.content_store.root != self.root:
             _fail("authority_overlap", "binding store and content store must share one isolated root")
-        self.database_path = self.root / "control" / "control.db"
+        self.database_path = assert_database_path(self.root, self.root / "control" / "control.db")
         self.config_path = self.root / "config" / "bdb-vnext.json"
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -626,9 +632,14 @@ class DurableBindingStore:
         _assert_no_reparse_components(self.database_path, field="binding database")
         _assert_no_reparse_components(self.config_path.parent, field="binding config parent")
         self._ensure_config()
-        self._connection = sqlite3.connect(str(self.database_path))
-        self._connection.execute("PRAGMA journal_mode=WAL")
-        self._connection.execute("PRAGMA synchronous=FULL")
+        self._connection = sqlite3.connect(
+            str(self.database_path),
+            timeout=CONTROL_BUSY_TIMEOUT_MS / 1000,
+            check_same_thread=False,
+            isolation_level=None,
+        )
+        configure_control_connection(self._connection)
+        ensure_identity(self._connection)
         self._connection.execute(
             "CREATE TABLE IF NOT EXISTS m2b_accepted_bindings ("
             "fragment_id TEXT PRIMARY KEY, binding_json BLOB NOT NULL"

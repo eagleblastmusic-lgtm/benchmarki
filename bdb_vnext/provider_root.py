@@ -339,10 +339,31 @@ def default_provider_bindings(manifest: Mapping[str, Any]) -> tuple[ProviderBind
     return tuple(result)
 
 
+@dataclass
+class VNextControlPlane:
+    """Build-only control-plane graph owned by one explicit root."""
+
+    root: "VNextCompositionRoot"
+    bindings: Any
+    admission: Any
+    work_kernel: Any
+
+    def close(self) -> None:
+        self.work_kernel.close()
+        self.admission.close()
+        self.bindings.close()
+
+    def __enter__(self) -> "VNextControlPlane":
+        return self
+
+    def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
+        self.close()
+
+
 class VNextCompositionRoot:
     """Explicit, immutable-in-practice provider selection for BDB Next."""
 
-    __slots__ = ("_manifest_identity", "_providers", "_fingerprint")
+    __slots__ = ("_manifest_identity", "_providers", "_fingerprint", "_runtime_root", "_legacy_runtime_root")
 
     def __init__(
         self,
@@ -392,6 +413,12 @@ class VNextCompositionRoot:
             "activation_state": ACTIVATION_STATE,
         }
         object.__setattr__(self, "_manifest_identity", _freeze(identity["manifest"]))
+        object.__setattr__(self, "_runtime_root", Path(str(checked["paths"]["runtime_root"])).absolute())
+        object.__setattr__(
+            self,
+            "_legacy_runtime_root",
+            Path(str(checked["legacy_boundary"]["runtime_root"])).absolute(),
+        )
         object.__setattr__(
             self,
             "_providers",
@@ -697,6 +724,46 @@ class VNextCompositionRoot:
     def query(self, resource: RepositoryResource, view: CommittedRepoView) -> RepoViewQuery:
         return self.repo_view_provider().query(resource, view)
 
+    def open_control_plane(
+        self,
+        *,
+        existing_outbox: bool = False,
+        clock: Any | None = None,
+    ) -> VNextControlPlane:
+        """Construct the inactive M2/M3/M4 graph through this root only.
+
+        The root is built from a manifest whose runtime and legacy paths are
+        immutable.  Opening this graph is a build/test action; it does not
+        enable external runtime, production admission, or activation.
+        """
+
+        from bdb_vnext.content_store import DurableBindingStore
+        from bdb_vnext.m3c_admission import _open_vnext_admission_composition
+        from bdb_vnext.m4a_work_kernel import WorkKernelStore
+
+        bindings = None
+        admission = None
+        try:
+            bindings = DurableBindingStore(self._runtime_root)
+            admission = _open_vnext_admission_composition(
+                self._runtime_root,
+                legacy_root=self._legacy_runtime_root,
+                existing_outbox=existing_outbox,
+            )
+            work_kernel = WorkKernelStore.open(
+                self._runtime_root,
+                task_authority=admission.authority,
+                legacy_root=self._legacy_runtime_root,
+                clock=clock,
+            )
+            return VNextControlPlane(self, bindings, admission, work_kernel)
+        except Exception:
+            if admission is not None:
+                admission.close()
+            if bindings is not None:
+                bindings.close()
+            raise
+
     def __repr__(self) -> str:
         return f"VNextCompositionRoot(generation={ROOT_GENERATION!r}, fingerprint={self.fingerprint!r})"
 
@@ -735,6 +802,7 @@ __all__ = [
     "ROOT_GENERATION",
     "RUNTIME_STATE",
     "VNextCompositionRoot",
+    "VNextControlPlane",
     "WRITER_STATE",
     "build_vnext_provider_root",
     "create_vnext_provider_root",

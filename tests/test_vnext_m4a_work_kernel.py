@@ -94,7 +94,7 @@ def test_full_minimal_lifecycle_keeps_dimensions_orthogonal(tmp_path: Path) -> N
         assert finished.outcome == "FAILED"
         query = kernel.query(item.work_id)
         assert query is not None
-        assert query.work.disposition == "TERMINAL"
+        assert query.work.disposition == "FINISHED"
         assert query.last_run is not None and query.last_run.effect_certainty == "POSSIBLE"
         assert query.resource_claim == claim
         assert len(kernel.facts(item.work_id)) == 5
@@ -193,7 +193,7 @@ def test_new_fence_cannot_complete_or_wait_an_old_fence_run(tmp_path: Path) -> N
         new = kernel.acquire_lease(item.work_id, "lease:run-new", "worker:run-new", ttl_seconds=30, now=2)
 
         with pytest.raises(M4aError) as finish:
-            kernel.finish_run(item.work_id, run.run_id, new.lease_id, new.fence, 1, outcome="UNKNOWN", now=2)
+            kernel.finish_run(item.work_id, run.run_id, new.lease_id, new.fence, 1, outcome="CANCELLED", now=2)
         assert finish.value.code == "run_ownership_mismatch"
 
         with pytest.raises(M4aError) as waiting:
@@ -301,15 +301,21 @@ def test_query_schema_digest_store_boundary_and_provider_are_explicit(tmp_path: 
                 row[0]
                 for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
             }
-        assert tables == {
-            "m4a_sequence",
-            "m4a_work_items",
-            "m4a_runs",
-            "m4a_waits",
-            "m4a_leases",
-            "m4a_resource_claims",
-            "m4a_transition_facts",
-        }
+            assert tables == {
+                "vnext_control_metadata",
+                "m3a_submissions",
+                "m3a_tasks",
+                "m3a_intent_revisions",
+                "m3a_consumer_bindings",
+                "m3c_kill_switch",
+                "m4a_sequence",
+                "m4a_work_items",
+                "m4a_runs",
+                "m4a_waits",
+                "m4a_leases",
+                "m4a_resource_claims",
+                "m4a_transition_facts",
+            }
         assert not any("command" in name or "session" in name or "legacy" in name for name in tables)
         manifest = build_vnext_composition_manifest(source_commit="4" * 40, runtime_root=tmp_path / "manifest-vnext", legacy_runtime_root=tmp_path / "manifest-legacy", forbidden_roots=[ROOT])
         provider = next(item for item in manifest["composition"]["providers"] if item["provider_id"] == WORK_KERNEL_PROVIDER_ID)
@@ -374,7 +380,7 @@ def test_no_legacy_tables_or_alternate_workitem_writer_are_supported() -> None:
     assert proof["pass"] is True
     assert proof["canonical_writer"] == M4A_WRITER_ID
     assert proof["alternate_writers"] == []
-    source_files = [path for path in (ROOT / "bdb_vnext").glob("*.py") if path.name != "m4a_work_kernel.py"]
+    source_files = [path for path in (ROOT / "bdb_vnext").glob("*.py") if path.name not in {"m4a_work_kernel.py", "control_store.py"}]
     assert not any("m4a_work_items" in path.read_text(encoding="utf-8") for path in source_files)
 
 
