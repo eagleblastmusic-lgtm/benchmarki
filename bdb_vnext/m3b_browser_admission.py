@@ -464,6 +464,14 @@ class BrowserAdmissionClient:
             if receipt is None:
                 _fail("outbox_corrupt", "ACKED outbox entry has no receipt")
             return receipt
+        if prepared.state == "SENT":
+            # A prior send may have committed canonical admission while its
+            # ACK was lost.  Lookup that exact digest before any retransmit;
+            # the outbox remains the durable Browser recovery authority and
+            # the canonical M3 writer remains the only Task writer.
+            recovered = self.recover(envelope.submission_key)
+            if recovered is not None:
+                return recovered
         self.outbox.mark_sent(envelope.submission_key)
         if crash_point == "after_outbox_before_send":
             _fail("simulated_browser_crash_before_send", "fault injected after durable outbox write")

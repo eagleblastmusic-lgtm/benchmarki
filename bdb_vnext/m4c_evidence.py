@@ -203,7 +203,7 @@ class EvidenceStore:
             # workspace still proves the exact planned bytes.  Revalidate
             # before exposing a current PASS so query/recovery cannot trust a
             # stale durable disposition after post-seal mutation.
-            current=self.candidate_store.invalidate_if_changed(candidate_id)
+            current=self.candidate_store.verify_current_applicability(candidate_id)
         except Exception:
             return False,"candidate_stale_or_invalidated"
         if current is None or current.state!=CANDIDATE_SEALED or current.manifest_digest!=record.candidate_view_id: return False,"candidate_stale_or_invalidated"
@@ -235,20 +235,26 @@ class EvidenceStore:
                 self.raw_observation(evidence_id)
             except EvidenceError as exc:
                 result,applicability="INCONCLUSIVE","INCONCLUSIVE"; detail={**dict(detail),"fail_closed_reason":exc.code}
-        existing=self._connection.execute("SELECT evaluation_id,evidence_id,evaluator_id,evaluator_version,evaluator_code_digest,config_digest,result,applicability,detail_json,created_at FROM m4c_evaluations WHERE evidence_id=? AND evaluator_id=? AND evaluator_version=? AND evaluator_code_digest=? AND config_digest=?",(evidence_id,evaluator_id,evaluator_version,evaluator_code_digest,config_digest)).fetchone()
-        if existing:
-            existing_record=self._evaluation_from_row(existing)
-            if existing_record.result != result or existing_record.applicability != applicability or dict(existing_record.detail) != dict(detail):
-                _fail("evaluation_identity_conflict", "evaluator identity is already bound to a different result")
-            return existing_record
-        identity={"schema":EVALUATION_SCHEMA,"evidence_id":evidence_id,"evaluator_id":evaluator_id,"evaluator_version":evaluator_version,"evaluator_code_digest":evaluator_code_digest,"config_digest":config_digest,"result":result,"applicability":applicability,"detail":dict(detail)}; evaluation_id=semantic_digest(identity); created_at=_now(); previous=self.current_disposition(evidence_id); supersedes=supersedes_evaluation_id or (previous.evaluation_id if previous else None)
-        if supersedes_evaluation_id is not None:
-            if previous is None or supersedes_evaluation_id != previous.evaluation_id:
-                _fail("supersession_target_invalid", "new evaluation must supersede the current disposition head")
-        disposition=result if applicability=="APPLICABLE" and result in {"PASS","FAIL"} and candidate_ok else "INCONCLUSIVE" if result=="PASS" else result; disposition_id=semantic_digest({"schema":DISPOSITION_SCHEMA,"evidence_id":evidence_id,"evaluation_id":evaluation_id,"disposition":disposition,"supersedes":supersedes})
+        identity={"schema":EVALUATION_SCHEMA,"evidence_id":evidence_id,"evaluator_id":evaluator_id,"evaluator_version":evaluator_version,"evaluator_code_digest":evaluator_code_digest,"config_digest":config_digest,"result":result,"applicability":applicability,"detail":dict(detail)}; evaluation_id=semantic_digest(identity); created_at=_now()
         if fault=="before_evaluation_commit": _fail("evaluation_commit_interrupted","evaluation interrupted before durable commit")
         self._connection.execute("BEGIN IMMEDIATE")
         try:
+            # Re-read the evaluator identity and disposition head while the
+            # writer lock is held.  This makes supersession a deterministic
+            # compare-and-swap instead of a pre-transaction race.
+            existing=self._connection.execute("SELECT evaluation_id,evidence_id,evaluator_id,evaluator_version,evaluator_code_digest,config_digest,result,applicability,detail_json,created_at FROM m4c_evaluations WHERE evidence_id=? AND evaluator_id=? AND evaluator_version=? AND evaluator_code_digest=? AND config_digest=?",(evidence_id,evaluator_id,evaluator_version,evaluator_code_digest,config_digest)).fetchone()
+            if existing:
+                existing_record=self._evaluation_from_row(existing)
+                if existing_record.result != result or existing_record.applicability != applicability or dict(existing_record.detail) != dict(detail):
+                    _fail("evaluation_identity_conflict", "evaluator identity is already bound to a different result")
+                self._connection.rollback()
+                return existing_record
+            previous=self.current_disposition(evidence_id)
+            supersedes=supersedes_evaluation_id or (previous.evaluation_id if previous else None)
+            if supersedes_evaluation_id is not None and (previous is None or supersedes_evaluation_id != previous.evaluation_id):
+                _fail("supersession_target_invalid", "new evaluation must supersede the current disposition head")
+            disposition=result if applicability=="APPLICABLE" and result in {"PASS","FAIL"} and candidate_ok else "INCONCLUSIVE" if result=="PASS" else result
+            disposition_id=semantic_digest({"schema":DISPOSITION_SCHEMA,"evidence_id":evidence_id,"evaluation_id":evaluation_id,"disposition":disposition,"supersedes":supersedes})
             self._connection.execute("INSERT INTO m4c_evaluations VALUES (?,?,?,?,?,?,?,?,?,?)",(evaluation_id,evidence_id,evaluator_id,evaluator_version,evaluator_code_digest,config_digest,result,applicability,_json(dict(detail)),created_at)); self._connection.execute("INSERT INTO m4c_dispositions VALUES (?,?,?,?,?,?)",(disposition_id,evidence_id,evaluation_id,disposition,supersedes,created_at)); self._connection.execute("INSERT INTO m4c_disposition_heads VALUES (?,?) ON CONFLICT(evidence_id) DO UPDATE SET disposition_id=excluded.disposition_id",(evidence_id,disposition_id)); self._connection.commit()
         except Exception: self._connection.rollback(); raise
         if fault=="after_evaluation_commit": raise EvidenceError("evaluation_response_lost","evaluation committed before response",details={"evaluation_id":evaluation_id})

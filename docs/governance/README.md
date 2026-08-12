@@ -39,3 +39,15 @@ Navigation index only. The linked documents are authoritative records in their s
 - governance packet introduction commit = `688d2be232a8dbbcb8cc982847d6df23d6a30858`; current `bdb-vnext` HEAD must always be established by fresh inspection under source precedence
 - vNext runtime/writer/activation = `OFF / OFF / OFF`
 - next READY EU = `M3a — bounded shadow implementation under the accepted deferred-M2d governance exception`
+
+## Current vNext implementation status (fresh observed living status)
+
+- N1 / N2 / N3 / N4 / N5 / N6 = `DONE` (N6 remains build-only rehearsal infrastructure).
+- Post-N6 findings repair = `LOCAL REPAIR COMPLETE; AUTOMATED VALIDATION COMPLETE; HUMAN BROWSER RE-GATE PENDING`.
+- Production runtime / writer / activation = `OFF / OFF / OFF`.
+- Isolated rehearsal infrastructure = `ACTIVE ONLY WHEN EXPLICIT PACKAGE LOADED`; loaded test extension and registered test Native Host are not production activation.
+- N6 package/native identity = exact package-bound code and manifest identity; no live-checkout import is authoritative for the packaged Native path.
+- M3 Task, M4 WorkItem, N2 Candidate, N3 Evidence/Disposition, and N4 Publication remain separate canonical authorities with no Browser/UI writer.
+- Legacy = `OPERATIONAL + ISOLATED + UNTOUCHED`.
+- M5+ / successor roadmap = `NOT STARTED`; no successor EU is started by this repair pass.
+- Next action = repeat the minimal human N6 Browser gate on the exact fresh package/HEAD after code or package changes; automated evidence must not be represented as human evidence.

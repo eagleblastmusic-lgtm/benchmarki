@@ -26,7 +26,15 @@ from pathlib import Path
 from typing import Any, BinaryIO, Mapping
 
 from bdb_shared.evidence import canonical_json_bytes, semantic_digest
-from bdb_vnext.candidate import CandidateError
+from bdb_vnext.candidate import (
+    CANDIDATE_DIVERGED,
+    CANDIDATE_INVALIDATED,
+    CANDIDATE_OBSERVED,
+    CANDIDATE_PREPARED,
+    CANDIDATE_SEALED,
+    CANDIDATE_UNKNOWN,
+    CandidateError,
+)
 from bdb_vnext.composition import (
     BROWSER_COMPONENT_ID,
     NATIVE_HOST_NAME,
@@ -47,6 +55,7 @@ N6_EVENT_SCHEMA = "bdb-vnext-n6-browser-event-v1"
 N6_NATIVE_REQUEST_SCHEMA = "bdb-vnext-n6-native-request-v1"
 N6_NATIVE_RESPONSE_SCHEMA = "bdb-vnext-n6-native-response-v1"
 N6_PACKAGE_VERSION = "0.1.1"
+N6_NATIVE_CODE_SCHEMA = "bdb-vnext-n6-native-code-v1"
 N6_PROTOCOL_GENERATION = "bdb-vnext-n6-protocol-v1"
 N6_NATIVE_HOST_NAME = NATIVE_HOST_NAME
 N6_BROWSER_COMPONENT = BROWSER_COMPONENT_ID
@@ -140,7 +149,7 @@ def _stable_id(prefix: str, value: str) -> str:
 def _package_files(root: Path) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.name in {"execution_manifest.json", "native-config.json", "MANUAL_BROWSER_REHEARSAL_PACKET.md"}:
+        if not path.is_file() or "__pycache__" in path.parts or path.name in {"execution_manifest.json", "native-config.json", "MANUAL_BROWSER_REHEARSAL_PACKET.md"}:
             continue
         relative_parts = path.relative_to(root).parts
         if relative_parts and relative_parts[0] in {".dotnet", "native-shim-src"}:
@@ -158,6 +167,25 @@ def package_digest(root: str | Path) -> str:
     return _sha(_json_bytes({"schema": N6_PACKAGE_SCHEMA, "version": N6_PACKAGE_VERSION, "files": records}))
 
 
+def _native_code_records(root: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or "__pycache__" in path.parts:
+            continue
+        relative = path.relative_to(root).as_posix()
+        raw = path.read_bytes()
+        records.append({"path": relative, "size_bytes": len(raw), "sha256": _sha(raw)})
+    return records
+
+
+def native_code_digest(root: str | Path) -> str:
+    path = Path(root).expanduser().absolute()
+    records = _native_code_records(path)
+    if not records:
+        _fail("native_code_empty", "N6 package contains no immutable Native code")
+    return _sha(_json_bytes({"schema": N6_NATIVE_CODE_SCHEMA, "files": records}))
+
+
 @dataclass(frozen=True)
 class N6RehearsalConfig:
     repo_root: Path
@@ -165,6 +193,8 @@ class N6RehearsalConfig:
     legacy_runtime_root: Path
     source_commit: str
     package_root: Path
+    native_code_root: Path
+    native_code_digest: str
     package_digest: str
     browser_extension_id: str
     native_host_name: str = N6_NATIVE_HOST_NAME
@@ -174,7 +204,7 @@ class N6RehearsalConfig:
     def from_json(cls, path: str | Path) -> "N6RehearsalConfig":
         source = Path(path).expanduser().absolute()
         document = _read_json(source)
-        expected = {"schema", "repo_root", "runtime_root", "legacy_runtime_root", "source_commit", "package_root", "package_digest", "browser_extension_id", "native_host_name", "protocol_generation", "production_activation"}
+        expected = {"schema", "repo_root", "runtime_root", "legacy_runtime_root", "source_commit", "package_root", "native_code_root", "native_code_digest", "package_digest", "browser_extension_id", "native_host_name", "protocol_generation", "production_activation"}
         if set(document) != expected or document.get("schema") != N6_CONFIG_SCHEMA:
             _fail("config_invalid", "N6 config fields/schema differ")
         if document.get("production_activation") is not False:
@@ -183,12 +213,19 @@ class N6RehearsalConfig:
         runtime = _safe_abs(document["runtime_root"], "runtime_root")
         legacy = _safe_abs(document["legacy_runtime_root"], "legacy_runtime_root")
         package = _safe_abs(document["package_root"], "package_root")
-        if _overlap(runtime, legacy) or _overlap(runtime, repo) or _overlap(package, legacy):
+        native_code = _safe_abs(document["native_code_root"], "native_code_root")
+        package_norm = os.path.normcase(os.path.normpath(str(package)))
+        native_norm = os.path.normcase(os.path.normpath(str(native_code)))
+        try:
+            native_inside_package = os.path.commonpath((package_norm, native_norm)) == package_norm and native_norm != package_norm
+        except ValueError:
+            native_inside_package = False
+        if _overlap(runtime, legacy) or _overlap(runtime, repo) or _overlap(package, legacy) or _overlap(package, repo) or not native_inside_package or _overlap(native_code, repo):
             _fail("foreign_state_overlap", "N6 mutable roots overlap source or legacy")
         source_commit = _text(document["source_commit"], "source_commit", max_bytes=40)
         if len(source_commit) != 40 or any(char not in "0123456789abcdef" for char in source_commit):
             _fail("config_invalid", "source_commit is not an exact Git object")
-        return cls(repo, runtime, legacy, source_commit, package, _text(document["package_digest"], "package_digest"), _text(document["browser_extension_id"], "browser_extension_id"), _text(document["native_host_name"], "native_host_name"), _text(document["protocol_generation"], "protocol_generation"))
+        return cls(repo, runtime, legacy, source_commit, package, native_code, _text(document["native_code_digest"], "native_code_digest"), _text(document["package_digest"], "package_digest"), _text(document["browser_extension_id"], "browser_extension_id"), _text(document["native_host_name"], "native_host_name"), _text(document["protocol_generation"], "protocol_generation"))
 
 
 def _event_base(request: Mapping[str, Any]) -> tuple[str, str, str, str]:
@@ -220,6 +257,9 @@ class N6RehearsalService:
         self.package_digest = package_digest(config.package_root)
         if self.package_digest != config.package_digest:
             _fail("package_identity_mismatch", "N6 package digest differs from config")
+        self.native_code_digest = native_code_digest(config.native_code_root)
+        if self.native_code_digest != config.native_code_digest:
+            _fail("native_code_identity_mismatch", "N6 Native code digest differs from config")
 
     def _open(self):
         existing = (self.config.runtime_root / "browser" / "outbox" / "anchor.json").is_file()
@@ -251,14 +291,29 @@ class N6RehearsalService:
             "candidate_view_id": candidate.manifest_digest if candidate else None,
             "publication": publication.as_dict() if publication else None,
             "task": task.as_dict() if task else None,
+            "work": work.as_dict() if work else None,
         }
 
-    def _run_vertical(self, *, submission_key: str, prompt: str, conversation_id: str, profile_id: str | None) -> dict[str, Any]:
+    def _run_vertical(
+        self,
+        *,
+        submission_key: str,
+        prompt: str,
+        conversation_id: str,
+        profile_id: str | None,
+        fault: str | None = None,
+    ) -> dict[str, Any]:
         prompt = _text(prompt, "prompt", max_bytes=N6_MAX_PROMPT_BYTES)
         conversation_id = _text(conversation_id, "conversation_id")
         work_id = _stable_id("n6-work", submission_key)
         candidate_id = _stable_id("n6-candidate", submission_key)
         lease_id = _stable_id("n6-lease", submission_key)
+        run_id = _stable_id("n6-run", submission_key)
+
+        def checkpoint(name: str) -> None:
+            if fault == name:
+                _fail("n6_recovery_checkpoint", f"N6 fault injected after {name}", details={"checkpoint": name})
+
         with self._open() as plane:
             request = ShadowSubmissionRequest(
                 submission_key=submission_key,
@@ -268,14 +323,64 @@ class N6RehearsalService:
                 consumer_binding={"consumer_id": _stable_id("n6-browser", conversation_id), "kind": "browser", "generation": "bdb-vnext-g1"},
             )
             request_digest = request.validated_digest()
-            existing = self._lookup(plane, submission_key, request_digest)
-            if existing and existing["publication"]:
-                return existing
-            receipt = plane.admission.authority.admit(request)
-            work = plane.work_kernel.query(work_id)
-            if work is None:
-                work = plane.work_kernel.create_work_item(work_id, receipt.task_id)
-            lease = plane.work_kernel.acquire_lease(work_id, lease_id, "n6-native-worker")
+            if fault == "admission_response_lost":
+                # Canonical admission commits but the Browser outbox remains
+                # SENT.  The next invocation must recover by digest lookup.
+                receipt = plane.admission.client.submit(request, crash_point="after_send_before_ack")
+            else:
+                receipt = plane.admission.client.submit(request)
+            checkpoint("admission")
+
+            work_query = plane.work_kernel.query(work_id)
+            if work_query is None:
+                plane.work_kernel.create_work_item(work_id, receipt.task_id)
+                work_query = plane.work_kernel.query(work_id)
+            assert work_query is not None
+            checkpoint("work")
+
+            publications = plane.publication.publications_for_task(receipt.task_id)
+            if len(publications) > 1:
+                _fail("publication_conflict", "N6 Task has more than one canonical Publication")
+            if work_query.work.disposition == "FINISHED":
+                if not publications or work_query.last_run is None or work_query.last_run.outcome != "SUCCEEDED" or work_query.last_run.effect_certainty != "CERTAIN":
+                    _fail("vertical_state_incomplete", "finished N6 Work lacks its exact successful Publication lineage")
+                if work_query.lease is not None and work_query.lease.state == "ACTIVE":
+                    plane.work_kernel.release_lease(
+                        work_id,
+                        work_query.lease.lease_id,
+                        work_query.lease.fence,
+                    )
+                found = self._lookup(plane, submission_key, request_digest)
+                assert found is not None
+                return found
+
+            lease = plane.work_kernel.acquire_lease(work_id, lease_id, "n6-native-worker", ttl_seconds=300.0)
+            checkpoint("lease")
+            work_query = plane.work_kernel.query(work_id)
+            assert work_query is not None
+            if work_query.work.disposition == "READY":
+                plane.work_kernel.start_run(
+                    work_id,
+                    run_id,
+                    lease.lease_id,
+                    lease.fence,
+                    work_query.work.state_version,
+                )
+            elif work_query.work.disposition == "RUNNING" and work_query.active_run is not None:
+                if work_query.active_run.run_id != run_id:
+                    _fail("active_run_conflict", "N6 Work is owned by a different active Run")
+                if (work_query.active_run.lease_id, work_query.active_run.fence) != (lease.lease_id, lease.fence):
+                    plane.work_kernel.adopt_active_run(
+                        work_id,
+                        run_id,
+                        lease.lease_id,
+                        lease.fence,
+                        work_query.work.state_version,
+                    )
+            else:
+                _fail("vertical_state_incomplete", "N6 Work cannot safely resume from its current lifecycle disposition")
+            checkpoint("run")
+
             candidate = plane.candidate.get(candidate_id)
             if candidate is None:
                 workspace = plane.candidate.create_workspace(candidate_id=candidate_id, base_view=self.view)
@@ -291,22 +396,45 @@ class N6RehearsalService:
                     workspace_root=workspace,
                     replacements={"bdb_vnext/__init__.py": after},
                 )
-                plane.candidate.apply(candidate.candidate_id)
-                _sealed, candidate_view = plane.candidate.seal(candidate.candidate_id, base_view=self.view)
+                checkpoint("candidate_prepared")
+            elif candidate.state not in {CANDIDATE_SEALED, CANDIDATE_INVALIDATED} and (candidate.lease_id, candidate.fence) != (lease.lease_id, lease.fence):
+                candidate = plane.candidate.adopt_lease(candidate_id, lease_id=lease.lease_id, fence=lease.fence)
+
+            if candidate.state == CANDIDATE_INVALIDATED:
+                _fail("candidate_invalidated", "N6 Candidate was invalidated and cannot be retried")
+            if candidate.state != CANDIDATE_SEALED:
+                candidate = plane.candidate.observe(candidate_id)
+                if candidate.state == CANDIDATE_PREPARED:
+                    plane.candidate.mark_possible(candidate_id)
+                    checkpoint("candidate_possible")
+                    candidate = plane.candidate.apply(candidate_id)
+                if candidate.state != CANDIDATE_OBSERVED:
+                    candidate = plane.candidate.observe(candidate_id)
+                if candidate.state in {CANDIDATE_DIVERGED, CANDIDATE_UNKNOWN}:
+                    _fail("candidate_reconciliation_required", "N6 Candidate effect cannot be retried without exact observation")
+                if candidate.state != CANDIDATE_OBSERVED:
+                    _fail("candidate_reconciliation_required", "N6 Candidate has not reached an exact AFTER observation")
+                checkpoint("candidate_observed")
+                _sealed, candidate_view = plane.candidate.seal(candidate_id, base_view=self.view)
+                checkpoint("candidate_sealed")
             else:
+                plane.candidate.verify_current_applicability(candidate_id)
                 candidate_view = plane.candidate.get_view(candidate_id, self.view)
-            candidate_view = plane.candidate.get_view(candidate_id, self.view)
+
             evaluation = None
             publications = plane.publication.publications_for_task(receipt.task_id)
             if not publications:
                 from bdb_vnext.m4c_evidence import MinimumCandidateChecker
 
-                evaluation = MinimumCandidateChecker(self.config.repo_root, plane.evidence).check(
+                checker = MinimumCandidateChecker(self.config.native_code_root, plane.evidence)
+                checker_fault = "raw_only" if fault == "evidence" else "lost_response" if fault == "evaluation" else None
+                evaluation = checker.check(
                     candidate_view,
                     request_id=_stable_id("n6-check", submission_key),
                     evaluator_id="bdb-vnext-n6-candidate-checker",
                     evaluator_version="1",
                     config_digest=_sha(_json_bytes(self.manifest)),
+                    fault=checker_fault,
                 )
                 current = plane.evidence.current_disposition(evaluation.evidence_id)
                 publication = plane.publication.publish(
@@ -324,10 +452,34 @@ class N6RehearsalService:
                     evidence_id=evaluation.evidence_id,
                     evaluation_id=evaluation.evaluation_id,
                     disposition_id=current.disposition_id if current else None,
+                    fault="after_commit" if fault == "publication" else None,
                 )
             else:
                 publication = publications[0]
                 evaluation = plane.evidence.evaluations(publication.evidence_id)[-1] if publication.evidence_id else None
+            checkpoint("publication_committed")
+
+            work_query = plane.work_kernel.query(work_id)
+            assert work_query is not None
+            if work_query.work.disposition != "FINISHED":
+                if work_query.active_run is None or work_query.active_run.run_id != run_id:
+                    _fail("active_run_missing", "N6 Work has no canonical active Run to finish")
+                plane.work_kernel.finish_run(
+                    work_id,
+                    run_id,
+                    lease.lease_id,
+                    lease.fence,
+                    work_query.work.state_version,
+                    outcome="SUCCEEDED",
+                    effect_certainty="CERTAIN",
+                    failpoint="after_commit" if fault == "work_finished" else None,
+                )
+            final_work = plane.work_kernel.query(work_id)
+            assert final_work is not None
+            if final_work.lease is not None and final_work.lease.state == "ACTIVE":
+                plane.work_kernel.release_lease(work_id, lease.lease_id, lease.fence)
+            final_work = plane.work_kernel.query(work_id)
+            assert final_work is not None
             return {
                 "submission_key": submission_key,
                 "task_id": receipt.task_id,
@@ -339,6 +491,8 @@ class N6RehearsalService:
                 "evaluation_id": publication.evaluation_id,
                 "publication_id": publication.publication_id,
                 "publication": publication.as_dict(),
+                "presentation": self._presentation(plane, publication),
+                "work": final_work.as_dict(),
                 "repo_view": self.view.to_dict(),
                 "package_digest": self.package_digest,
                 "protocol_generation": N6_PROTOCOL_GENERATION,
@@ -353,12 +507,22 @@ class N6RehearsalService:
             _fail("publication_missing", "canonical publication disappeared")
         return found, publication
 
+    @staticmethod
+    def _presentation(plane: Any, publication: Any) -> dict[str, Any]:
+        return {
+            "schema": "bdb-vnext-n6-presentation-v1",
+            "publication_id": publication.publication_id,
+            "marker": "n6-publication:" + publication.publication_id,
+            "result_digest": publication.result_digest,
+            "rendered_label": "BDB vNext canonical Publication " + publication.publication_id + "\nResult digest " + publication.result_digest,
+        }
+
     def handle(self, request: Mapping[str, Any]) -> dict[str, Any]:
         request_id, event, package_id, protocol = _event_base(request)
         if package_id != N6_PACKAGE_SCHEMA or protocol != N6_PROTOCOL_GENERATION:
             _fail("protocol_mismatch", "N6 package/protocol identity differs")
         if event == "status":
-            return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": "READY", "package_digest": self.package_digest, "browser_extension_id": self.identity["extension_id"], "native_host_name": N6_NATIVE_HOST_NAME, "protocol_generation": N6_PROTOCOL_GENERATION, "production_activation": False}
+            return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": "READY", "package_digest": self.package_digest, "native_code_digest": self.native_code_digest, "browser_extension_id": self.identity["extension_id"], "native_host_name": N6_NATIVE_HOST_NAME, "protocol_generation": N6_PROTOCOL_GENERATION, "production_activation": False, "rehearsal_infrastructure": "ACTIVE_ONLY_WHEN_EXPLICIT_PACKAGE_LOADED", "production_runtime": "OFF", "production_writer": "OFF"}
         payload = _mapping(request.get("payload"), "payload")
         if event == "submit_prompt":
             result = self._run_vertical(submission_key=_text(payload.get("submission_key"), "submission_key"), prompt=_text(payload.get("prompt"), "prompt", max_bytes=N6_MAX_PROMPT_BYTES), conversation_id=_text(payload.get("conversation_id"), "conversation_id"), profile_id=payload.get("profile_id") if isinstance(payload.get("profile_id"), str) else None)
@@ -367,7 +531,7 @@ class N6RehearsalService:
         with self._open() as plane:
             found, publication = self._publication(plane, submission_key)
             if event == "lookup":
-                return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": "FOUND", "result": found}
+                return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": "FOUND", "result": {**found, "presentation": self._presentation(plane, publication)}}
             if event == "capture_answer":
                 answer = _text(payload.get("raw_answer"), "raw_answer", max_bytes=N6_MAX_ANSWER_BYTES)
                 model = payload.get("model") if isinstance(payload.get("model"), str) else None
@@ -377,16 +541,20 @@ class N6RehearsalService:
                 conversation_id = _text(payload.get("conversation_id"), "conversation_id")
                 if conversation_id != _task_conversation(found):
                     _fail("conversation_owner_mismatch", "Browser capture conversation differs from canonical Task ownership")
-                raw = {"schema": N6_EVENT_SCHEMA, "event": "assistant_capture", "submission_key": submission_key, "task_id": found["task_id"], "work_id": found["work_id"], "candidate_id": found["candidate_id"], "candidate_view_id": found["candidate_view_id"], "publication_id": publication.publication_id, "conversation_id": conversation_id, "profile_id": payload.get("profile_id"), "model": model, "reasoning": reasoning, "started_at": started, "finished_at": finished, "raw_answer": answer, "raw_answer_digest": _sha(answer.encode("utf-8"))}
+                completion = _text(payload.get("completion_observation"), "completion_observation")
+                if completion != "DOM_TEXT_STABLE_AFTER_STREAM_END":
+                    _fail("answer_completion_unverified", "Browser answer capture lacks a positive completed/stable DOM observation")
+                raw = {"schema": N6_EVENT_SCHEMA, "event": "assistant_capture", "submission_key": submission_key, "task_id": found["task_id"], "work_id": found["work_id"], "candidate_id": found["candidate_id"], "candidate_view_id": found["candidate_view_id"], "publication_id": publication.publication_id, "conversation_id": conversation_id, "profile_id": payload.get("profile_id"), "profile_attestation": "NOT_OBSERVABLE", "model": model, "reasoning": reasoning, "model_attestation": "OPERATOR_VISIBLE_ATTESTATION", "reasoning_attestation": "OPERATOR_VISIBLE_ATTESTATION", "started_at": started, "finished_at": finished, "timing_attestation": "BROWSER_CLOCK_OBSERVATION", "completion_observation": completion, "raw_answer": answer, "raw_answer_digest": _sha(answer.encode("utf-8"))}
                 request_id_value = _stable_id("n6-browser-answer", submission_key)
-                evidence = plane.evidence.record_observation(request_id=request_id_value, primary_subject_kind="N6_BROWSER_RUN", primary_subject_identity={"submission_key": submission_key, "task_id": found["task_id"], "work_id": found["work_id"], "publication_id": publication.publication_id}, candidate_view_id=found["candidate_view_id"], raw_observation=raw, checker_id=N6_CAPTURE_CHECKER_ID, checker_version=N6_CAPTURE_CHECKER_VERSION, checker_code_digest=semantic_digest({"schema": N6_EVENT_SCHEMA, "module": "bdb_vnext.n6_rehearsal"}), environment={"model": model, "reasoning": reasoning, "surface": "normal-chatgpt-browser", "package_digest": self.package_digest, "protocol_generation": N6_PROTOCOL_GENERATION}, observation_started_at=started, observation_finished_at=finished, completeness="COMPLETE" if answer else "INCOMPLETE", applicability="APPLICABLE" if model == "GPT-5.6 Sol" and reasoning == "Wysoki" else "INCONCLUSIVE", status="CAPTURED")
+                evidence = plane.evidence.record_observation(request_id=request_id_value, primary_subject_kind="N6_BROWSER_RUN", primary_subject_identity={"submission_key": submission_key, "task_id": found["task_id"], "work_id": found["work_id"], "publication_id": publication.publication_id}, candidate_view_id=found["candidate_view_id"], raw_observation=raw, checker_id=N6_CAPTURE_CHECKER_ID, checker_version=N6_CAPTURE_CHECKER_VERSION, checker_code_digest=semantic_digest({"schema": N6_EVENT_SCHEMA, "module": "bdb_vnext.n6_rehearsal"}), environment={"model": model, "reasoning": reasoning, "model_attestation": "OPERATOR_VISIBLE_ATTESTATION", "reasoning_attestation": "OPERATOR_VISIBLE_ATTESTATION", "profile_attestation": "NOT_OBSERVABLE", "surface": "normal-chatgpt-browser", "package_digest": self.package_digest, "protocol_generation": N6_PROTOCOL_GENERATION}, observation_started_at=started, observation_finished_at=finished, completeness="COMPLETE" if answer and completion == "DOM_TEXT_STABLE_AFTER_STREAM_END" else "INCOMPLETE", applicability="APPLICABLE" if model == "GPT-5.6 Sol" and reasoning == "Wysoki" else "INCONCLUSIVE", status="CAPTURED")
                 return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": "CAPTURED", "result": {"evidence_id": evidence.evidence_id, "raw_digest": evidence.raw_digest, "applicability": evidence.applicability, "completeness": evidence.completeness}}
             if event == "witness":
                 conversation_id = _text(payload.get("conversation_id"), "conversation_id")
                 if conversation_id != _task_conversation(found):
                     _fail("conversation_owner_mismatch", "Browser witness conversation differs from canonical Task ownership")
                 consumer_id = _stable_id("n6-browser", conversation_id)
-                binding = plane.publication.observe_presentation(publication_id=publication.publication_id, consumer_id=consumer_id, conversation_id=conversation_id, profile_id=payload.get("profile_id") if isinstance(payload.get("profile_id"), str) else None, marker=_text(payload.get("marker"), "marker"), result_digest=publication.result_digest, composer_preserved=payload.get("composer_preserved") is not False, witness={"source": "n6-browser-extension-dom"})
+                marker = _text(payload.get("marker"), "marker")
+                binding = plane.publication.observe_presentation(publication_id=publication.publication_id, consumer_id=consumer_id, conversation_id=conversation_id, profile_id=payload.get("profile_id") if isinstance(payload.get("profile_id"), str) else None, marker=marker, result_digest=_text(payload.get("observed_result_digest"), "observed_result_digest"), composer_preserved=payload.get("composer_preserved") is not False, witness={"source": "chatgpt-dom-exact-publication", "observation": "EXACT_RESULT_VISIBLE", "observed_publication_id": _text(payload.get("observed_publication_id"), "observed_publication_id"), "observed_conversation_id": conversation_id, "observed_marker": _text(payload.get("observed_marker"), "observed_marker"), "observed_result_digest": _text(payload.get("observed_result_digest"), "observed_result_digest")})
                 return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": "PRESENTED", "result": binding.as_dict()}
             if event == "unknown":
                 conversation_id = _text(payload.get("conversation_id"), "conversation_id")
@@ -394,7 +562,7 @@ class N6RehearsalService:
                     _fail("conversation_owner_mismatch", "Browser UNKNOWN conversation differs from canonical Task ownership")
                 consumer_id = _stable_id("n6-browser", conversation_id)
                 binding = plane.publication.mark_unknown(publication_id=publication.publication_id, consumer_id=consumer_id, reason=_text(payload.get("reason"), "reason"))
-                return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": "UNKNOWN", "result": binding.as_dict()}
+                return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": binding.presentation, "result": binding.as_dict()}
             if event == "resume":
                 target_conversation = _text(payload.get("target_conversation_id"), "target_conversation_id")
                 source_conversation = _text(payload.get("source_conversation_id"), "source_conversation_id")
@@ -536,6 +704,18 @@ function assistantText() {
   const message = turn.querySelector("[data-message-author-role='assistant']");
   return canonicalPrompt((message && (message.innerText || message.textContent)) || "");
 }
+function streamInProgress() {
+  return Boolean(document.querySelector("[data-testid='stop-button'],button[aria-label*='Stop'],button[aria-label*='Zatrzymaj']"));
+}
+async function stableAssistantObservation() {
+  if (streamInProgress()) throw new Error("N6 assistant response is still streaming");
+  const first = assistantText();
+  if (!first) throw new Error("N6 visible assistant answer is unavailable");
+  await new Promise((resolve) => setTimeout(resolve, 750));
+  const second = assistantText();
+  if (streamInProgress() || first !== second) throw new Error("N6 assistant response completion is not stable");
+  return {raw_answer: second, completion_observation: "DOM_TEXT_STABLE_AFTER_STREAM_END"};
+}
 function userMessages() { return [...document.querySelectorAll("[data-message-author-role='user']")].map((node) => canonicalPrompt(node.innerText || node.textContent || "")); }
 function send(event, payload) { return chrome.runtime.sendMessage({type: "N6_BROWSER_EVENT", event, payload}); }
 async function digest(value) { const raw = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)); return [...new Uint8Array(raw)].map((byte) => byte.toString(16).padStart(2, "0")).join(""); }
@@ -598,10 +778,19 @@ function showPanel(result) {
   if (!live || live !== currentConversation) { clearPanel(); void synchronizeConversation(); return; }
   clearPanel(); ensurePanel();
   const publicationId = result.publication_id || (result.publication && result.publication.publication_id) || "unknown";
+  const presentation = result.presentation || {};
   write("Task " + (result.task_id || "unknown") + "\nPublication " + publicationId + "\nOwner " + active.conversation_id);
+  if (presentation.publication_id === publicationId && typeof presentation.rendered_label === "string") {
+    const rendered = document.createElement("div");
+    rendered.dataset.bdbN6Publication = publicationId;
+    rendered.dataset.bdbN6Marker = presentation.marker;
+    rendered.dataset.bdbN6ResultDigest = presentation.result_digest;
+    rendered.textContent = presentation.rendered_label;
+    panel.append(rendered);
+  }
   if (active.conversation_id === currentConversation) {
-    addButton("Capture latest answer", async () => { const conversation = ownedConversation(); const answer = assistantText(); if (!answer) throw new Error("N6 visible assistant answer is unavailable"); const model = prompt("Visible ChatGPT model (exactly as shown):", "GPT-5.6 Sol"); if (model === null) throw new Error("N6 model attestation cancelled"); const reasoning = prompt("Visible reasoning setting (exactly as shown):", "Wysoki"); if (reasoning === null) throw new Error("N6 reasoning attestation cancelled"); const now = new Date().toISOString(); const response = await send("capture_answer", {submission_key: active.submission_key, conversation_id: conversation, profile_id: null, raw_answer: answer, model, reasoning, started_at: active.started_at, finished_at: now}); write(JSON.stringify(response.response || response)); });
-    addButton("Witness presentation", async () => { const conversation = ownedConversation(); const response = await send("witness", {submission_key: active.submission_key, conversation_id: conversation, marker: "n6-publication:" + publicationId, composer_preserved: true}); write(JSON.stringify(response.response || response)); });
+    addButton("Capture latest answer", async () => { const conversation = ownedConversation(); const observed = await stableAssistantObservation(); const model = prompt("Visible ChatGPT model (exactly as shown):", "GPT-5.6 Sol"); if (model === null) throw new Error("N6 model attestation cancelled"); const reasoning = prompt("Visible reasoning setting (exactly as shown):", "Wysoki"); if (reasoning === null) throw new Error("N6 reasoning attestation cancelled"); const now = new Date().toISOString(); const response = await send("capture_answer", {submission_key: active.submission_key, conversation_id: conversation, profile_id: null, raw_answer: observed.raw_answer, completion_observation: observed.completion_observation, model, reasoning, started_at: active.started_at, finished_at: now}); write(JSON.stringify(response.response || response)); });
+    addButton("Witness presentation", async () => { const conversation = ownedConversation(); const selector = "[data-bdb-n6-publication='" + CSS.escape(publicationId) + "']"; const rendered = document.querySelector(selector); if (!rendered || rendered.dataset.bdbN6Marker !== presentation.marker || rendered.dataset.bdbN6ResultDigest !== presentation.result_digest || rendered.textContent !== presentation.rendered_label) throw new Error("N6 exact Publication identity is not physically present in the canonical conversation DOM"); const response = await send("witness", {submission_key: active.submission_key, conversation_id: conversation, marker: rendered.dataset.bdbN6Marker, observed_marker: rendered.dataset.bdbN6Marker, observed_publication_id: rendered.dataset.bdbN6Publication, observed_result_digest: rendered.dataset.bdbN6ResultDigest, composer_preserved: true}); write(JSON.stringify(response.response || response)); });
     addButton("Mark presentation UNKNOWN", async () => { const conversation = ownedConversation(); const response = await send("unknown", {submission_key: active.submission_key, conversation_id: conversation, reason: "manual_dom_witness_not_observed"}); write(JSON.stringify(response.response || response)); });
     addButton("Prepare new-chat Resume", setPendingResume);
   } else {
@@ -729,20 +918,20 @@ void synchronizeConversation();
     return script.replace("__N6_SCENARIOS__", scenarios)
 
 
-def _cs_shim_source(python_executable: Path, repo_root: Path, config_path: Path) -> str:
+def _cs_shim_source(python_executable: Path, native_code_root: Path, config_path: Path) -> str:
     def esc(value: Path) -> str:
         return str(value).replace("\\", "\\\\").replace('"', '\\"')
-    return f'''using System.Diagnostics;\nusing System.IO;\nvar psi = new ProcessStartInfo {{ FileName = "{esc(python_executable)}", Arguments = "-m bdb_vnext.n6_rehearsal native-host --config \\"{esc(config_path)}\\"", WorkingDirectory = "{esc(repo_root)}", UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true }};\npsi.Environment["PYTHONPATH"] = "{esc(repo_root)}";\nusing var child = Process.Start(psi) ?? throw new InvalidOperationException("N6 Python host could not start");\nvar input = Console.OpenStandardInput(); var output = Console.OpenStandardOutput();\nasync Task PumpInput() {{ await input.CopyToAsync(child.StandardInput.BaseStream); child.StandardInput.Close(); }}\nvar toChild = PumpInput(); var fromChild = child.StandardOutput.BaseStream.CopyToAsync(output);\nawait Task.WhenAll(toChild, fromChild);\nawait child.WaitForExitAsync();\n'''
+    return f'''using System.Diagnostics;\nusing System.IO;\nvar psi = new ProcessStartInfo {{ FileName = "{esc(python_executable)}", Arguments = "-m bdb_vnext.n6_rehearsal native-host --config \\"{esc(config_path)}\\"", WorkingDirectory = "{esc(native_code_root)}", UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true }};\npsi.Environment["PYTHONPATH"] = "{esc(native_code_root)}";\npsi.Environment["PYTHONNOUSERSITE"] = "1";\nusing var child = Process.Start(psi) ?? throw new InvalidOperationException("N6 Python host could not start");\nvar input = Console.OpenStandardInput(); var output = Console.OpenStandardOutput();\nasync Task PumpInput() {{ await input.CopyToAsync(child.StandardInput.BaseStream); child.StandardInput.Close(); }}\nvar toChild = PumpInput(); var fromChild = child.StandardOutput.BaseStream.CopyToAsync(output);\nawait Task.WhenAll(toChild, fromChild);\nawait child.WaitForExitAsync();\n'''
 
 
-def _build_shim(output: Path, *, python_executable: Path, repo_root: Path, config_path: Path) -> Path | None:
+def _build_shim(output: Path, *, python_executable: Path, native_code_root: Path, config_path: Path) -> Path | None:
     dotnet = shutil.which("dotnet")
     if dotnet is None:
         return None
     source = output / "native-shim-src"
     publish = output / "native"
     source.mkdir(parents=True, exist_ok=True)
-    (source / "Program.cs").write_text(_cs_shim_source(python_executable, repo_root, config_path), encoding="utf-8")
+    (source / "Program.cs").write_text(_cs_shim_source(python_executable, native_code_root, config_path), encoding="utf-8")
     (source / "N6NativeHostShim.csproj").write_text("<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup></Project>\n", encoding="utf-8")
     build_environment = os.environ.copy()
     build_environment["DOTNET_CLI_HOME"] = str(output / ".dotnet")
@@ -788,12 +977,20 @@ def prepare_package(*, repo_root: str | Path, output: str | Path, runtime_root: 
     config_path = output_path / "native-config.json"
     py = Path(python_executable or sys.executable).expanduser().absolute()
     config = {"schema": N6_CONFIG_SCHEMA, "repo_root": str(repo), "runtime_root": str(runtime), "legacy_runtime_root": str(legacy), "source_commit": commit, "package_root": str(output_path), "package_digest": "pending", "browser_extension_id": identity["extension_id"], "native_host_name": N6_NATIVE_HOST_NAME, "protocol_generation": N6_PROTOCOL_GENERATION, "production_activation": False}
+    native_code = output_path / "native-code"
+    native_code.mkdir(parents=True, exist_ok=True)
+    archive = subprocess.run(["git", "-C", str(repo), "archive", "--format=tar", commit, "bdb_vnext", "bdb_shared", "pyproject.toml"], shell=False, capture_output=True, check=True)
+    import tarfile
+    with tarfile.open(fileobj=__import__("io").BytesIO(archive.stdout), mode="r:") as tar:
+        tar.extractall(native_code)
+    config["native_code_root"] = str(native_code)
+    config["native_code_digest"] = native_code_digest(native_code)
     _write_json(config_path, config)
-    shim = _build_shim(output_path, python_executable=py, repo_root=repo, config_path=config_path)
+    shim = _build_shim(output_path, python_executable=py, native_code_root=native_code, config_path=config_path)
     native_manifest_path = output_path / "native-host-manifest.json"
     native_path = shim or (output_path / "native-host.py")
     if shim is None:
-        (output_path / "native-host.py").write_text("from bdb_vnext.n6_rehearsal import main\nmain()\n", encoding="utf-8")
+        (output_path / "native-host.py").write_text("import sys\nsys.dont_write_bytecode = True\nfrom pathlib import Path\ncode = Path(__file__).resolve().parent / 'native-code'\nsys.path.insert(0, str(code))\nfrom bdb_vnext.n6_rehearsal import run_native_host\nrun_native_host(Path(__file__).resolve().parent / 'native-config.json')\n", encoding="utf-8")
     native_manifest = {"name": N6_NATIVE_HOST_NAME, "description": "BDB vNext N6 build-only rehearsal Native Host", "path": str(native_path), "type": "stdio", "allowed_origins": [f"chrome-extension://{identity['extension_id']}/"]}
     _write_json(native_manifest_path, native_manifest)
     register_script = output_path / "register-native-host.ps1"
@@ -809,7 +1006,7 @@ def prepare_package(*, repo_root: str | Path, output: str | Path, runtime_root: 
     package = package_digest(output_path)
     config["package_digest"] = package
     _write_json(config_path, config)
-    execution = {"schema": N6_EXECUTION_SCHEMA, "package": {"schema": N6_PACKAGE_SCHEMA, "version": N6_PACKAGE_VERSION, "digest": package, "root": str(output_path), "browser_extension": {"component_id": identity["component_id"], "extension_id": identity["extension_id"], "semantic_digest": identity["semantic_digest"], "manifest": str(browser / "manifest.json")}, "native_host": {"name": N6_NATIVE_HOST_NAME, "manifest": str(native_manifest_path), "path": str(native_path), "registration_script": str(register_script), "executable_ready": shim is not None}, "protocol_generation": N6_PROTOCOL_GENERATION}, "subject": {"repository": "bdb-vnext-n6-subject", "repo_root": str(repo), "branch": "bdb-vnext", "commit": commit, "tree": tree, "view_id": source_view.view_id}, "resources": {"runtime_root": str(runtime), "control_db": str(runtime / "control" / "control.db"), "legacy_runtime_root": str(legacy), "production_activation": False, "legacy_mutation": False}, "prompts": list(N6_TASKS), "manual_gate": "USER_OPERATED_ONLY"}
+    execution = {"schema": N6_EXECUTION_SCHEMA, "package": {"schema": N6_PACKAGE_SCHEMA, "version": N6_PACKAGE_VERSION, "digest": package, "root": str(output_path), "native_code_digest": config["native_code_digest"], "browser_extension": {"component_id": identity["component_id"], "extension_id": identity["extension_id"], "semantic_digest": identity["semantic_digest"], "manifest": str(browser / "manifest.json")}, "native_host": {"name": N6_NATIVE_HOST_NAME, "manifest": str(native_manifest_path), "path": str(native_path), "registration_script": str(register_script), "executable_ready": shim is not None, "code_root": str(native_code)}, "protocol_generation": N6_PROTOCOL_GENERATION}, "subject": {"repository": "bdb-vnext-n6-subject", "repo_root": str(repo), "branch": "bdb-vnext", "commit": commit, "tree": tree, "view_id": source_view.view_id}, "resources": {"runtime_root": str(runtime), "control_db": str(runtime / "control" / "control.db"), "legacy_runtime_root": str(legacy), "production_activation": False, "rehearsal_infrastructure": "ACTIVE_ONLY_WHEN_EXPLICIT_PACKAGE_LOADED", "legacy_mutation": False}, "prompts": list(N6_TASKS), "manual_gate": "USER_OPERATED_ONLY"}
     _write_json(output_path / "execution_manifest.json", execution)
     return execution
 
@@ -854,7 +1051,7 @@ def main(argv: list[str] | None = None) -> int:
     return run_native_host(args.config)
 
 
-__all__ = ["N6_CONFIG_SCHEMA", "N6_EVENT_SCHEMA", "N6_NATIVE_REQUEST_SCHEMA", "N6_NATIVE_RESPONSE_SCHEMA", "N6_PACKAGE_SCHEMA", "N6_PROTOCOL_GENERATION", "N6RehearsalConfig", "N6RehearsalError", "N6RehearsalService", "N6_TASKS", "package_digest", "prepare_package", "run_native_host", "write_manual_packet"]
+__all__ = ["N6_CONFIG_SCHEMA", "N6_EVENT_SCHEMA", "N6_NATIVE_REQUEST_SCHEMA", "N6_NATIVE_RESPONSE_SCHEMA", "N6_PACKAGE_SCHEMA", "N6_PROTOCOL_GENERATION", "N6RehearsalConfig", "N6RehearsalError", "N6RehearsalService", "N6_TASKS", "native_code_digest", "package_digest", "prepare_package", "run_native_host", "write_manual_packet"]
 
 
 if __name__ == "__main__":

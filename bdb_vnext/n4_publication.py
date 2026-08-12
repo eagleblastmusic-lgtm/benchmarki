@@ -363,7 +363,10 @@ class PublicationStore:
         if (candidate_id is None) != (candidate_view_id is None):
             _fail("candidate_binding_incomplete", "Candidate identity requires both candidate_id and candidate_view_id")
         if candidate_id is not None:
-            record = self.candidate_store.verify_sealed(_text(candidate_id, "candidate_id"))
+            try:
+                record = self.candidate_store.verify_current_applicability(_text(candidate_id, "candidate_id"))
+            except Exception as exc:
+                _fail("candidate_not_applicable", "Publication Candidate is not currently applicable", details={"cause": getattr(exc, "code", type(exc).__name__)})
             if record.state != CANDIDATE_SEALED or record.manifest_digest != candidate_view_id:
                 _fail("candidate_binding_mismatch", "Publication Candidate binding is not the exact sealed view")
         if evidence_id is not None:
@@ -372,11 +375,22 @@ class PublicationStore:
                 _fail("evidence_missing", "Publication evidence binding does not exist")
             if candidate_view_id is not None and evidence.candidate_view_id != candidate_view_id:
                 _fail("evidence_binding_mismatch", "Publication Evidence is bound to a different Candidate view")
+            evidence_query = self.evidence_store.query(evidence_id)
+            current_document = evidence_query.get("current_disposition")
             current = self.evidence_store.current_disposition(evidence_id)
+            if not (evidence_query.get("applicability", {}).get("applicable") is True and evidence_query.get("effective_disposition") in {"PASS", "FAIL"}):
+                # A freshly sealed Candidate may be valid while the checker
+                # result was made INCONCLUSIVE by an interrupted observation.
+                # Surface that distinction instead of hiding it behind a
+                # generic publication failure.
+                _fail("evidence_not_applicable", "Publication Evidence has no positively applicable current disposition")
+            if current_document is None or current is None:
+                _fail("disposition_missing", "Publication Evidence has no current disposition")
             if disposition_id is not None and (current is None or current.disposition_id != disposition_id):
                 _fail("disposition_binding_mismatch", "Publication disposition is not the current Evidence disposition")
-            if evaluation_id is not None and not any(item.evaluation_id == evaluation_id for item in self.evidence_store.evaluations(evidence_id)):
-                _fail("evaluation_binding_mismatch", "Publication evaluation is not bound to the Evidence")
+            if evaluation_id is not None:
+                if current.evaluation_id != evaluation_id:
+                    _fail("evaluation_binding_mismatch", "Publication evaluation is not the current positively applicable Evidence evaluation")
 
     def _identity(self, *, task_id: str, work_id: str, intent_revision_id: str, result_ref: ContentRef, candidate_id: str | None, candidate_view_id: str | None, evidence_id: str | None, evaluation_id: str | None, disposition_id: str | None) -> dict[str, Any]:
         return {
@@ -432,12 +446,16 @@ class PublicationStore:
             return existing
         self._validate_lineage(task_id=task_id, work_id=work_id, intent_revision_id=intent_revision_id, candidate_id=candidate_id, candidate_view_id=candidate_view_id, evidence_id=evidence_id, evaluation_id=evaluation_id, disposition_id=disposition_id)
         self.content_store.publish(ref, raw)
-        sequence = int(self._connection.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM n4_publications").fetchone()[0])
         created_at = _now()
         binding_identity = {"schema": N4_CONSUMER_SCHEMA, "publication_id": publication_id, "consumer_id": consumer_id, "consumer_kind": consumer_kind, "conversation_id": conversation_id, "profile_id": profile_id, "generation": generation, "intent_revision_id": intent_revision_id}
         binding_id = semantic_digest(binding_identity)
         self._connection.execute("BEGIN IMMEDIATE")
         try:
+            # Allocate the global publication sequence only after acquiring
+            # the writer lock.  A pre-transaction MAX()+1 allowed two
+            # connections to race and surface a raw UNIQUE error instead of
+            # deterministic replay/conflict semantics.
+            sequence = int(self._connection.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM n4_publications").fetchone()[0])
             self._connection.execute("INSERT INTO n4_publications VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (publication_id, request_id, task_id, work_id, intent_revision_id, _json(ref.as_dict()), ref.raw_digest, candidate_id, candidate_view_id, evidence_id, evaluation_id, disposition_id, consumer_id, consumer_kind, conversation_id, profile_id, generation, sequence, created_at, _json(identity)))
             self._connection.execute("INSERT INTO n4_consumer_bindings VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (binding_id, publication_id, consumer_id, consumer_kind, conversation_id, profile_id, generation, intent_revision_id, sequence - 1, None, UNKNOWN, None, None, created_at))
             self._connection.execute("INSERT INTO n4_consumer_cursors VALUES (?,?,?,?,?) ON CONFLICT(consumer_id,generation) DO NOTHING", (consumer_id, generation, sequence - 1, None, created_at))
@@ -472,6 +490,13 @@ class PublicationStore:
             self._connection.execute("INSERT INTO n4_consumer_bindings VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (binding_id, publication_id, cid, kind, conv, profile, gen, publication.intent_revision_id, publication.sequence - 1, None, UNKNOWN, None, None, now))
             self._connection.execute("INSERT INTO n4_consumer_cursors VALUES (?,?,?,?,?) ON CONFLICT(consumer_id,generation) DO NOTHING", (cid, gen, publication.sequence - 1, None, now))
             self._connection.commit()
+        except sqlite3.IntegrityError:
+            if self._connection.in_transaction:
+                self._connection.rollback()
+            replay = self.get_binding(publication_id, cid, generation=gen)
+            if replay is None or (replay.consumer_kind, replay.conversation_id, replay.profile_id) != (kind, conv, profile):
+                _fail("consumer_binding_conflict", "consumer identity is already bound to different canonical context")
+            return replay
         except Exception:
             if self._connection.in_transaction:
                 self._connection.rollback()
@@ -555,7 +580,18 @@ class PublicationStore:
         if _digest(result_digest, "result_digest") != pub.result_digest:
             _fail("presentation_digest_mismatch", "presentation witness result differs from Publication content")
         marker = _text(marker, "marker")
-        witness_payload = {"schema": N4_WITNESS_SCHEMA, "publication_id": publication_id, "consumer_id": binding.consumer_id, "conversation_id": binding.conversation_id, "profile_id": binding.profile_id, "marker": marker, "result_digest": result_digest, "composer_preserved": True, "witness": dict(witness or {})}
+        observation = dict(witness or {})
+        required_witness = {
+            "source": "chatgpt-dom-exact-publication",
+            "observation": "EXACT_RESULT_VISIBLE",
+            "observed_publication_id": publication_id,
+            "observed_conversation_id": binding.conversation_id,
+            "observed_marker": marker,
+            "observed_result_digest": pub.result_digest,
+        }
+        if any(observation.get(key) != value for key, value in required_witness.items()):
+            _fail("presentation_not_observed", "PRESENTED requires a positive exact-result DOM observation")
+        witness_payload = {"schema": N4_WITNESS_SCHEMA, "publication_id": publication_id, "consumer_id": binding.consumer_id, "conversation_id": binding.conversation_id, "profile_id": binding.profile_id, "marker": marker, "result_digest": result_digest, "composer_preserved": True, "witness": observation}
         raw = _json(witness_payload)
         ref = make_content_ref("application/json", N4_WITNESS_SCHEMA, raw)
         self.content_store.publish(ref, raw)
@@ -725,7 +761,7 @@ class CanonicalOperatorQuery:
         if record.primary_subject_kind == "CANDIDATE":
             candidate_id = str(record.primary_subject_identity.get("candidate_id", ""))
             try:
-                candidate_record = self.candidate_store.verify_sealed(candidate_id)
+                candidate_record = self.candidate_store.verify_current_applicability(candidate_id)
                 applicable = candidate_record.state == CANDIDATE_SEALED and candidate_record.manifest_digest == record.candidate_view_id
                 reason = "candidate_sealed_exact" if applicable else "candidate_stale_or_invalidated"
             except Exception:

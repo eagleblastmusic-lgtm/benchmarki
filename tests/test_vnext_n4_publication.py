@@ -131,9 +131,19 @@ def test_consumer_cursor_presentation_unknown_and_witness_are_separate(tmp_path:
         assert acknowledged.cursor_sequence == publication.sequence
         unknown = browser.mark_unknown(publication.publication_id, reason="dom_not_observed")
         assert unknown.presentation == UNKNOWN
-        witnessed_before_ack = browser.observe_dom(publication, marker="pre-ack-dom-witness")
+        witness = {
+            "source": "chatgpt-dom-exact-publication",
+            "observation": "EXACT_RESULT_VISIBLE",
+            "observed_publication_id": publication.publication_id,
+            "observed_conversation_id": "n4-conversation",
+            "observed_marker": "pre-ack-dom-witness",
+            "observed_result_digest": publication.result_digest,
+        }
+        with pytest.raises(N4Error, match="positive exact-result DOM"):
+            browser.observe_dom(publication, marker="pre-ack-dom-witness")
+        witnessed_before_ack = browser.observe_dom(publication, marker="pre-ack-dom-witness", witness=witness)
         assert witnessed_before_ack.presentation == PRESENTED
-        presented = browser.observe_dom(publication, marker="pre-ack-dom-witness")
+        presented = browser.observe_dom(publication, marker="pre-ack-dom-witness", witness=witness)
         assert presented.presentation == PRESENTED
         assert presented.witness_id
         with pytest.raises(N4Error, match="composer"):
@@ -151,6 +161,7 @@ def test_consumer_cursor_presentation_unknown_and_witness_are_separate(tmp_path:
             conversation_id="n4-conversation",
             marker="pre-ack-dom-witness",
             result_digest=publication.result_digest,
+            witness=witness,
         )
         assert replay.witness_id == presented.witness_id
         with pytest.raises(N4Error, match="canonical consumer binding"):
@@ -174,6 +185,14 @@ def test_resume_capsule_is_durable_and_new_consumer_does_not_inherit_presentatio
             conversation_id="n4-conversation",
             marker="old-dom-marker",
             result_digest=publication.result_digest,
+            witness={
+                "source": "chatgpt-dom-exact-publication",
+                "observation": "EXACT_RESULT_VISIBLE",
+                "observed_publication_id": publication.publication_id,
+                "observed_conversation_id": "n4-conversation",
+                "observed_marker": "old-dom-marker",
+                "observed_result_digest": publication.result_digest,
+            },
         )
         target = plane.publication.bind_consumer(
             publication_id=publication.publication_id,
@@ -297,6 +316,93 @@ def test_integrated_task_candidate_evidence_publication_query_flow(tmp_path: Pat
             assert query["subject"]["view_id"] == candidate.view_id
             assert query["evidence"]["effective_disposition"] == "PASS"
             assert query["publications"][0]["publication_id"] == publication.publication_id
+        finally:
+            if workspace.exists():
+                subprocess.run(["git", "-C", str(subject), "worktree", "remove", "--force", str(workspace)], check=False)
+
+
+def test_publication_revalidates_current_candidate_and_evidence_applicability(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    subject = tmp_path / "subject-applicability"
+    subject.mkdir()
+    import subprocess
+    subprocess.run(["git", "init", "-q", "-b", "main", str(subject)], check=True)
+    subprocess.run(["git", "-C", str(subject), "config", "user.name", "N4"], check=True)
+    subprocess.run(["git", "-C", str(subject), "config", "user.email", "n4@example.invalid"], check=True)
+    (subject / "one.txt").write_bytes(b"one\n")
+    subprocess.run(["git", "-C", str(subject), "add", "one.txt"], check=True)
+    subprocess.run(["git", "-C", str(subject), "commit", "-qm", "base"], check=True)
+    view = RepositoryResource.from_path(subject, repository_id="n4-applicability-subject").resolve_committed("HEAD")
+    with root.open_control_plane() as plane:
+        receipt, work = _task(plane, "n4:applicability:request")
+        lease = plane.work_kernel.acquire_lease(work.work_id, "n4:applicability:lease", "n4:applicability:worker")
+        workspace = plane.candidate.create_workspace(candidate_id="n4:applicability:candidate", base_view=view)
+        try:
+            prepared = plane.candidate.prepare(
+                candidate_id="n4:applicability:candidate", work_id=work.work_id, task_id=receipt.task_id,
+                lease_id=lease.lease_id, fence=lease.fence, base_view=view, workspace_root=workspace,
+                replacements={"one.txt": b"checked\n"},
+            )
+            plane.candidate.apply(prepared.candidate_id)
+            _sealed, candidate = plane.candidate.seal(prepared.candidate_id, base_view=view)
+            evaluation = MinimumCandidateChecker(Path(__file__).parents[1], plane.evidence).check(
+                candidate, request_id="n4:applicability:evidence"
+            )
+            current = plane.evidence.current_disposition(evaluation.evidence_id)
+            assert current is not None and current.disposition == "PASS"
+
+            (workspace / "one.txt").write_bytes(b"tampered after seal\n")
+            query = plane.evidence.query(evaluation.evidence_id)
+            assert query["applicability"]["applicable"] is False
+            assert query["effective_disposition"] == "INCONCLUSIVE"
+            historical = plane.evidence.evaluations(evaluation.evidence_id)
+            dispositions = plane.evidence.dispositions(evaluation.evidence_id)
+
+            with pytest.raises(N4Error) as caught:
+                plane.publication.publish(
+                    request_id="n4:applicability:publication", task_id=receipt.task_id,
+                    work_id=work.work_id, intent_revision_id=receipt.intent_revision_id,
+                    result_payload={"candidate_view_id": candidate.view_id}, consumer_id="n4-browser",
+                    consumer_kind="BROWSER", conversation_id="n4-conversation",
+                    candidate_id=candidate.candidate_id, candidate_view_id=candidate.view_id,
+                    evidence_id=evaluation.evidence_id, evaluation_id=evaluation.evaluation_id,
+                    disposition_id=current.disposition_id,
+                )
+            assert caught.value.code in {"candidate_not_applicable", "evidence_not_applicable"}
+            assert plane.publication.publications_for_task(receipt.task_id) == ()
+            assert plane.publication._connection.execute("SELECT COUNT(*) FROM n4_consumer_bindings").fetchone()[0] == 0
+            assert plane.evidence.evaluations(evaluation.evidence_id) == historical
+            assert plane.evidence.dispositions(evaluation.evidence_id) == dispositions
+        finally:
+            if workspace.exists():
+                subprocess.run(["git", "-C", str(subject), "worktree", "remove", "--force", str(workspace)], check=False)
+
+
+def test_unchanged_current_candidate_still_publishes(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    subject = tmp_path / "subject-current"
+    subject.mkdir()
+    import subprocess
+    subprocess.run(["git", "init", "-q", "-b", "main", str(subject)], check=True)
+    subprocess.run(["git", "-C", str(subject), "config", "user.name", "N4"], check=True)
+    subprocess.run(["git", "-C", str(subject), "config", "user.email", "n4@example.invalid"], check=True)
+    (subject / "one.txt").write_bytes(b"one\n")
+    subprocess.run(["git", "-C", str(subject), "add", "one.txt"], check=True)
+    subprocess.run(["git", "-C", str(subject), "commit", "-qm", "base"], check=True)
+    view = RepositoryResource.from_path(subject, repository_id="n4-current-subject").resolve_committed("HEAD")
+    with root.open_control_plane() as plane:
+        receipt, work = _task(plane, "n4:current:request")
+        lease = plane.work_kernel.acquire_lease(work.work_id, "n4:current:lease", "n4:current:worker")
+        workspace = plane.candidate.create_workspace(candidate_id="n4:current:candidate", base_view=view)
+        try:
+            prepared = plane.candidate.prepare(candidate_id="n4:current:candidate", work_id=work.work_id, task_id=receipt.task_id, lease_id=lease.lease_id, fence=lease.fence, base_view=view, workspace_root=workspace, replacements={"one.txt": b"current\n"})
+            plane.candidate.apply(prepared.candidate_id)
+            _sealed, candidate = plane.candidate.seal(prepared.candidate_id, base_view=view)
+            evaluation = MinimumCandidateChecker(Path(__file__).parents[1], plane.evidence).check(candidate, request_id="n4:current:evidence")
+            current = plane.evidence.current_disposition(evaluation.evidence_id)
+            assert current is not None
+            publication = plane.publication.publish(request_id="n4:current:publication", task_id=receipt.task_id, work_id=work.work_id, intent_revision_id=receipt.intent_revision_id, result_payload={"candidate_view_id": candidate.view_id}, consumer_id="n4-browser", consumer_kind="BROWSER", conversation_id="n4-conversation", candidate_id=candidate.candidate_id, candidate_view_id=candidate.view_id, evidence_id=evaluation.evidence_id, evaluation_id=evaluation.evaluation_id, disposition_id=current.disposition_id)
+            assert publication.candidate_view_id == candidate.view_id
         finally:
             if workspace.exists():
                 subprocess.run(["git", "-C", str(subject), "worktree", "remove", "--force", str(workspace)], check=False)

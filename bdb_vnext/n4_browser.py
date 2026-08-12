@@ -32,6 +32,7 @@ class BrowserPublicationClient:
         return self.store.acknowledge(consumer_id=self.consumer_id, publication_id=publication_id, generation=self.generation, fault=fault)
 
     def observe_dom(self, publication: PublicationRecord, *, marker: str, composer_preserved: bool = True, witness: Mapping[str, Any] | None = None) -> ConsumerBinding:
+        observation = dict(witness or {})
         return self.store.observe_presentation(
             publication_id=publication.publication_id,
             consumer_id=self.consumer_id,
@@ -41,7 +42,7 @@ class BrowserPublicationClient:
             result_digest=publication.result_digest,
             generation=self.generation,
             composer_preserved=composer_preserved,
-            witness=witness,
+            witness=observation,
         )
 
     def mark_unknown(self, publication_id: str, *, reason: str) -> ConsumerBinding:

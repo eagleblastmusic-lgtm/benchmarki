@@ -440,3 +440,13 @@ def test_missing_workspace_is_unknown_not_certainty(tmp_path: Path) -> None:
         recovered = store.observe(prepared.candidate_id)
         assert recovered.state == "UNKNOWN"
         assert recovered.effect_certainty == "UNKNOWN"
+
+
+def test_candidate_retention_inventory_is_non_destructive(tmp_path: Path) -> None:
+    with _stack(tmp_path) as (_subject, view, _kernel, store, work_id, task_id, lease):
+        workspace = store.create_workspace(candidate_id="candidate:inventory", base_view=view)
+        prepared = store.prepare(candidate_id="candidate:inventory", work_id=work_id, task_id=task_id, lease_id=lease.lease_id, fence=lease.fence, base_view=view, workspace_root=workspace, replacements={"one.txt": b"inventory\n"})
+        rows = store.retention_inventory()
+        item = next(row for row in rows if row["candidate_id"] == prepared.candidate_id)
+        assert item["classification"] == "recovery_required"
+        assert workspace.exists()

@@ -801,6 +801,7 @@ class VNextCompositionRoot:
         from bdb_vnext.n4_publication import CanonicalOperatorQuery, PublicationStore
         from bdb_vnext.m3c_admission import _open_vnext_admission_composition
         from bdb_vnext.m4a_work_kernel import WorkKernelStore
+        from bdb_vnext.control_store import ensure_layout_identity
 
         bindings = None
         admission = None
@@ -835,6 +836,7 @@ class VNextCompositionRoot:
                 candidate_store=candidate,
                 evidence_store=evidence,
             )
+            ensure_layout_identity(work_kernel._connection)
             operator_query = CanonicalOperatorQuery(
                 self,
                 admission=admission,

@@ -1113,6 +1113,71 @@ class WorkKernelStore:
 
         return self._write(operation, failpoint=failpoint)
 
+    def adopt_active_run(
+        self,
+        work_id: str,
+        run_id: str,
+        lease_id: str,
+        fence: int,
+        expected_state_version: int,
+        *,
+        now: float | None = None,
+        failpoint: FailPoint | None = None,
+    ) -> RunRecord:
+        """Transfer an interrupted active Run to the current fenced owner.
+
+        The Run identity and lifecycle truth are preserved.  Only the
+        ownership coordinates advance, after the old lease has expired or
+        been replaced and the caller positively proves the current lease.
+        This is the bounded restart/reconciler path; it performs no effect.
+        """
+
+        work_id = _text(work_id, field="work_id")
+        run_id = _text(run_id, field="run_id")
+        timestamp = self._now(now)
+
+        def operation() -> RunRecord:
+            work = self._require_work(work_id)
+            self._expect_version(work, expected_state_version)
+            if str(work[3]) != "RUNNING":
+                _fail("invalid_transition", "only a RUNNING WorkItem can adopt its active Run")
+            self._require_lease(work_id, lease_id, fence, now=timestamp)
+            row = self._connection.execute(
+                "SELECT run_id,work_id,status,outcome,effect_certainty,lease_id,fence,started_order,ended_order "
+                "FROM m4a_runs WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if row is None or str(row[1]) != work_id or str(row[2]) != "ACTIVE":
+                _fail("active_run_missing", "restart recovery found no matching active Run")
+            if str(row[5]) == lease_id and int(row[6]) == fence:
+                return self._run(row)
+            if int(row[6]) >= fence:
+                _fail("stale_fence", "Run ownership cannot move to an older or equal foreign fence")
+            order = self._next_order()
+            self._connection.execute(
+                "UPDATE m4a_runs SET lease_id=?,fence=? WHERE run_id=? AND status='ACTIVE'",
+                (lease_id, fence, run_id),
+            )
+            version = self._bump_work(work, disposition="RUNNING", order=order, now=timestamp)
+            self._append_fact(
+                work_id=work_id,
+                state_version=version,
+                kind="run_ownership_adopted",
+                from_disposition="RUNNING",
+                to_disposition="RUNNING",
+                payload={"run_id": run_id, "lease_id": lease_id, "fence": fence},
+                created_order=order,
+            )
+            updated = self._connection.execute(
+                "SELECT run_id,work_id,status,outcome,effect_certainty,lease_id,fence,started_order,ended_order "
+                "FROM m4a_runs WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            assert updated is not None
+            return self._run(updated)
+
+        return self._write(operation, failpoint=failpoint)
+
     def resolve_wait(
         self,
         work_id: str,

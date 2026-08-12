@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import stat
+import sqlite3
 import subprocess
 import tempfile
 from collections.abc import Mapping
@@ -26,7 +27,7 @@ from bdb_vnext.content_store import (
     make_content_ref,
 )
 from bdb_vnext.control_store import assert_database_path, configure_connection, ensure_identity
-from bdb_vnext.repo_view import CommittedRepoView, RepoTreeEntry
+from bdb_vnext.repo_view import CommittedRepoView, RepoTreeEntry, RepositoryResource
 
 
 CANDIDATE_SCHEMA = "bdb-vnext-candidate-v1"
@@ -455,6 +456,97 @@ class CandidateStore:
     def _serialize_view(view: CommittedRepoView) -> dict[str, Any]:
         view.validate_integrity()
         return view.to_dict()
+
+    def _bound_base_view(self, record: CandidateRecord) -> CommittedRepoView:
+        """Reconstruct the exact committed authority persisted by preparation.
+
+        Readers must not need a caller-supplied moving ref in order to verify a
+        retained sealed workspace.  The durable Candidate record already binds
+        the repository identity and exact commit/tree; reopen that identity and
+        require the resolved committed object to equal the persisted view.
+        """
+
+        base = record.base_view
+        repository = base.get("repository")
+        if not isinstance(repository, Mapping):
+            _fail("candidate_base_corrupt", "Candidate base repository binding is missing")
+        repository_id = repository.get("repository_id")
+        identity_digest = repository.get("identity_digest")
+        if not isinstance(repository_id, str) or not isinstance(identity_digest, str):
+            _fail("candidate_base_corrupt", "Candidate base repository identity is incomplete")
+        # The serialized RepoView deliberately excludes a mutable filesystem
+        # locator.  A retained Git-native Candidate worktree is nevertheless
+        # bound to the same common object database, so it is the safe locator
+        # from which to reopen the persisted exact commit.
+        workspace = Path(record.workspace_root)
+        if not workspace.exists():
+            _fail("candidate_base_unavailable", "retained Candidate workspace is unavailable for current applicability proof")
+        try:
+            resource = RepositoryResource.from_path(workspace, repository_id=repository_id)
+            if resource.identity_digest != identity_digest:
+                _fail("candidate_base_mismatch", "Candidate workspace is bound to a different repository authority")
+            view = resource.resolve_committed(str(base.get("commit_oid", "")))
+        except CandidateError:
+            raise
+        except Exception as exc:
+            raise CandidateError("candidate_base_unavailable", "Candidate committed base cannot be reopened") from exc
+        if (
+            view.view_id != base.get("view_id")
+            or view.commit_oid != base.get("commit_oid")
+            or view.tree_oid != base.get("tree_oid")
+            or view.repository_id != repository_id
+            or view.repository_identity_digest != identity_digest
+        ):
+            _fail("candidate_base_mismatch", "reopened Candidate base differs from the prepared exact RepoView")
+        return view
+
+    def verify_current_applicability(self, candidate_id: str) -> CandidateRecord:
+        """Positively prove the current sealed Candidate before consumption.
+
+        This is the canonical read-side applicability boundary used by
+        Evidence, Publication and recovery.  Missing retained workspaces are
+        valid because the immutable manifest + CAS + exact committed base are
+        the post-seal authority; a retained workspace, when present, must still
+        equal that authority exactly.
+        """
+
+        record = self.get(candidate_id)
+        if record is None:
+            _fail("candidate_missing", "Candidate does not exist")
+        if record.state != CANDIDATE_SEALED:
+            _fail("candidate_not_sealed", "Candidate has no sealed immutable view")
+        base_view = self._bound_base_view(record)
+        current = self.invalidate_if_changed(record.candidate_id, base_view=base_view)
+        if current.state != CANDIDATE_SEALED:
+            _fail("candidate_invalidated", "Candidate no longer matches its immutable sealed view")
+        return self.verify_sealed(record.candidate_id, base_view=base_view)
+
+    def retention_inventory(self) -> tuple[dict[str, Any], ...]:
+        """Classify retained Candidate workspaces without deleting evidence."""
+
+        rows = self._connection.execute(
+            "SELECT candidate_id,state,workspace_root,manifest_digest FROM m4b_candidate_effects ORDER BY candidate_id"
+        ).fetchall()
+        inventory: list[dict[str, Any]] = []
+        for candidate_id, state, workspace_root, manifest_digest in rows:
+            references: list[str] = []
+            for table, column in (("m4c_evidence_records", "candidate_view_id"), ("n4_publications", "candidate_id")):
+                try:
+                    count = int(self._connection.execute(f"SELECT COUNT(*) FROM {table} WHERE {column} IN (?,?)", (candidate_id, manifest_digest)).fetchone()[0])
+                except sqlite3.DatabaseError:
+                    count = 0
+                if count:
+                    references.append(table)
+            if references:
+                classification = "canonically_referenced"
+            elif state in {CANDIDATE_PREPARED, CANDIDATE_POSSIBLE, CANDIDATE_APPLIED, CANDIDATE_UNKNOWN, CANDIDATE_DIVERGED}:
+                classification = "recovery_required"
+            elif state == CANDIDATE_INVALIDATED:
+                classification = "disposable_candidate"
+            else:
+                classification = "historical_evidence"
+            inventory.append({"candidate_id": str(candidate_id), "state": str(state), "workspace_root": str(workspace_root), "manifest_digest": manifest_digest, "classification": classification, "referenced_by": references})
+        return tuple(inventory)
 
     def _base_entries(self, view: CommittedRepoView) -> dict[str, tuple[str, str]]:
         entries = view.list_entries()
@@ -900,7 +992,6 @@ class CandidateStore:
             _fail("candidate_missing", "Candidate does not exist")
         if record.state != CANDIDATE_SEALED:
             return record
-        self._assert_owner(record)
         workspace_path = Path(record.workspace_root)
         if not workspace_path.exists():
             return record
@@ -914,6 +1005,11 @@ class CandidateStore:
                 planned[item.path] = (_blob_oid(self.content_store.resolve(item.after_ref), base_view.object_format), "100755" if item.after_mode & 0o111 else "100644")
             changed = changed or actual != planned
         if changed:
+            # Revalidation is readable after the producing lease is released,
+            # but changing canonical Candidate state still requires the
+            # current Work lease/fence.  A stale reader therefore fails closed
+            # rather than silently rewriting the sealed record.
+            self._assert_owner(record)
             self._connection.execute("UPDATE m4b_candidate_effects SET state=?,effect_certainty=? WHERE candidate_id=?", (CANDIDATE_INVALIDATED, "UNKNOWN", record.candidate_id))
             self._connection.commit()
             return self.get(candidate_id)  # type: ignore[return-value]

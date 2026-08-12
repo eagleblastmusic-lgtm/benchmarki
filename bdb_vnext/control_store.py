@@ -21,6 +21,8 @@ from bdb_vnext.composition import CONFIG_GENERATION, GENERATION_ID, CONTROL_STOR
 CONTROL_IDENTITY_SCHEMA = "bdb-vnext-control-identity-v1"
 CONTROL_MIGRATION_ID = "n1-unified-control-v1"
 CONTROL_METADATA_TABLE = "vnext_control_metadata"
+CONTROL_LAYOUT_TABLE = "vnext_control_layout"
+CONTROL_DB_USER_VERSION = 2
 CONTROL_DATABASE_RELATIVE_PATH = Path("control") / "control.db"
 CONTROL_BUSY_TIMEOUT_MS = 250
 
@@ -145,6 +147,15 @@ def ensure_identity(connection: sqlite3.Connection) -> dict[str, str]:
 
     expected = expected_identity()
     try:
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        if version not in {0, CONTROL_DB_USER_VERSION}:
+            _fail("control_user_version_mismatch", "Control DB user_version is not supported")
+        if version == 0:
+            connection.execute(f"PRAGMA user_version={CONTROL_DB_USER_VERSION}")
+            connection.commit()
+    except sqlite3.DatabaseError as exc:
+        raise ControlStoreError("control_user_version_read_failed", "Control DB user_version could not be verified") from exc
+    try:
         connection.execute(
             f"CREATE TABLE IF NOT EXISTS {CONTROL_METADATA_TABLE} ("
             "key TEXT PRIMARY KEY, value TEXT NOT NULL)"
@@ -185,6 +196,55 @@ def ensure_identity(connection: sqlite3.Connection) -> dict[str, str]:
         except sqlite3.DatabaseError as exc:
             raise ControlStoreError("control_identity_write_failed", "Control DB identity could not be initialized") from exc
     return expected
+
+
+_REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
+    "m3a_tasks": ("task_id", "submission_key", "intent_revision_id"),
+    "m4a_work_items": ("work_id", "task_id", "disposition", "state_version"),
+    "m4a_runs": ("run_id", "work_id", "outcome", "effect_certainty"),
+    "m4b_candidate_effects": ("candidate_id", "base_view_json", "workspace_root", "manifest_digest"),
+    "m4c_evidence_records": ("evidence_id", "candidate_view_id", "raw_ref_json"),
+    "m4c_evaluations": ("evaluation_id", "evidence_id", "applicability"),
+    "n4_publications": ("publication_id", "task_id", "result_ref_json", "sequence"),
+}
+
+
+def _layout_digest(connection: sqlite3.Connection) -> str:
+    rows = connection.execute(
+        "SELECT type,name,COALESCE(sql,'') FROM sqlite_master "
+        "WHERE name NOT LIKE 'sqlite_%' AND name<>? ORDER BY type,name",
+        (CONTROL_LAYOUT_TABLE,),
+    ).fetchall()
+    return semantic_digest({"schema": CONTROL_IDENTITY_SCHEMA, "objects": [list(row) for row in rows]})
+
+
+def ensure_layout_identity(connection: sqlite3.Connection) -> str:
+    """Fail closed on unsupported SQLite layout drift after all stores initialize."""
+
+    try:
+        connection.execute(
+            f"CREATE TABLE IF NOT EXISTS {CONTROL_LAYOUT_TABLE} "
+            "(layout_id INTEGER PRIMARY KEY CHECK(layout_id=1), digest TEXT NOT NULL)"
+        )
+        for table, required in _REQUIRED_COLUMNS.items():
+            row = connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+            if row is None:
+                _fail("control_layout_missing", f"Control DB table is missing: {table}")
+            columns = {str(item[1]) for item in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+            if not set(required) <= columns:
+                _fail("control_layout_mismatch", f"Control DB table columns differ: {table}")
+        digest = _layout_digest(connection)
+        existing = connection.execute(f"SELECT digest FROM {CONTROL_LAYOUT_TABLE} WHERE layout_id=1").fetchone()
+        if existing is None:
+            connection.execute(f"INSERT INTO {CONTROL_LAYOUT_TABLE}(layout_id,digest) VALUES (1,?)", (digest,))
+            connection.commit()
+        elif str(existing[0]) != digest:
+            _fail("control_layout_mismatch", "Control DB structural fingerprint differs")
+        return digest
+    except sqlite3.DatabaseError as exc:
+        if isinstance(exc, ControlStoreError):
+            raise
+        raise ControlStoreError("control_layout_read_failed", "Control DB layout could not be verified") from exc
 
 
 def read_identity(connection: sqlite3.Connection) -> dict[str, str]:
@@ -292,6 +352,8 @@ __all__ = [
     "CONTROL_DATABASE_RELATIVE_PATH",
     "CONTROL_IDENTITY_SCHEMA",
     "CONTROL_METADATA_TABLE",
+    "CONTROL_LAYOUT_TABLE",
+    "CONTROL_DB_USER_VERSION",
     "CONTROL_MIGRATION_ID",
     "CONTROL_SCHEMA_CHECKSUM",
     "CONTROL_PRE_N4_SCHEMA_CHECKSUM",
@@ -303,6 +365,7 @@ __all__ = [
     "config_digest",
     "configure_connection",
     "ensure_identity",
+    "ensure_layout_identity",
     "expected_identity",
     "read_identity",
     "validate_backup_identity",

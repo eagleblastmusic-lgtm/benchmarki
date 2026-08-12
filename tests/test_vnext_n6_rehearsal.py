@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+from bdb_vnext.m3c_admission import M3cError
+from bdb_vnext.n4_publication import N4Error
 from bdb_vnext.n6_rehearsal import (
     N6_CONFIG_SCHEMA,
     N6_EVENT_SCHEMA,
@@ -16,6 +19,7 @@ from bdb_vnext.n6_rehearsal import (
     N6RehearsalConfig,
     N6RehearsalService,
     N6_TASKS,
+    native_code_digest,
     _js_content,
     _task_conversation,
     prepare_package,
@@ -53,6 +57,12 @@ def test_prepare_package_isolated_and_status_ready(tmp_path: Path, monkeypatch) 
     config = json.loads(config_path.read_text(encoding="utf-8"))
     assert config["schema"] == N6_CONFIG_SCHEMA
     assert N6RehearsalConfig.from_json(config_path).package_digest == execution["package"]["digest"]
+    parsed = N6RehearsalConfig.from_json(config_path)
+    assert parsed.native_code_root == package_root / "native-code"
+    assert parsed.native_code_root != repo
+    assert parsed.native_code_digest == execution["package"]["native_code_digest"] == native_code_digest(parsed.native_code_root)
+    assert "PYTHONPATH" not in (package_root / "native-host.py").read_text(encoding="utf-8")
+    assert "native-code" in (package_root / "native-host.py").read_text(encoding="utf-8")
 
     service = N6RehearsalService(N6RehearsalConfig.from_json(config_path))
     response = service.handle({
@@ -72,6 +82,46 @@ def test_prepare_package_isolated_and_status_ready(tmp_path: Path, monkeypatch) 
     assert execution["package"]["native_host"]["registration_script"] in packet
     assert all(task["id"] in packet for task in N6_TASKS)
     assert N6RehearsalService(N6RehearsalConfig.from_json(config_path)).package_digest == execution["package"]["digest"]
+
+
+def test_native_package_code_does_not_follow_live_checkout(tmp_path: Path, monkeypatch) -> None:
+    repo = Path(__file__).parents[1].absolute()
+    package_root = tmp_path / "package"
+    monkeypatch.setattr("bdb_vnext.n6_rehearsal._build_shim", lambda *args, **kwargs: None)
+    execution = prepare_package(repo_root=repo, output=package_root, runtime_root=tmp_path / "runtime", legacy_runtime_root=tmp_path / "legacy", source_commit="HEAD", python_executable=sys.executable)
+    config = N6RehearsalConfig.from_json(package_root / "native-config.json")
+    bundled = (config.native_code_root / "bdb_vnext" / "n6_rehearsal.py").read_bytes()
+    assert bundled
+    assert config.native_code_root.is_relative_to(package_root)
+    assert config.native_code_digest == execution["package"]["native_code_digest"]
+
+
+def test_n6_vertical_reconciles_lost_admission_and_publication_responses(tmp_path: Path, monkeypatch) -> None:
+    repo = Path(__file__).parents[1].absolute()
+    subject = tmp_path / "subject"
+    subject.mkdir()
+    shutil.copytree(repo / "bdb_vnext", subject / "bdb_vnext", ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(repo / "bdb_shared", subject / "bdb_shared", ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copy2(repo / "pyproject.toml", subject / "pyproject.toml")
+    subprocess.run(["git", "init", "-q", "-b", "main", str(subject)], check=True)
+    subprocess.run(["git", "-C", str(subject), "config", "user.name", "N6"], check=True)
+    subprocess.run(["git", "-C", str(subject), "config", "user.email", "n6@example.invalid"], check=True)
+    subprocess.run(["git", "-C", str(subject), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(subject), "commit", "-qm", "n6 subject"], check=True)
+    package_root = tmp_path / "package"
+    monkeypatch.setattr("bdb_vnext.n6_rehearsal._build_shim", lambda *args, **kwargs: None)
+    prepare_package(repo_root=subject, output=package_root, runtime_root=tmp_path / "runtime", legacy_runtime_root=tmp_path / "legacy", source_commit="HEAD", python_executable=sys.executable)
+    service = N6RehearsalService(N6RehearsalConfig.from_json(package_root / "native-config.json"))
+    with pytest.raises(M3cError, match="ACK"):
+        service._run_vertical(submission_key="n6:lost-admission", prompt="RUN-05", conversation_id="chatgpt-conversation:n6-owner", profile_id=None, fault="admission_response_lost")
+    first = service._run_vertical(submission_key="n6:lost-admission", prompt="RUN-05", conversation_id="chatgpt-conversation:n6-owner", profile_id=None)
+    assert first["work"]["work"]["disposition"] == "FINISHED"
+    assert first["work"]["last_run"]["outcome"] == "SUCCEEDED"
+    with pytest.raises(N4Error, match="committed"):
+        service._run_vertical(submission_key="n6:lost-publication", prompt="RUN-05", conversation_id="chatgpt-conversation:n6-owner-2", profile_id=None, fault="publication")
+    replay = service._run_vertical(submission_key="n6:lost-publication", prompt="RUN-05", conversation_id="chatgpt-conversation:n6-owner-2", profile_id=None)
+    assert replay["publication_id"]
+    assert replay["work"]["work"]["disposition"] == "FINISHED"
 
 
 def test_n6_capture_contract_preserves_model_and_reasoning_attestation() -> None:
@@ -133,7 +183,7 @@ class Element {{
   get textContent() {{ return this._text + this.children.map((item) => item.textContent || '').join(''); }}
   get innerText() {{ return this.textContent; }}
   set innerHTML(value) {{ this._html = String(value); if (this._html.includes('n6-output')) {{ const output = new Element('div'); output.className = 'n6-output'; this.children = [output]; }} }}
-  querySelector(selector) {{ return selector === '.n6-output' ? this.children.find((item) => item.className === 'n6-output') || null : null; }}
+  querySelector(selector) {{ return selector === '.n6-output' ? this.children.find((item) => item.className === 'n6-output') || null : this.children.find((item) => selector.includes(item.dataset.bdbN6Publication || '__never__')) || null; }}
 }}
 
 function makeContext(store, href, userTexts, mode = 'valid') {{
@@ -141,7 +191,7 @@ function makeContext(store, href, userTexts, mode = 'valid') {{
   const document = {{
     documentElement: root,
     createElement: (tag) => new Element(tag),
-    querySelector: () => null,
+    querySelector: (selector) => root.querySelector(selector),
     querySelectorAll: (selector) => selector === "[data-message-author-role='user']" ? userTexts.map((text) => ({{ innerText: text, textContent: text }})) : [],
   }};
   const storage = {{
@@ -160,7 +210,7 @@ function makeContext(store, href, userTexts, mode = 'valid') {{
       return {{ ok: true, response: {{ status: 'OK', result: {{ task_id: 'task-1', publication_id: 'publication-1' }} }} }};
     }} }},
   }};
-  const context = {{ console, crypto: webcrypto, TextEncoder, URL, location: {{ href }}, document, window: {{ addEventListener: () => {{}} }}, MutationObserver: class {{ observe() {{}} }}, chrome, setInterval: () => 0, clearInterval: () => {{}}, setTimeout, clearTimeout }};
+  const context = {{ console, crypto: webcrypto, TextEncoder, URL, CSS: {{ escape: (value) => String(value) }}, location: {{ href }}, document, window: {{ addEventListener: () => {{}} }}, MutationObserver: class {{ observe() {{}} }}, chrome, setInterval: () => 0, clearInterval: () => {{}}, setTimeout, clearTimeout, prompt: () => 'attested' }};
   vm.runInNewContext(generated, context);
   return {{ root, document }};
 }}

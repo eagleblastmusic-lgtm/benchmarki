@@ -17,6 +17,7 @@ from bdb_vnext.composition import VNextLayout, build_vnext_composition_manifest
 from bdb_vnext.content_store import DurableBindingStore, TypedContextFragment, make_content_ref
 from bdb_vnext.m3a_submission import ShadowSubmissionRequest
 from bdb_vnext.provider_root import VNextCompositionRoot
+from bdb_vnext.control_store import ControlStoreError
 from bdb_vnext.m4a_work_kernel import M4aError, WorkKernelStore
 
 
@@ -94,6 +95,19 @@ def test_gate_b_root_constructs_typed_control_plane_without_activation(tmp_path:
         assert plane.root is root
         assert plane.admission.authority.control_database_path == plane.work_kernel.database_path
         assert plane.work_kernel.writer_id == "m4a-vnext-work-kernel-writer"
+        with sqlite3.connect(plane.work_kernel.database_path) as connection:
+            assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+
+
+def test_control_schema_version_and_layout_fail_closed(tmp_path: Path) -> None:
+    root, runtime, _legacy = _manifest(tmp_path)
+    with root.open_control_plane() as plane:
+        database = plane.work_kernel.database_path
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA user_version=99")
+        connection.commit()
+    with pytest.raises(ControlStoreError, match="user_version"):
+        root.open_control_plane()
 
 
 def test_gate_d_v2_backup_restores_semantic_state_and_reachable_content(tmp_path: Path) -> None:
