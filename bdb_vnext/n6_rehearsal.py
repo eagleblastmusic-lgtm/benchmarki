@@ -46,7 +46,7 @@ N6_EXECUTION_SCHEMA = "bdb-vnext-n6-execution-manifest-v1"
 N6_EVENT_SCHEMA = "bdb-vnext-n6-browser-event-v1"
 N6_NATIVE_REQUEST_SCHEMA = "bdb-vnext-n6-native-request-v1"
 N6_NATIVE_RESPONSE_SCHEMA = "bdb-vnext-n6-native-response-v1"
-N6_PACKAGE_VERSION = "0.1.0"
+N6_PACKAGE_VERSION = "0.1.1"
 N6_PROTOCOL_GENERATION = "bdb-vnext-n6-protocol-v1"
 N6_NATIVE_HOST_NAME = NATIVE_HOST_NAME
 N6_BROWSER_COMPONENT = BROWSER_COMPONENT_ID
@@ -125,6 +125,12 @@ def _overlap(left: Path, right: Path) -> bool:
 
 def _request_id(prefix: str) -> str:
     return f"{prefix}:{secrets.token_hex(12)}"
+
+
+def _task_conversation(found: Mapping[str, Any]) -> str:
+    task = _mapping(found.get("task"), "task")
+    binding = _mapping(task.get("conversation_binding"), "task.conversation_binding")
+    return _text(binding.get("conversation_id"), "task.conversation_binding.conversation_id")
 
 
 def _stable_id(prefix: str, value: str) -> str:
@@ -368,22 +374,32 @@ class N6RehearsalService:
                 reasoning = payload.get("reasoning") if isinstance(payload.get("reasoning"), str) else None
                 started = _text(payload.get("started_at"), "started_at")
                 finished = _text(payload.get("finished_at"), "finished_at")
-                raw = {"schema": N6_EVENT_SCHEMA, "event": "assistant_capture", "submission_key": submission_key, "task_id": found["task_id"], "work_id": found["work_id"], "candidate_id": found["candidate_id"], "candidate_view_id": found["candidate_view_id"], "publication_id": publication.publication_id, "conversation_id": _text(payload.get("conversation_id"), "conversation_id"), "profile_id": payload.get("profile_id"), "model": model, "reasoning": reasoning, "started_at": started, "finished_at": finished, "raw_answer": answer, "raw_answer_digest": _sha(answer.encode("utf-8"))}
+                conversation_id = _text(payload.get("conversation_id"), "conversation_id")
+                if conversation_id != _task_conversation(found):
+                    _fail("conversation_owner_mismatch", "Browser capture conversation differs from canonical Task ownership")
+                raw = {"schema": N6_EVENT_SCHEMA, "event": "assistant_capture", "submission_key": submission_key, "task_id": found["task_id"], "work_id": found["work_id"], "candidate_id": found["candidate_id"], "candidate_view_id": found["candidate_view_id"], "publication_id": publication.publication_id, "conversation_id": conversation_id, "profile_id": payload.get("profile_id"), "model": model, "reasoning": reasoning, "started_at": started, "finished_at": finished, "raw_answer": answer, "raw_answer_digest": _sha(answer.encode("utf-8"))}
                 request_id_value = _stable_id("n6-browser-answer", submission_key)
                 evidence = plane.evidence.record_observation(request_id=request_id_value, primary_subject_kind="N6_BROWSER_RUN", primary_subject_identity={"submission_key": submission_key, "task_id": found["task_id"], "work_id": found["work_id"], "publication_id": publication.publication_id}, candidate_view_id=found["candidate_view_id"], raw_observation=raw, checker_id=N6_CAPTURE_CHECKER_ID, checker_version=N6_CAPTURE_CHECKER_VERSION, checker_code_digest=semantic_digest({"schema": N6_EVENT_SCHEMA, "module": "bdb_vnext.n6_rehearsal"}), environment={"model": model, "reasoning": reasoning, "surface": "normal-chatgpt-browser", "package_digest": self.package_digest, "protocol_generation": N6_PROTOCOL_GENERATION}, observation_started_at=started, observation_finished_at=finished, completeness="COMPLETE" if answer else "INCOMPLETE", applicability="APPLICABLE" if model == "GPT-5.6 Sol" and reasoning == "Wysoki" else "INCONCLUSIVE", status="CAPTURED")
                 return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": "CAPTURED", "result": {"evidence_id": evidence.evidence_id, "raw_digest": evidence.raw_digest, "applicability": evidence.applicability, "completeness": evidence.completeness}}
             if event == "witness":
                 conversation_id = _text(payload.get("conversation_id"), "conversation_id")
+                if conversation_id != _task_conversation(found):
+                    _fail("conversation_owner_mismatch", "Browser witness conversation differs from canonical Task ownership")
                 consumer_id = _stable_id("n6-browser", conversation_id)
                 binding = plane.publication.observe_presentation(publication_id=publication.publication_id, consumer_id=consumer_id, conversation_id=conversation_id, profile_id=payload.get("profile_id") if isinstance(payload.get("profile_id"), str) else None, marker=_text(payload.get("marker"), "marker"), result_digest=publication.result_digest, composer_preserved=payload.get("composer_preserved") is not False, witness={"source": "n6-browser-extension-dom"})
                 return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": "PRESENTED", "result": binding.as_dict()}
             if event == "unknown":
-                consumer_id = _stable_id("n6-browser", _text(payload.get("conversation_id"), "conversation_id"))
+                conversation_id = _text(payload.get("conversation_id"), "conversation_id")
+                if conversation_id != _task_conversation(found):
+                    _fail("conversation_owner_mismatch", "Browser UNKNOWN conversation differs from canonical Task ownership")
+                consumer_id = _stable_id("n6-browser", conversation_id)
                 binding = plane.publication.mark_unknown(publication_id=publication.publication_id, consumer_id=consumer_id, reason=_text(payload.get("reason"), "reason"))
                 return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": "UNKNOWN", "result": binding.as_dict()}
             if event == "resume":
                 target_conversation = _text(payload.get("target_conversation_id"), "target_conversation_id")
                 source_conversation = _text(payload.get("source_conversation_id"), "source_conversation_id")
+                if source_conversation != _task_conversation(found):
+                    _fail("conversation_owner_mismatch", "Resume source differs from canonical Task ownership")
                 target_consumer = _stable_id("n6-browser", target_conversation)
                 source_consumer = _stable_id("n6-browser", source_conversation)
                 if target_consumer == source_consumer:
@@ -474,60 +490,243 @@ chrome.runtime.onInstalled.addListener(() => { ensurePort(); send("status", {}).
 
 
 def _js_content() -> str:
-    return r'''"use strict";
-const MARKER = "BDB-N6-REHEARSAL";
+    scenarios = json.dumps(
+        {task["bdb"].replace("\r\n", "\n").strip(): task["id"] for task in N6_TASKS},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    script = r'''"use strict";
+const OWNER_SCHEMA = "bdb-vnext-n6-conversation-owner-v1";
+const PENDING_RESUME_SCHEMA = "bdb-vnext-n6-pending-resume-v1";
+const RESUMED_BINDING_SCHEMA = "bdb-vnext-n6-resumed-binding-v1";
+const PROTOCOL = "bdb-vnext-n6-protocol-v1";
+const SCENARIO_BY_PROMPT = new Map(Object.entries(__N6_SCENARIOS__));
 let active = null;
+let resumedBinding = null;
 let panel = null;
-let restoring = true;
-function conversationId() { return location.href.split("#")[0]; }
-function assistantText() { const nodes = [...document.querySelectorAll("[data-message-author-role='assistant']")]; const node = nodes.at(-1); return node ? (node.innerText || node.textContent || "").trim() : ""; }
-function userTexts() { return [...document.querySelectorAll("[data-message-author-role='user']")].map((node) => (node.innerText || node.textContent || "").trim()); }
-function send(event, payload) { return chrome.runtime.sendMessage({type: "N6_BROWSER_EVENT", event, payload}); }
-function ensurePanel() { if (!panel) { panel = document.createElement("div"); panel.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:2147483647;background:#111;color:#eee;padding:10px;border:1px solid #777;border-radius:8px;font:12px sans-serif;max-width:360px"; document.documentElement.append(panel); } return panel; }
-function write(text) { const output = ensurePanel().querySelector(".n6-output"); if (output) output.textContent = text; }
-function addButton(label, callback) { const button = document.createElement("button"); button.textContent = label; button.style.margin = "2px"; button.addEventListener("click", callback); panel.append(button); return button; }
-async function stableSubmissionKey(conversation, text) {
-  const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(conversation + "\n" + text));
-  return "n6-browser:" + [...new Uint8Array(bytes)].map((value) => value.toString(16).padStart(2, "0")).join("");
+let currentConversation = null;
+let currentRoute = null;
+let synchronization = null;
+const BLANK_CHAT_ROUTE = "chatgpt-blank-chat-scope";
+
+function canonicalPrompt(text) { return String(text || "").replace(/\r\n?/g, "\n").trim(); }
+function canonicalConversationId(href = location.href) {
+  try {
+    const url = new URL(href);
+    const host = url.hostname.toLowerCase();
+    if (host !== "chatgpt.com" && host !== "chat.openai.com") return null;
+    const parts = url.pathname.split("/").filter(Boolean);
+    for (let index = parts.length - 2; index >= 0; index -= 1) {
+      if (parts[index] === "c" && /^[A-Za-z0-9_-]{8,128}$/.test(parts[index + 1])) {
+        return "chatgpt-conversation:" + parts[index + 1];
+      }
+    }
+  } catch (_) {}
+  return null;
 }
+function assistantText() {
+  const nodes = [...document.querySelectorAll("[data-message-author-role='assistant']")];
+  const node = nodes.at(-1);
+  const direct = node ? canonicalPrompt(node.innerText || node.textContent || "") : "";
+  if (direct) return direct;
+  const turns = [...document.querySelectorAll("section[data-testid^='conversation-turn-'][data-turn='assistant']")];
+  const turn = turns.at(-1);
+  if (!turn) return "";
+  const message = turn.querySelector("[data-message-author-role='assistant']");
+  return canonicalPrompt((message && (message.innerText || message.textContent)) || "");
+}
+function userMessages() { return [...document.querySelectorAll("[data-message-author-role='user']")].map((node) => canonicalPrompt(node.innerText || node.textContent || "")); }
+function send(event, payload) { return chrome.runtime.sendMessage({type: "N6_BROWSER_EVENT", event, payload}); }
+async function digest(value) { const raw = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)); return [...new Uint8Array(raw)].map((byte) => byte.toString(16).padStart(2, "0")).join(""); }
+async function ownerKey(conversation) { return "n6_owner:" + await digest(conversation); }
+async function stableSubmissionKey(conversation, scenarioId, promptText) { return "n6-browser:" + await digest(PROTOCOL + "\n" + conversation + "\n" + scenarioId + "\n" + promptText); }
+function validOwner(value, conversation = null) { return Boolean(value && value.schema === OWNER_SCHEMA && typeof value.submission_key === "string" && typeof value.conversation_id === "string" && (!conversation || value.conversation_id === conversation)); }
+function clearPanel() { if (panel) panel.remove(); panel = null; }
+function ensurePanel() { if (!panel) { panel = document.createElement("div"); panel.dataset.bdbN6Panel = "true"; panel.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:2147483647;background:#111;color:#eee;padding:10px;border:1px solid #777;border-radius:8px;font:12px sans-serif;max-width:420px"; panel.innerHTML = "<strong>BDB vNext N6 rehearsal</strong><div class='n6-output'></div>"; document.documentElement.append(panel); } return panel; }
+function write(text) { const output = ensurePanel().querySelector(".n6-output"); if (output) output.textContent = text; }
+function addButton(label, callback) { const button = document.createElement("button"); button.textContent = label; button.style.margin = "2px"; button.addEventListener("click", () => { void Promise.resolve().then(callback).catch((error) => write(String(error))); }); panel.append(button); return button; }
+function ownedConversation() {
+  const live = canonicalConversationId();
+  if (!live || live !== currentConversation || !validOwner(active, live)) throw new Error("N6 Browser conversation ownership changed");
+  return live;
+}
+
+async function readOwner(conversation) {
+  const key = await ownerKey(conversation);
+  const stored = await chrome.storage.local.get(key);
+  return validOwner(stored[key], conversation) ? stored[key] : null;
+}
+async function resumedBindingKey(conversation) { return "n6_resume:" + await digest(conversation); }
+function validResumedBinding(value, conversation = null) { return Boolean(value && value.schema === RESUMED_BINDING_SCHEMA && typeof value.submission_key === "string" && typeof value.source_conversation_id === "string" && typeof value.target_conversation_id === "string" && (!conversation || value.target_conversation_id === conversation)); }
+async function readResumedBinding(conversation) {
+  const key = await resumedBindingKey(conversation);
+  const stored = await chrome.storage.local.get(key);
+  return validResumedBinding(stored[key], conversation) ? stored[key] : null;
+}
+async function persistResumedBinding(binding) {
+  const key = await resumedBindingKey(binding.target_conversation_id);
+  const stored = await chrome.storage.local.get(key);
+  const existing = stored[key];
+  if (existing && (!validResumedBinding(existing, binding.target_conversation_id) || existing.submission_key !== binding.submission_key || existing.capsule_id !== binding.capsule_id)) throw new Error("N6 Resume binding conflict");
+  await chrome.storage.local.set({[key]: binding});
+}
+async function persistOwner(owner) {
+  const key = await ownerKey(owner.conversation_id);
+  const stored = await chrome.storage.local.get(key);
+  const existing = stored[key];
+  if (existing && (!validOwner(existing, owner.conversation_id) || existing.submission_key !== owner.submission_key || existing.prompt_digest !== owner.prompt_digest)) {
+    throw new Error("N6 conversation ownership conflict");
+  }
+  await chrome.storage.local.set({[key]: owner});
+}
+async function setPendingResume() {
+  ownedConversation();
+  await chrome.storage.local.set({n6_pending_resume: {schema: PENDING_RESUME_SCHEMA, state: "PREPARED", owner: active}});
+  write("New-chat Resume prepared for " + active.submission_key);
+}
+async function pendingResume() {
+  const stored = await chrome.storage.local.get("n6_pending_resume");
+  const pending = stored.n6_pending_resume;
+  if (pending && pending.schema === PENDING_RESUME_SCHEMA && pending.state === "PREPARED" && validOwner(pending.owner)) return pending.owner;
+  if (pending) await chrome.storage.local.remove("n6_pending_resume");
+  return null;
+}
+
 function showPanel(result) {
-  ensurePanel();
-  panel.innerHTML = "<strong>BDB vNext N6 rehearsal</strong><div class='n6-output'></div>";
+  const live = canonicalConversationId();
+  if (!live || live !== currentConversation) { clearPanel(); void synchronizeConversation(); return; }
+  clearPanel(); ensurePanel();
   const publicationId = result.publication_id || (result.publication && result.publication.publication_id) || "unknown";
-  write("Task " + (result.task_id || "unknown") + "\nPublication " + publicationId);
-  if (active && active.conversation_id === conversationId()) {
-    addButton("Capture latest answer", async () => { const answer = assistantText(); const now = new Date().toISOString(); const response = await send("capture_answer", {submission_key: active.submission_key, conversation_id: conversationId(), profile_id: null, raw_answer: answer, model: prompt("Visible ChatGPT model (exactly as shown):", "GPT-5.6 Sol"), reasoning: prompt("Visible reasoning setting (exactly as shown):", "Wysoki"), started_at: active.started_at, finished_at: now}); write(JSON.stringify(response.response || response)); });
-    addButton("Witness presentation", async () => { const response = await send("witness", {submission_key: active.submission_key, conversation_id: conversationId(), marker: "n6-publication:" + publicationId, composer_preserved: true}); write(JSON.stringify(response.response || response)); });
-    addButton("Mark presentation UNKNOWN", async () => { const response = await send("unknown", {submission_key: active.submission_key, conversation_id: conversationId(), reason: "manual_dom_witness_not_observed"}); write(JSON.stringify(response.response || response)); });
+  write("Task " + (result.task_id || "unknown") + "\nPublication " + publicationId + "\nOwner " + active.conversation_id);
+  if (active.conversation_id === currentConversation) {
+    addButton("Capture latest answer", async () => { const conversation = ownedConversation(); const answer = assistantText(); if (!answer) throw new Error("N6 visible assistant answer is unavailable"); const model = prompt("Visible ChatGPT model (exactly as shown):", "GPT-5.6 Sol"); if (model === null) throw new Error("N6 model attestation cancelled"); const reasoning = prompt("Visible reasoning setting (exactly as shown):", "Wysoki"); if (reasoning === null) throw new Error("N6 reasoning attestation cancelled"); const now = new Date().toISOString(); const response = await send("capture_answer", {submission_key: active.submission_key, conversation_id: conversation, profile_id: null, raw_answer: answer, model, reasoning, started_at: active.started_at, finished_at: now}); write(JSON.stringify(response.response || response)); });
+    addButton("Witness presentation", async () => { const conversation = ownedConversation(); const response = await send("witness", {submission_key: active.submission_key, conversation_id: conversation, marker: "n6-publication:" + publicationId, composer_preserved: true}); write(JSON.stringify(response.response || response)); });
+    addButton("Mark presentation UNKNOWN", async () => { const conversation = ownedConversation(); const response = await send("unknown", {submission_key: active.submission_key, conversation_id: conversation, reason: "manual_dom_witness_not_observed"}); write(JSON.stringify(response.response || response)); });
+    addButton("Prepare new-chat Resume", setPendingResume);
   } else {
-    addButton("Resume in this chat", async () => { const response = await send("resume", {submission_key: active.submission_key, source_conversation_id: active.conversation_id, target_conversation_id: conversationId(), profile_id: null}); write(JSON.stringify(response.response || response)); });
+    addButton("Resume in this chat", async () => { const target = canonicalConversationId(); if (!target || target !== currentConversation || target === active.conversation_id) throw new Error("N6 Resume target ownership changed"); const response = await send("resume", {submission_key: active.submission_key, source_conversation_id: active.conversation_id, target_conversation_id: target, profile_id: null}); if (response.ok) await chrome.storage.local.remove("n6_pending_resume"); write(JSON.stringify(response.response || response)); });
   }
 }
-async function restoreActive() {
-  const stored = await chrome.storage.local.get("n6_active_submission");
-  if (!stored || !stored.n6_active_submission) return;
-  active = stored.n6_active_submission;
-  const response = await send("lookup", {submission_key: active.submission_key});
-  if (response.ok && response.response && response.response.result) showPanel(response.response.result);
-  else if (!response.ok) write(response.error);
+function showPendingResumePanel(result, owner, targetConversation) {
+  const live = canonicalConversationId();
+  if (!live || live !== currentConversation || live !== targetConversation) { clearPanel(); void synchronizeConversation(); return; }
+  clearPanel(); ensurePanel();
+  const publicationId = result.publication_id || (result.publication && result.publication.publication_id) || "unknown";
+  write("Task " + (result.task_id || "unknown") + "\nPublication " + publicationId + "\nPending Resume from " + owner.conversation_id);
+  addButton("Resume in this chat", async () => {
+    const target = ownedConversationForResume(owner, targetConversation);
+    const pending = await pendingResume();
+    if (!pending || pending.submission_key !== owner.submission_key || pending.conversation_id !== owner.conversation_id) throw new Error("N6 Resume Capsule is stale or consumed");
+    const response = await send("resume", {submission_key: owner.submission_key, source_conversation_id: owner.conversation_id, target_conversation_id: target, profile_id: null});
+    if (!response.ok || !response.response || response.response.status === "ERROR") { write(JSON.stringify(response.response || response)); return; }
+    const resumeResult = response.response.result || {};
+    const capsule = resumeResult.capsule || {};
+    const binding = {schema: RESUMED_BINDING_SCHEMA, submission_key: owner.submission_key, source_conversation_id: owner.conversation_id, target_conversation_id: target, capsule_id: resumeResult.capsule_id, publication_id: capsule.publication_id || publicationId, target_consumer_id: resumeResult.target_consumer_id};
+    await persistResumedBinding(binding);
+    await chrome.storage.local.remove("n6_pending_resume");
+    resumedBinding = binding;
+    showResumedBindingPanel(binding);
+  });
 }
-async function inspectUserMessage() {
+function showBlankPendingResumePanel(result, owner) {
+  if (canonicalConversationId() || currentRoute !== BLANK_CHAT_ROUTE) { clearPanel(); void synchronizeConversation(); return; }
+  clearPanel(); ensurePanel();
+  const publicationId = result.publication_id || (result.publication && result.publication.publication_id) || "unknown";
+  write("Task " + (result.task_id || "unknown") + "\nPublication " + publicationId + "\nPrepared Resume — target chat is not yet canonical");
+  addButton("Resume in this chat", async () => {
+    if (!canonicalConversationId()) throw new Error("N6 Resume requires a stable ChatGPT conversation URL; send a message first");
+    await synchronizeConversation();
+  });
+}
+function ownedConversationForResume(owner, targetConversation) {
+  const live = canonicalConversationId();
+  if (!live || live !== currentConversation || live !== targetConversation || live === owner.conversation_id) throw new Error("N6 Resume target ownership changed");
+  return live;
+}
+function showResumedBindingPanel(binding) {
+  const live = canonicalConversationId();
+  if (!live || live !== currentConversation || live !== binding.target_conversation_id) { clearPanel(); void synchronizeConversation(); return; }
+  clearPanel(); ensurePanel();
+  write("Resume bound in this chat\nPublication " + binding.publication_id + "\nSource " + binding.source_conversation_id + "\nCapsule " + binding.capsule_id);
+}
+async function lookupAndShow(owner, expectedConversation) {
+  active = owner;
+  const response = await send("lookup", {submission_key: owner.submission_key});
+  if (expectedConversation !== currentConversation || canonicalConversationId() !== expectedConversation) return;
+  if (response.ok && response.response && response.response.result) showPanel(response.response.result);
+  else write(response.error || "N6 canonical lookup failed");
+}
+async function lookupAndShowPending(owner, expectedConversation) {
+  const response = await send("lookup", {submission_key: owner.submission_key});
+  if (expectedConversation !== currentConversation || canonicalConversationId() !== expectedConversation) return;
+  if (response.ok && response.response && response.response.result) { showPendingResumePanel(response.response.result, owner, expectedConversation); return; }
+  if (response.response && response.response.error && ["submission_not_found", "publication_missing"].includes(response.response.error.code)) await chrome.storage.local.remove("n6_pending_resume");
+}
+async function lookupAndShowPendingBlank(owner) {
+  const response = await send("lookup", {submission_key: owner.submission_key});
+  if (currentRoute !== BLANK_CHAT_ROUTE || canonicalConversationId()) return;
+  if (response.ok && response.response && response.response.result) { showBlankPendingResumePanel(response.response.result, owner); return; }
+  if (response.response && response.response.error && ["submission_not_found", "publication_missing"].includes(response.response.error.code)) await chrome.storage.local.remove("n6_pending_resume");
+}
+async function lookupAndShowResumed(binding, expectedConversation) {
+  const response = await send("lookup", {submission_key: binding.submission_key});
+  if (expectedConversation !== currentConversation || canonicalConversationId() !== expectedConversation) return;
+  if (response.ok && response.response && response.response.result) { showResumedBindingPanel(binding); return; }
+  await chrome.storage.local.remove(await resumedBindingKey(expectedConversation));
+  resumedBinding = null;
+}
+async function restoreConversation(conversation) {
+  active = null; resumedBinding = null; clearPanel();
+  const owner = await readOwner(conversation);
+  if (owner) { await lookupAndShow(owner, conversation); return; }
+  const bound = await readResumedBinding(conversation);
+  if (bound) { resumedBinding = bound; await lookupAndShowResumed(bound, conversation); return; }
+  const pending = await pendingResume();
+  if (pending && pending.conversation_id !== conversation) await lookupAndShowPending(pending, conversation);
+}
+async function restoreBlankConversation() {
+  active = null; resumedBinding = null; clearPanel();
+  const pending = await pendingResume();
+  if (pending) await lookupAndShowPendingBlank(pending);
+}
+async function inspectExactScenario(conversation) {
   if (active) return;
-  for (const text of userTexts()) {
-    if (!text.includes(MARKER)) continue;
-    const conversation = conversationId();
-    const submissionKey = await stableSubmissionKey(conversation, text);
-    active = {submission_key: submissionKey, conversation_id: conversation, started_at: new Date().toISOString()};
-    await chrome.storage.local.set({n6_active_submission: active});
+  for (const text of userMessages()) {
+    const scenarioId = SCENARIO_BY_PROMPT.get(text);
+    if (!scenarioId) continue;
+    const promptDigest = await digest(text);
+    const submissionKey = await stableSubmissionKey(conversation, scenarioId, text);
+    const owner = {schema: OWNER_SCHEMA, submission_key: submissionKey, conversation_id: conversation, scenario_id: scenarioId, prompt_digest: promptDigest, started_at: new Date().toISOString()};
+    await persistOwner(owner);
+    active = owner;
     const response = await send("submit_prompt", {submission_key: submissionKey, prompt: text, conversation_id: conversation, profile_id: null});
+    if (conversation !== currentConversation || canonicalConversationId() !== conversation) return;
     if (!response.ok) { write(response.error); return; }
     showPanel(response.response.result);
     return;
   }
 }
-new MutationObserver(() => { if (!restoring) inspectUserMessage(); }).observe(document.documentElement, {subtree: true, childList: true, characterData: true});
-(async () => { await restoreActive(); restoring = false; await inspectUserMessage(); })();
+async function synchronizeConversation() {
+  if (synchronization) return synchronization;
+  synchronization = (async () => {
+    const conversation = canonicalConversationId();
+    const route = conversation || BLANK_CHAT_ROUTE;
+    if (route !== currentRoute) {
+      currentRoute = route;
+      if (conversation) { currentConversation = conversation; await restoreConversation(conversation); }
+      else { currentConversation = null; await restoreBlankConversation(); }
+    }
+    if (conversation) await inspectExactScenario(conversation);
+  })().finally(() => { synchronization = null; if ((canonicalConversationId() || BLANK_CHAT_ROUTE) !== currentRoute) void synchronizeConversation(); });
+  return synchronization;
+}
+new MutationObserver(() => { void synchronizeConversation(); }).observe(document.documentElement, {subtree: true, childList: true, characterData: true});
+window.addEventListener("popstate", () => { void synchronizeConversation(); });
+setInterval(() => { void synchronizeConversation(); }, 1000);
+void synchronizeConversation();
 '''
+    return script.replace("__N6_SCENARIOS__", scenarios)
 
 
 def _cs_shim_source(python_executable: Path, repo_root: Path, config_path: Path) -> str:
