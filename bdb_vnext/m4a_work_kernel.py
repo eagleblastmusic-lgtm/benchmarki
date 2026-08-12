@@ -784,6 +784,22 @@ class WorkKernelStore:
             _fail("lease_expired", "worker lease has expired")
         return row
 
+    def assert_current_lease(
+        self,
+        work_id: str,
+        lease_id: str,
+        fence: int,
+        *,
+        now: float | None = None,
+    ) -> LeaseRecord:
+        """Read-only ownership proof for typed effect adapters."""
+
+        work_id = _text(work_id, field="work_id")
+        timestamp = self._now(now)
+        with self._lock:
+            row = self._require_lease(work_id, lease_id, fence, now=timestamp)
+            return self._lease(row, now=timestamp)
+
     @staticmethod
     def _expect_version(row: tuple[Any, ...], expected_state_version: int) -> None:
         if not isinstance(expected_state_version, int) or isinstance(expected_state_version, bool) or expected_state_version < 0:

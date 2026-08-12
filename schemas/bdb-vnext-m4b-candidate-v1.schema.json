@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-candidate-v1",
+  "title": "BDB vNext M4b exact Candidate effect record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "candidate_id", "effect_id", "work_id", "task_id", "state", "effect_certainty", "base_view", "workspace_root", "workspace_generation", "config_digest", "lease_id", "fence", "base_tree_digest", "planned_tree_digest", "observed_tree_digest", "planned_paths", "observed_paths", "candidate_view_id", "manifest_digest"],
+  "properties": {
+    "schema": { "const": "bdb-vnext-candidate-v1" },
+    "candidate_id": { "type": "string", "minLength": 1 },
+    "effect_id": { "$ref": "#/$defs/digest" },
+    "work_id": { "type": "string", "minLength": 1 },
+    "task_id": { "type": "string", "minLength": 1 },
+    "state": { "enum": ["PREPARED", "POSSIBLE", "APPLIED", "OBSERVED", "SEALED", "DIVERGED", "UNKNOWN", "INVALIDATED"] },
+    "effect_certainty": { "enum": ["NOT_ASSESSED", "CERTAIN", "POSSIBLE", "UNKNOWN"] },
+    "base_view": { "type": "object" },
+    "workspace_root": { "type": "string", "minLength": 1 },
+    "workspace_generation": { "type": "string", "minLength": 1 },
+    "config_digest": { "$ref": "#/$defs/digest" },
+    "lease_id": { "type": "string", "minLength": 1 },
+    "fence": { "type": "integer", "minimum": 1 },
+    "base_tree_digest": { "$ref": "#/$defs/digest" },
+    "planned_tree_digest": { "$ref": "#/$defs/digest" },
+    "observed_tree_digest": { "anyOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+    "planned_paths": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/$defs/path" } },
+    "observed_paths": { "type": "object", "additionalProperties": { "enum": ["BEFORE", "AFTER", "PARTIAL", "DIVERGED", "UNKNOWN"] } },
+    "candidate_view_id": { "anyOf": [{ "type": "object" }, { "type": "null" }] },
+    "manifest_digest": { "anyOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "content_ref": { "type": "object", "additionalProperties": true },
+    "path": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "path", "before_digest", "after_digest", "before_ref", "after_ref", "before_mode", "after_mode", "before_size", "after_size"],
+      "properties": {
+        "schema": { "const": "bdb-vnext-candidate-path-v1" },
+        "path": { "type": "string", "minLength": 1 },
+        "before_digest": { "$ref": "#/$defs/digest" },
+        "after_digest": { "$ref": "#/$defs/digest" },
+        "before_ref": { "$ref": "#/$defs/content_ref" },
+        "after_ref": { "$ref": "#/$defs/content_ref" },
+        "before_mode": { "type": "integer", "minimum": 0 },
+        "after_mode": { "type": "integer", "minimum": 0 },
+        "before_size": { "type": "integer", "minimum": 0 },
+        "after_size": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

@@ -46,34 +46,41 @@ def _fail(code: str, message: str) -> NoReturn:
     raise ControlStoreError(code, message)
 
 
-def _schema_checksum() -> str:
+def _schema_checksum(*, include_m4b: bool = True) -> str:
+    tables = {
+        "m2": ["m2b_accepted_bindings"],
+        "m3": [
+            "m3a_submissions",
+            "m3a_tasks",
+            "m3a_intent_revisions",
+            "m3a_consumer_bindings",
+            "m3c_kill_switch",
+        ],
+        "m4": [
+            "m4a_sequence",
+            "m4a_work_items",
+            "m4a_runs",
+            "m4a_waits",
+            "m4a_leases",
+            "m4a_resource_claims",
+            "m4a_transition_facts",
+        ],
+    }
+    if include_m4b:
+        tables["m4b"] = [
+            "m4b_candidate_effects",
+            "m4b_candidate_paths",
+        ]
     return semantic_digest(
         {
             "schema": CONTROL_IDENTITY_SCHEMA,
-            "tables": {
-                "m2": ["m2b_accepted_bindings"],
-                "m3": [
-                    "m3a_submissions",
-                    "m3a_tasks",
-                    "m3a_intent_revisions",
-                    "m3a_consumer_bindings",
-                    "m3c_kill_switch",
-                ],
-                "m4": [
-                    "m4a_sequence",
-                    "m4a_work_items",
-                    "m4a_runs",
-                    "m4a_waits",
-                    "m4a_leases",
-                    "m4a_resource_claims",
-                    "m4a_transition_facts",
-                ],
-            },
+            "tables": tables,
         }
     )
 
 
 CONTROL_SCHEMA_CHECKSUM = _schema_checksum()
+CONTROL_PRE_N2_SCHEMA_CHECKSUM = _schema_checksum(include_m4b=False)
 
 
 def expected_identity() -> dict[str, str]:
@@ -133,7 +140,19 @@ def ensure_identity(connection: sqlite3.Connection) -> dict[str, str]:
     except sqlite3.DatabaseError as exc:
         raise ControlStoreError("control_identity_read_failed", "Control DB identity could not be read") from exc
     if rows and rows != expected:
-        _fail("control_identity_mismatch", "Control DB identity differs from the canonical vNext generation")
+        legacy = dict(expected)
+        legacy["schema_checksum"] = CONTROL_PRE_N2_SCHEMA_CHECKSUM
+        if rows != legacy:
+            _fail("control_identity_mismatch", "Control DB identity differs from the canonical vNext generation")
+        try:
+            connection.execute(
+                f"UPDATE {CONTROL_METADATA_TABLE} SET value=? WHERE key='schema_checksum'",
+                (CONTROL_SCHEMA_CHECKSUM,),
+            )
+            connection.commit()
+            rows["schema_checksum"] = CONTROL_SCHEMA_CHECKSUM
+        except sqlite3.DatabaseError as exc:
+            raise ControlStoreError("control_identity_write_failed", "Control DB schema identity could not be upgraded") from exc
     if not rows:
         try:
             connection.executemany(
@@ -253,6 +272,7 @@ __all__ = [
     "CONTROL_METADATA_TABLE",
     "CONTROL_MIGRATION_ID",
     "CONTROL_SCHEMA_CHECKSUM",
+    "CONTROL_PRE_N2_SCHEMA_CHECKSUM",
     "ControlStoreError",
     "assert_database_path",
     "backup_identity",

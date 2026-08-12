@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-candidate-repo-view-v1",
+  "title": "BDB vNext M4b sealed Candidate RepoView v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "kind", "candidate_id", "effect_id", "work_id", "task_id", "repository_id", "base_view_id", "base_commit_oid", "base_tree_oid", "candidate_tree_digest", "changed_paths", "path_bindings", "workspace_generation", "config_digest", "view_id", "manifest_digest"],
+  "properties": {
+    "schema": { "const": "bdb-vnext-candidate-repo-view-v1" },
+    "kind": { "const": "CANDIDATE" },
+    "candidate_id": { "type": "string", "minLength": 1 },
+    "effect_id": { "$ref": "#/$defs/digest" },
+    "work_id": { "type": "string", "minLength": 1 },
+    "task_id": { "type": "string", "minLength": 1 },
+    "repository_id": { "type": "string", "minLength": 1 },
+    "base_view_id": { "$ref": "#/$defs/digest" },
+    "base_commit_oid": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+    "base_tree_oid": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+    "candidate_tree_digest": { "$ref": "#/$defs/digest" },
+    "changed_paths": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "path_bindings": { "type": "array", "minItems": 1, "items": { "type": "object" } },
+    "workspace_generation": { "type": "string", "minLength": 1 },
+    "config_digest": { "$ref": "#/$defs/digest" },
+    "view_id": { "$ref": "#/$defs/digest" },
+    "manifest_digest": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": { "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" } }
+}

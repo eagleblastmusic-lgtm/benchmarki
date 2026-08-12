@@ -347,8 +347,16 @@ class VNextControlPlane:
     bindings: Any
     admission: Any
     work_kernel: Any
+    candidate_store: Any
+
+    @property
+    def candidate(self) -> Any:
+        """N2 Candidate repository built through this same root."""
+
+        return self.candidate_store
 
     def close(self) -> None:
+        self.candidate_store.close()
         self.work_kernel.close()
         self.admission.close()
         self.bindings.close()
@@ -738,11 +746,14 @@ class VNextCompositionRoot:
         """
 
         from bdb_vnext.content_store import DurableBindingStore
+        from bdb_vnext.candidate import CandidateStore
         from bdb_vnext.m3c_admission import _open_vnext_admission_composition
         from bdb_vnext.m4a_work_kernel import WorkKernelStore
 
         bindings = None
         admission = None
+        candidate = None
+        work_kernel = None
         try:
             bindings = DurableBindingStore(self._runtime_root)
             admission = _open_vnext_admission_composition(
@@ -756,8 +767,17 @@ class VNextCompositionRoot:
                 legacy_root=self._legacy_runtime_root,
                 clock=clock,
             )
-            return VNextControlPlane(self, bindings, admission, work_kernel)
+            candidate = CandidateStore(
+                self._runtime_root,
+                content_store=bindings.content_store,
+                work_kernel=work_kernel,
+            )
+            return VNextControlPlane(self, bindings, admission, work_kernel, candidate)
         except Exception:
+            if candidate is not None:
+                candidate.close()
+            if work_kernel is not None:
+                work_kernel.close()
             if admission is not None:
                 admission.close()
             if bindings is not None:
