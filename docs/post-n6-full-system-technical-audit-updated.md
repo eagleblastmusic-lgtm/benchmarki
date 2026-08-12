@@ -6,7 +6,7 @@ The repair pass started from `b57639bc93ef13f1585badb331df250aaa312cfc` on `bdb-
 
 ## B. Executive technical verdict
 
-`TECHNICALLY_COHERENT_WITH_FINDINGS` pending the required fresh human Browser re-gate. The repaired code closes the concrete P0/P1 authority, lifecycle, package-identity, recovery, status, schema, and presentation defects that were deterministically repairable inside N1–N6. Automated Browser evidence is not claimed in this report until it is actually run; prior human evidence is stale for the changed package and remains pending.
+`TECHNICALLY_COHERENT_WITH_FINDINGS`. The repaired code closes the concrete P0/P1 authority, lifecycle, package-identity, recovery, status, schema, and presentation defects that were deterministically repairable inside N1–N6. `AUTOMATED_BROWSER_EVIDENCE` remains `BLOCKED_BY_AUTOMATION_ENVIRONMENT` because the controlled Chrome session exposes a different extension identity; the exact final package was instead verified by fresh normal-Chrome human evidence and deterministic runtime reconciliation.
 
 ## C. As-built system map
 
@@ -79,7 +79,7 @@ One server Control DB is used for M3/M4/N2/N3/N4 semantic state. Browser outbox,
 
 ## M. Test and evidence maturity
 
-Focused N6, N4 Publication, M4 WorkKernel, M3b Browser admission, N1 Control DB, and M4b Candidate tests pass after repair; one pre-existing environment-dependent skip remains where applicable. Python source compilation via `compile(..., dont_inherit=True)`, generated JavaScript `node --check`, schema parsing, and `git diff --check` are required validation layers. The full repository suite was not used as a proxy for missing historical Browser evidence.
+Focused N6, N4 Publication, M4 WorkKernel, M3b Browser admission, N1 Control DB, and M4b Candidate tests pass after repair; one pre-existing environment-dependent skip remains where applicable. Python source compilation via `compile(..., dont_inherit=True)`, generated JavaScript `node --check`, schema parsing, and `git diff --check` are required validation layers. The full repository suite was not used as a proxy for missing historical Browser evidence. Fresh human RUN-05 evidence against the exact final package verified capture, exact DOM witness, retained PRESENTED after UNKNOWN request, blank-chat pending Resume, canonical target binding, and refresh recovery. Automated Chrome evidence remains blocked by the controlled session's different extension identity.
 
 ## N. Complexity / maintainability
 
@@ -99,24 +99,24 @@ No external orchestration product or new daemon was introduced or evaluated. The
 
 ## R. Remaining UNKNOWNs
 
-Historical RQ2 raw Browser evidence remains unavailable. Model/reasoning/profile/timing claims that the normal ChatGPT product does not mechanically expose remain operator/Browser attestations. Fresh human N6 acceptance for this repaired package is still required.
+Historical RQ2 raw Browser evidence remains unavailable. Model/reasoning/profile/timing claims that the normal ChatGPT product does not mechanically expose remain operator/Browser attestations. Automated Chrome evidence for the final package remains unavailable because of the automation environment; this is not treated as a BDB implementation defect. The exact final package has fresh human acceptance.
 
 ## S. Claims current evidence does not justify
 
-The repair does not justify production activation, human Browser PASS for the new package, a performance claim from M2D timing, historical RQ2 reconstruction, or a successor roadmap decision.
+The repair and human re-gate do not justify production activation, a performance claim from M2D timing, historical RQ2 reconstruction, or a successor roadmap decision. The human evidence is limited to the stated RUN-05 acceptance surface and is not a substitute for unavailable historical RQ2 raw evidence.
 
 ## T. Decision inputs for ChatGPT Work
 
-Use the repaired authority map and the remaining evidence gaps above. The implementation direction is technically coherent for build-only vNext, while historical evidence and fresh human Browser acceptance remain explicit inputs.
+Use the repaired authority map and the remaining evidence gaps above. The implementation direction is technically coherent for build-only vNext; historical evidence remains an explicit gap, while the exact final package now has fresh human Browser acceptance.
 
 ## U. Suggested additional evidence
 
-Run the minimal fresh N6 manual gate against the exact new package/HEAD after any extension/Native registration reload required by the changed package. Record model/reasoning, exact package identity, RUN-05 capture, positive/UNKNOWN witness, refresh recovery, and new-chat Resume.
+The minimal fresh N6 manual gate was completed against the exact package/HEAD. Preserve the recorded model/reasoning, exact package identity, RUN-05 capture, positive/UNKNOWN witness, refresh recovery, and new-chat Resume evidence. No further Browser rerun is required for this closure.
 
 ## V. Final audit verdict
 
-`TECHNICALLY_COHERENT_WITH_FINDINGS` — concrete repairable defects are addressed and focused regressions are green; final human Browser evidence is pending for the changed package, and AUD-010 remains blocked by missing historical raw evidence.
+`TECHNICALLY_COHERENT_WITH_FINDINGS` — concrete repairable defects are addressed, focused regressions are green, the exact final package has fresh human Browser acceptance, and deterministic runtime reconciliation is coherent. Automated Browser evidence is `BLOCKED_BY_AUTOMATION_ENVIRONMENT`, and AUD-010 remains blocked by missing historical raw evidence.
 
 ## W. Evidence appendix
 
-Changed implementation paths: `bdb_vnext/candidate.py`, `control_store.py`, `m3b_browser_admission.py`, `m4a_work_kernel.py`, `m4c_evidence.py`, `n4_browser.py`, `n4_publication.py`, `n6_rehearsal.py`, `provider_root.py`. Changed tests cover Candidate retention, Control DB version/layout, Publication applicability/presentation/concurrency, and N6 package/lifecycle/recovery. Living status is in `docs/governance/README.md`. No push was performed.
+Changed implementation paths: `bdb_vnext/candidate.py`, `control_store.py`, `m3b_browser_admission.py`, `m4a_work_kernel.py`, `m4c_evidence.py`, `n4_browser.py`, `n4_publication.py`, `n6_rehearsal.py`, `provider_root.py`. Changed tests cover Candidate retention, Control DB version/layout, Publication applicability/presentation/concurrency, and N6 package/lifecycle/recovery. Final human runtime reconciliation for the exact package recorded: 1 submission, 1 task, 1 work item (`FINISHED`), 1 run (`SUCCEEDED`/`CERTAIN`), 1 released lease, 1 sealed candidate (`CERTAIN`), 2 evidence records with distinct roles (`CANDIDATE` checker and `N6_BROWSER_RUN` capture), 1 PASS evaluation, 1 PASS disposition, 1 publication, 2 consumer bindings (source `PRESENTED`, target `UNKNOWN`), 1 source witness, 1 Resume Capsule, and 1 ACKED Browser outbox row. Source and target conversation identities are distinct; foreign-key check is empty, SQLite integrity is `ok`, and all 7 CAS refs resolve with matching raw digests. Living status is in `docs/governance/README.md`. No push was performed.
