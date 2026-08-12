@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-m4c-disposition-v1",
+  "title": "BDB vNext M4c current evidence disposition v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "disposition_id", "evidence_id", "evaluation_id", "disposition", "supersedes", "created_at"],
+  "properties": {
+    "schema": {"const": "bdb-vnext-m4c-disposition-v1"},
+    "disposition_id": {"$ref": "#/$defs/digest"},
+    "evidence_id": {"$ref": "#/$defs/digest"},
+    "evaluation_id": {"$ref": "#/$defs/digest"},
+    "disposition": {"enum": ["PASS", "FAIL", "INCONCLUSIVE", "INVALID", "SUPERSEDED"]},
+    "supersedes": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+    "created_at": {"type": "string", "minLength": 1}
+  },
+  "$defs": {"digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}
+}

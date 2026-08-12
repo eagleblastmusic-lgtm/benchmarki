@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-m4c-evaluation-v1",
+  "title": "BDB vNext M4c immutable evaluation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "evaluation_id", "evidence_id", "evaluator_id", "evaluator_version", "evaluator_code_digest", "config_digest", "result", "applicability", "detail", "created_at"],
+  "properties": {
+    "schema": {"const": "bdb-vnext-m4c-evaluation-v1"},
+    "evaluation_id": {"$ref": "#/$defs/digest"},
+    "evidence_id": {"$ref": "#/$defs/digest"},
+    "evaluator_id": {"type": "string", "minLength": 1},
+    "evaluator_version": {"type": "string", "minLength": 1},
+    "evaluator_code_digest": {"type": "string", "minLength": 1},
+    "config_digest": {"$ref": "#/$defs/digest"},
+    "result": {"enum": ["PASS", "FAIL", "INCONCLUSIVE", "INVALID"]},
+    "applicability": {"enum": ["APPLICABLE", "INCONCLUSIVE", "INVALID"]},
+    "detail": {"type": "object"},
+    "created_at": {"type": "string", "minLength": 1}
+  },
+  "$defs": {"digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}
+}

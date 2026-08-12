@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-m4c-evidence-v1",
+  "title": "BDB vNext M4c immutable evidence record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "evidence_id", "request_id", "primary_subject_kind", "primary_subject_identity", "candidate_view_id", "raw_ref", "raw_digest", "checker_id", "checker_version", "checker_code_digest", "environment", "observation_started_at", "observation_finished_at", "completeness", "applicability", "status", "created_at"],
+  "properties": {
+    "schema": {"const": "bdb-vnext-m4c-evidence-v1"},
+    "evidence_id": {"$ref": "#/$defs/digest"},
+    "request_id": {"type": "string", "minLength": 1},
+    "primary_subject_kind": {"type": "string", "minLength": 1},
+    "primary_subject_identity": {"type": "object"},
+    "candidate_view_id": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+    "raw_ref": {"type": "object", "additionalProperties": false, "required": ["type", "schema", "semantic_digest", "raw_digest"], "properties": {"type": {"type": "string"}, "schema": {"type": "string"}, "semantic_digest": {"$ref": "#/$defs/digest"}, "raw_digest": {"$ref": "#/$defs/digest"}}},
+    "raw_digest": {"$ref": "#/$defs/digest"},
+    "checker_id": {"type": "string", "minLength": 1},
+    "checker_version": {"type": "string", "minLength": 1},
+    "checker_code_digest": {"type": "string", "minLength": 1},
+    "environment": {"type": "object"},
+    "observation_started_at": {"type": "string", "minLength": 1},
+    "observation_finished_at": {"type": "string", "minLength": 1},
+    "completeness": {"enum": ["COMPLETE", "INCOMPLETE"]},
+    "applicability": {"enum": ["APPLICABLE", "INCONCLUSIVE", "INVALID"]},
+    "status": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "minLength": 1}
+  },
+  "$defs": {"digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}
+}

@@ -46,7 +46,7 @@ def _fail(code: str, message: str) -> NoReturn:
     raise ControlStoreError(code, message)
 
 
-def _schema_checksum(*, include_m4b: bool = True) -> str:
+def _schema_checksum(*, include_m4b: bool = True, include_m4c: bool = True) -> str:
     tables = {
         "m2": ["m2b_accepted_bindings"],
         "m3": [
@@ -71,6 +71,14 @@ def _schema_checksum(*, include_m4b: bool = True) -> str:
             "m4b_candidate_effects",
             "m4b_candidate_paths",
         ]
+    if include_m4c:
+        tables["m4c"] = [
+            "m4c_evidence_records",
+            "m4c_evaluations",
+            "m4c_dispositions",
+            "m4c_disposition_heads",
+            "m4c_evidence_gaps",
+        ]
     return semantic_digest(
         {
             "schema": CONTROL_IDENTITY_SCHEMA,
@@ -80,7 +88,8 @@ def _schema_checksum(*, include_m4b: bool = True) -> str:
 
 
 CONTROL_SCHEMA_CHECKSUM = _schema_checksum()
-CONTROL_PRE_N2_SCHEMA_CHECKSUM = _schema_checksum(include_m4b=False)
+CONTROL_PRE_N3_SCHEMA_CHECKSUM = _schema_checksum(include_m4c=False)
+CONTROL_PRE_N2_SCHEMA_CHECKSUM = _schema_checksum(include_m4b=False, include_m4c=False)
 
 
 def expected_identity() -> dict[str, str]:
@@ -140,9 +149,11 @@ def ensure_identity(connection: sqlite3.Connection) -> dict[str, str]:
     except sqlite3.DatabaseError as exc:
         raise ControlStoreError("control_identity_read_failed", "Control DB identity could not be read") from exc
     if rows and rows != expected:
-        legacy = dict(expected)
-        legacy["schema_checksum"] = CONTROL_PRE_N2_SCHEMA_CHECKSUM
-        if rows != legacy:
+        legacy_n3 = dict(expected)
+        legacy_n3["schema_checksum"] = CONTROL_PRE_N3_SCHEMA_CHECKSUM
+        legacy_n2 = dict(expected)
+        legacy_n2["schema_checksum"] = CONTROL_PRE_N2_SCHEMA_CHECKSUM
+        if rows != legacy_n3 and rows != legacy_n2:
             _fail("control_identity_mismatch", "Control DB identity differs from the canonical vNext generation")
         try:
             connection.execute(
@@ -273,6 +284,7 @@ __all__ = [
     "CONTROL_MIGRATION_ID",
     "CONTROL_SCHEMA_CHECKSUM",
     "CONTROL_PRE_N2_SCHEMA_CHECKSUM",
+    "CONTROL_PRE_N3_SCHEMA_CHECKSUM",
     "ControlStoreError",
     "assert_database_path",
     "backup_identity",

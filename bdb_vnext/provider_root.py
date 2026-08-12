@@ -348,6 +348,7 @@ class VNextControlPlane:
     admission: Any
     work_kernel: Any
     candidate_store: Any
+    evidence_store: Any
 
     @property
     def candidate(self) -> Any:
@@ -355,7 +356,12 @@ class VNextControlPlane:
 
         return self.candidate_store
 
+    @property
+    def evidence(self) -> Any:
+        return self.evidence_store
+
     def close(self) -> None:
+        self.evidence_store.close()
         self.candidate_store.close()
         self.work_kernel.close()
         self.admission.close()
@@ -747,12 +753,14 @@ class VNextCompositionRoot:
 
         from bdb_vnext.content_store import DurableBindingStore
         from bdb_vnext.candidate import CandidateStore
+        from bdb_vnext.m4c_evidence import EvidenceStore
         from bdb_vnext.m3c_admission import _open_vnext_admission_composition
         from bdb_vnext.m4a_work_kernel import WorkKernelStore
 
         bindings = None
         admission = None
         candidate = None
+        evidence = None
         work_kernel = None
         try:
             bindings = DurableBindingStore(self._runtime_root)
@@ -772,8 +780,11 @@ class VNextCompositionRoot:
                 content_store=bindings.content_store,
                 work_kernel=work_kernel,
             )
-            return VNextControlPlane(self, bindings, admission, work_kernel, candidate)
+            evidence = EvidenceStore(self._runtime_root, content_store=bindings.content_store, candidate_store=candidate)
+            return VNextControlPlane(self, bindings, admission, work_kernel, candidate, evidence)
         except Exception:
+            if evidence is not None:
+                evidence.close()
             if candidate is not None:
                 candidate.close()
             if work_kernel is not None:
