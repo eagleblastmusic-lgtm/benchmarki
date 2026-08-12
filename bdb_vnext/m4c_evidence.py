@@ -287,9 +287,26 @@ class MinimumCandidateChecker:
         started=_now(); subject={"candidate_id":candidate.candidate_id,"view_id":candidate.view_id,"manifest_digest":candidate.manifest_digest,"candidate_tree_digest":candidate.candidate_tree_digest,"base_view_id":candidate.base_view_id,"repository_id":candidate.repository_id}; probe=self._probe(fault=fault); raw={"schema":RAW_SCHEMA,"checker_id":CHECKER_ID,"checker_version":CHECKER_VERSION,"subject":subject,"environment_probe":probe}; applicability="APPLICABLE" if probe.get("status")=="READY" else "INCONCLUSIVE"; completeness="COMPLETE" if applicability=="APPLICABLE" else "INCOMPLETE"; status="CHECKED" if applicability=="APPLICABLE" else "UNAVAILABLE"
         if applicability=="APPLICABLE":
             try:
+                # Verify the mutable Candidate workspace once before and once
+                # after reading the full tree.  Calling CandidateRepoView
+                # ``read_bytes`` for every unchanged base path would rescan a
+                # large Windows worktree for each file (quadratic and prone to
+                # timeout), while the seal/manifest plus the two bounded scans
+                # provide the same exactness boundary.
                 candidate._store.verify_sealed(candidate.candidate_id,base_view=candidate._base_view); entries=[]
                 for entry in candidate.list_entries():
-                    payload=candidate.read_bytes(entry.path); entries.append({"path":entry.path,"object_oid":entry.object_oid,"size_bytes":len(payload),"raw_digest":_digest(payload)})
+                    planned = next((item for item in candidate.path_bindings if item.path == entry.path), None)
+                    if planned is not None:
+                        payload = candidate._store.content_store.resolve(planned.after_ref)
+                        entries.append({"path":entry.path,"object_oid":entry.object_oid,"size_bytes":len(payload),"raw_digest":_digest(payload),"content_source":"candidate_cas"})
+                    else:
+                        # Unchanged bytes are already bound by the exact
+                        # committed tree identity.  Do not invoke one Git
+                        # subprocess per path for a large repository; retain
+                        # the object identity and let the surrounding seal
+                        # verification prove the complete tree.
+                        entries.append({"path":entry.path,"object_oid":entry.object_oid,"size_bytes":entry.size_bytes,"raw_digest":None,"content_source":"committed_tree"})
+                candidate._store.verify_sealed(candidate.candidate_id,base_view=candidate._base_view)
                 raw["observation"]={"status":"EXACT_CANDIDATE_READABLE","entries":entries,"candidate_tree_digest":candidate.candidate_tree_digest}
             except (CandidateError,EvidenceError) as exc: applicability,completeness,status="INCONCLUSIVE","INCOMPLETE","UNAVAILABLE"; raw["observation"]={"status":"INCONCLUSIVE","reason":getattr(exc,"code",type(exc).__name__)}
         observation=self.evidence.record_observation(request_id=request_id,primary_subject_kind="CANDIDATE",primary_subject_identity=subject,candidate_view_id=candidate.view_id,raw_observation=raw,checker_id=CHECKER_ID,checker_version=CHECKER_VERSION,checker_code_digest=self.code_digest,environment=self.environment.as_dict(),observation_started_at=started,observation_finished_at=_now(),completeness=completeness,applicability=applicability,status=status)

@@ -107,6 +107,20 @@ def test_single_file_exact_candidate_seals_and_reads_cas(tmp_path: Path) -> None
         _remove_candidate_worktree(subject, workspace)
 
 
+def test_windows_filesystem_mode_does_not_override_committed_git_mode(tmp_path: Path) -> None:
+    with _stack(tmp_path) as (subject, _view, _kernel, store, _work_id, _task_id, _lease):
+        (subject / "tool.cmd").write_bytes(b"@echo off\r\n")
+        _git(subject, "add", "tool.cmd")
+        _git(subject, "commit", "-qm", "cmd fixture")
+        view = RepositoryResource.from_path(subject, repository_id="m4b-subject").resolve_committed("HEAD")
+        workspace = store.create_workspace(candidate_id="candidate:windows-mode", base_view=view)
+        try:
+            os.chmod(workspace / "tool.cmd", 0o755)
+            assert store._workspace_entries(workspace, object_format=view.object_format) == store._base_entries(view)
+        finally:
+            _remove_candidate_worktree(subject, workspace)
+
+
 def test_restart_query_and_source_worktree_are_exactly_preserved(tmp_path: Path) -> None:
     with _stack(tmp_path) as (subject, view, kernel, store, work_id, task_id, lease):
         source_head = _git(subject, "rev-parse", "HEAD")

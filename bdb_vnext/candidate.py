@@ -148,6 +148,42 @@ def _git_mode(path: Path) -> str:
     return "100755" if (_file_mode(path) & 0o111) else "100644"
 
 
+def _git_index_modes(workspace: Path) -> dict[str, str]:
+    """Read canonical Git modes instead of inferring them from Windows ACLs.
+
+    On Windows a checked-out ``.cmd`` file can expose an executable bit through
+    ``stat`` even though the committed tree records mode ``100644``.  Candidate
+    tree equality is a Git-object contract, so tracked modes must come from the
+    index; the filesystem mode remains only a fallback for foreign/untracked
+    files (which are rejected by the exact-tree comparison).
+    """
+
+    completed = subprocess.run(
+        ["git", "-C", str(workspace), "ls-files", "-s", "-z"],
+        shell=False,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return {}
+    try:
+        text = completed.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return {}
+    modes: dict[str, str] = {}
+    for item in text.split("\x00"):
+        if not item:
+            continue
+        prefix, separator, path = item.partition("\t")
+        if not separator:
+            continue
+        mode = prefix.split(" ", 1)[0]
+        if mode in {"100644", "100755", "120000", "160000"}:
+            modes[path.replace("\\", "/")] = mode
+    return modes
+
+
 def _blob_oid(raw: bytes, object_format: str) -> str:
     algorithm = "sha256" if object_format == "sha256" else "sha1"
     header = f"blob {len(raw)}\0".encode("ascii")
@@ -436,6 +472,7 @@ class CandidateStore:
 
     def _workspace_entries(self, workspace: Path, *, object_format: str) -> dict[str, tuple[str, str]]:
         result: dict[str, tuple[str, str]] = {}
+        index_modes = _git_index_modes(workspace)
         for directory, dir_names, file_names in os.walk(workspace, topdown=True, followlinks=False):
             current = Path(directory)
             if current == workspace:
@@ -456,7 +493,8 @@ class CandidateStore:
                     _fail("workspace_reparse_point", "Candidate workspace contains a reparse point")
                 raw = _read_exact(child)
                 relative = child.relative_to(workspace).as_posix()
-                result[_path(relative)] = (_blob_oid(raw, object_format), _git_mode(child))
+                normalized = _path(relative)
+                result[normalized] = (_blob_oid(raw, object_format), index_modes.get(normalized, _git_mode(child)))
         return dict(sorted(result.items()))
 
     @staticmethod
