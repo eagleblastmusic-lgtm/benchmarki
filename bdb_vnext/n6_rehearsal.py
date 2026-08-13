@@ -1377,6 +1377,7 @@ const PENDING_RESUME_SCHEMA = "bdb-vnext-n6-pending-resume-v1";
 const RESUMED_BINDING_SCHEMA = "bdb-vnext-n6-resumed-binding-v1";
 const PROTOCOL = "bdb-vnext-n6-protocol-v2";
 const P1_ENGINEERING_PREFIX = __P1_ENGINEERING_PREFIX__;
+const P1_EDIT_SCHEMA = "bdb-vnext-edit-v1";
 const SCENARIO_BY_PROMPT = new Map(Object.entries(__N6_SCENARIOS__));
 const PROMPT_BY_SCENARIO = new Map([...SCENARIO_BY_PROMPT].map(([prompt, scenario]) => [scenario, prompt]));
 let active = null;
@@ -1431,7 +1432,7 @@ async function stableAssistantObservation(expectedPrompt) {
   return {raw_answer: second.text, completion_observation: "DOM_TEXT_STABLE_AFTER_STREAM_END", dom_author_role: "assistant", extension_ui_ancestor: false};
 }
 function strictEngineeringArtifact(rawAnswer) {
-  const matches = [...String(rawAnswer || "").matchAll(/```(?:json)?\\s*([\\s\\S]*?)\\s*```/gi)].map((match) => match[1].trim()).filter(Boolean);
+  const matches = [...String(rawAnswer || "").matchAll(/```(?:json)?\s*([\s\S]*?)\s*```/gi)].map((match) => match[1].trim()).filter(Boolean);
   if (matches.length !== 1) throw new Error("BDB_EDIT_V1 requires exactly one fenced JSON artifact");
   let artifact;
   try { artifact = JSON.parse(matches[0]); } catch (_) { throw new Error("BDB_EDIT_V1 JSON is malformed"); }
@@ -1444,7 +1445,7 @@ function latestEngineeringPrompt() {
     const node = turns[index];
     if (node.dataset.messageAuthorRole === "user") {
       const text = canonicalPrompt(node.innerText || node.textContent || "");
-      if (text.startsWith(P1_ENGINEERING_PREFIX + "\\n")) return {node, text, index, turns};
+      if (text.startsWith(P1_ENGINEERING_PREFIX + "\n")) return {node, text, index, turns};
     }
   }
   return null;
@@ -1636,7 +1637,7 @@ async function lookupAndShowResumed(binding, expectedConversation) {
 function showEngineeringResult(result, submissionKey) {
   clearPanel(); ensurePanel();
   const status = result.validation_status || result.status || "READY";
-  write("P1 Calculator engineering\\nSubmission " + submissionKey + "\\nValidation " + status + (result.feedback ? "\\n" + result.feedback.slice(0, 1800) : ""));
+  write("P1 Calculator engineering\nSubmission " + submissionKey + "\nValidation " + status + (result.feedback ? "\n" + result.feedback.slice(0, 1800) : ""));
   if (result.ready_to_seal === true) {
     addButton("Seal engineering Candidate", async () => {
       const response = await send("engineering_finalize", {submission_key: submissionKey, candidate_id: result.candidate_id});

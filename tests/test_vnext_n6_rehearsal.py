@@ -513,3 +513,67 @@ if (staleStore.n6_pending_resume !== undefined) throw new Error('stale pending R
     # included in the generated content script.
     result = subprocess.run(["node", "--input-type=module"], input=harness, capture_output=True, text=True, timeout=30, check=False)
     assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_generated_p1_content_script_escape_runtime_contract() -> None:
+    generated = json.dumps(_js_content(), ensure_ascii=False)
+    harness = f"""
+const vm = await import('node:vm');
+const generated = {generated};
+const source = generated.split('\\n').filter((line) =>
+  !line.startsWith('new MutationObserver(') &&
+  !line.startsWith('window.addEventListener(\"popstate\"') &&
+  !line.startsWith('setInterval(') &&
+  !line.startsWith('void synchronizeConversation();')
+).join('\\n') + '\\nwindow.__p1Test = {{ latestEngineeringPrompt, strictEngineeringArtifact }};';
+
+function node(role, text) {{
+  return {{
+    dataset: {{ messageAuthorRole: role }},
+    innerText: text,
+    textContent: text,
+    closest: () => null,
+  }};
+}}
+
+function functionsFor(turns) {{
+  const context = {{
+    console,
+    URL,
+    location: {{ href: 'https://chatgpt.com/c/p1-test-12345678' }},
+    document: {{ querySelectorAll: (selector) => selector === '[data-message-author-role]' ? turns : [] }},
+    window: {{ addEventListener: () => {{}} }},
+    MutationObserver: class {{ observe() {{}} }},
+    chrome: {{}},
+    setInterval: () => 0,
+    clearInterval: () => {{}},
+    setTimeout,
+    clearTimeout,
+  }};
+  vm.runInNewContext(source, context);
+  return context.window.__p1Test;
+}}
+
+const newlinePrompt = 'BDB-P1-CALC-BROWSER-E2E\\nsecond line';
+if (!functionsFor([node('user', newlinePrompt)]).latestEngineeringPrompt()) throw new Error('real LF prompt was not recognized');
+
+const literalSeparatorPrompt = 'BDB-P1-CALC-BROWSER-E2E\\\\nsecond line';
+if (functionsFor([node('user', literalSeparatorPrompt)]).latestEngineeringPrompt()) throw new Error('literal \\n separator was accepted');
+
+const artifactFunctions = functionsFor([]);
+const validFence = '```json\\n{{\\n  "schema": "bdb-vnext-edit-v1",\\n  "note": "multiline body"\\n}}\\n```';
+const artifact = artifactFunctions.strictEngineeringArtifact(validFence);
+if (artifact.schema !== 'bdb-vnext-edit-v1') throw new Error('valid fenced artifact was not parsed');
+
+function mustReject(value, label) {{
+  let rejected = false;
+  try {{ artifactFunctions.strictEngineeringArtifact(value); }} catch (_) {{ rejected = true; }}
+  if (!rejected) throw new Error(label + ' was accepted');
+}}
+
+mustReject('```json\\n{{"schema":"bdb-vnext-edit-v1",\\n```', 'malformed JSON fence');
+mustReject('```json\\n{{"schema":"bdb-vnext-edit-v1"}}\\n```\\n```json\\n{{"schema":"bdb-vnext-edit-v1"}}\\n```', 'two JSON fences');
+mustReject('```json\\n{{"schema":"other"}}\\n```', 'non-BDB JSON fence');
+"""
+    result = subprocess.run(["node", "--input-type=module"], input=harness, capture_output=True, text=True, timeout=30, check=False)
+    assert result.returncode == 0, result.stderr or result.stdout
