@@ -350,6 +350,7 @@ class VNextControlPlane:
     candidate_store: Any
     evidence_store: Any
     publication_store: Any
+    editor_port: Any
     operator_query: Any
 
     @property
@@ -365,6 +366,12 @@ class VNextControlPlane:
     @property
     def publication(self) -> Any:
         return self.publication_store
+
+    @property
+    def editor(self) -> Any:
+        """The typed Phase 1 model-authored edit boundary."""
+
+        return self.editor_port
 
     @property
     def query(self) -> Any:
@@ -831,6 +838,8 @@ class VNextCompositionRoot:
                 work_kernel=work_kernel,
             )
             evidence = EvidenceStore(self._runtime_root, content_store=bindings.content_store, candidate_store=candidate)
+            from bdb_vnext.engineering_loop import EditorPort
+            editor = EditorPort(candidate, evidence_store=evidence)
             publication = PublicationStore(
                 self._runtime_root,
                 content_store=bindings.content_store,
@@ -848,7 +857,7 @@ class VNextCompositionRoot:
                 evidence_store=evidence,
                 publication_store=publication,
             )
-            return VNextControlPlane(self, bindings, admission, work_kernel, candidate, evidence, publication, operator_query)
+            return VNextControlPlane(self, bindings, admission, work_kernel, candidate, evidence, publication, editor, operator_query)
         except Exception:
             if publication is not None:
                 publication.close()

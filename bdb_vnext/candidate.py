@@ -1,6 +1,6 @@
 """Bounded M4b exact local effect and sealed Candidate RepoView.
 
-Only ``EXACT_REPLACEMENT_V1`` is supported.  The source checkout and Git refs
+The source checkout and Git refs
 are read-only; all mutable coordination state lives in the N1 Control DB and
 immutable replacement bytes use the existing Content CAS.
 """
@@ -14,7 +14,7 @@ import stat
 import sqlite3
 import subprocess
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, NoReturn
@@ -43,6 +43,7 @@ CANDIDATE_EFFECT_SCHEMA = "bdb-vnext-candidate-effect-v1"
 CANDIDATE_VIEW_SCHEMA_V1 = "bdb-vnext-candidate-repo-view-v1"
 CANDIDATE_VIEW_SCHEMA = "bdb-vnext-candidate-repo-view-v2"
 CANDIDATE_BASE_AUTHORITY_SCHEMA = "bdb-vnext-candidate-base-git-bundle-v1"
+CANDIDATE_ABSENCE_SCHEMA = "bdb-vnext-candidate-absence-v1"
 CANDIDATE_KIND = "CANDIDATE"
 CANDIDATE_EFFECT_CLASS = "EXACT_REPLACEMENT_V1"
 CANDIDATE_PREPARED = "PREPARED"
@@ -152,6 +153,20 @@ def _read_exact(path: Path) -> bytes:
 
 def _file_mode(path: Path) -> int:
     return stat.S_IMODE(path.stat(follow_symlinks=False).st_mode)
+
+
+def _path_exists(path: Path) -> bool:
+    """Return existence without following a dangling symlink."""
+
+    return os.path.lexists(str(path))
+
+
+def _absence_ref() -> ContentRef:
+    return make_content_ref("application/x-bdb-absence", CANDIDATE_ABSENCE_SCHEMA, b"")
+
+
+def _is_absence_ref(ref: ContentRef) -> bool:
+    return ref.type == "application/x-bdb-absence" and ref.schema == CANDIDATE_ABSENCE_SCHEMA and ref.raw_digest == _digest(b"")
 
 
 def _git_mode(path: Path) -> str:
@@ -348,6 +363,8 @@ class CandidateRepoView:
             _fail("candidate_not_sealed", "Candidate view is no longer sealed")
         plan = next((item for item in record.planned_paths if item.path == path), None)
         if plan is not None:
+            if _is_absence_ref(plan.after_ref):
+                _fail("candidate_missing_path", "Candidate RepoView does not contain the planned deleted path")
             raw = self._store.content_store.resolve(plan.after_ref)
             if _digest(raw) != plan.after_digest:
                 _fail("candidate_content_integrity_failure", "sealed Candidate content digest differs")
@@ -362,13 +379,15 @@ class CandidateRepoView:
             _fail("candidate_base_unavailable", "Candidate entries require the bound base view")
         entries = {entry.path: entry for entry in self._base_view.list_entries()}
         for plan in self.path_bindings:
+            if _is_absence_ref(plan.after_ref):
+                entries.pop(plan.path, None)
+                continue
             raw = self._store.content_store.resolve(plan.after_ref)
             entry = entries.get(plan.path)
-            if entry is None:
-                _fail("candidate_path_not_planned", "Candidate path is absent from the exact base tree")
+            mode = plan.after_mode
             entries[plan.path] = RepoTreeEntry(
                 path=plan.path,
-                mode=entry.mode,
+                mode="100755" if mode & 0o111 else "100644",
                 object_type="blob",
                 object_oid=_blob_oid(raw, self._base_view.object_format),
                 size_bytes=len(raw),
@@ -910,6 +929,323 @@ class CandidateStore:
             raise
         return self.get(candidate_id)  # type: ignore[return-value]
 
+    def prepare_operations(
+        self,
+        *,
+        candidate_id: str,
+        effect_id: str | None = None,
+        work_id: str,
+        task_id: str,
+        lease_id: str,
+        fence: int,
+        base_view: CommittedRepoView,
+        workspace_root: str | Path,
+        operations: Sequence[Mapping[str, Any]],
+    ) -> CandidateRecord:
+        """Prepare the bounded ``BDB_EDIT_V1`` operation set.
+
+        This keeps the existing Candidate writer and exact tree proof.  A
+        rename is represented as one source deletion plus one destination
+        creation; the edit artifact retains the higher-level operation in its
+        own immutable fact record.
+        """
+
+        candidate_id, work_id, task_id, lease_id = (
+            _id(candidate_id, field="candidate_id"),
+            _id(work_id, field="work_id"),
+            _id(task_id, field="task_id"),
+            _id(lease_id, field="lease_id"),
+        )
+        if not isinstance(fence, int) or isinstance(fence, bool) or fence < 1:
+            _fail("invalid_fence", "fence must be a positive integer")
+        if not isinstance(operations, Sequence) or isinstance(operations, (str, bytes)) or not operations or len(operations) > MAX_PATHS:
+            _fail("invalid_write_set", "edit operation set must be bounded and non-empty")
+        base = self._serialize_view(base_view)
+        base_entries = self._base_entries(base_view)
+        workspace = _safe_root(Path(workspace_root))
+        if workspace != self._workspace_for(candidate_id):
+            _fail("foreign_workspace", "Candidate workspace must be the generated workspace for this candidate")
+        if self.work_kernel is None:
+            _fail("work_kernel_unavailable", "Candidate effects require the canonical Work Kernel")
+        query = self.work_kernel.query(work_id)
+        if query is None or query.work.task_id != task_id:
+            _fail("task_binding_mismatch", "Candidate work item is not bound to the supplied canonical Task")
+        self.work_kernel.assert_current_lease(work_id, lease_id, fence)
+        object_format = str(base_view.object_format)
+        actual_base = self._workspace_entries(workspace, object_format=object_format)
+        base_tree_digest = self._tree_digest(base_entries)
+        if actual_base != base_entries:
+            _fail("candidate_base_mismatch", "Candidate workspace does not exactly equal the committed base tree")
+
+        normalized: list[dict[str, Any]] = []
+        expanded: list[dict[str, Any]] = []
+        seen_operations: set[str] = set()
+        for raw in operations:
+            if not isinstance(raw, Mapping):
+                _fail("invalid_edit_operation", "each edit operation must be a mapping")
+            operation = str(raw.get("operation", "")).upper()
+            path = _path(raw.get("path"))
+            if operation not in {"CREATE", "MODIFY", "DELETE", "RENAME"}:
+                _fail("unsupported_edit_operation", "only CREATE, MODIFY, DELETE and RENAME are supported")
+            if path in seen_operations:
+                _fail("duplicate_edit_path", "an edit path may occur only once")
+            seen_operations.add(path)
+            mode = raw.get("mode", 0o644)
+            if not isinstance(mode, int) or isinstance(mode, bool) or mode not in {0o644, 0o755, 0o100644, 0o100755}:
+                _fail("invalid_edit_mode", "edit mode must be 644 or 755")
+            mode = mode & 0o777
+            content = raw.get("content")
+            if content is not None and not isinstance(content, bytes):
+                _fail("invalid_edit_bytes", "edit content must be bytes")
+            if isinstance(content, bytes) and len(content) > MAX_FILE_BYTES:
+                _fail("invalid_edit_bytes", "edit content is too large")
+            source_path = raw.get("source_path")
+            if source_path is not None:
+                source_path = _path(source_path)
+            if operation == "RENAME":
+                if source_path is None or source_path == path or content is not None:
+                    _fail("invalid_rename", "RENAME requires a distinct source_path and no content")
+                if source_path.casefold() == path.casefold():
+                    _fail("case_collision", "RENAME cannot change only the case of a Windows path")
+                if source_path in seen_operations:
+                    _fail("duplicate_edit_path", "a rename source may occur only once")
+                seen_operations.add(source_path)
+                normalized.append({"operation": operation, "path": path, "source_path": source_path, "mode": mode})
+                expanded.extend((
+                    {"operation": "DELETE", "path": source_path, "mode": mode, "rename_destination": path},
+                    {"operation": "CREATE", "path": path, "mode": mode, "rename_source": source_path},
+                ))
+            else:
+                if source_path is not None:
+                    _fail("unexpected_source_path", "source_path is valid only for RENAME")
+                if operation in {"CREATE", "MODIFY"} and not isinstance(content, bytes):
+                    _fail("invalid_edit_bytes", f"{operation} requires content bytes")
+                if operation == "DELETE" and content is not None:
+                    _fail("invalid_edit_bytes", "DELETE cannot include content")
+                normalized.append({"operation": operation, "path": path, "mode": mode, "content": content})
+                expanded.append({"operation": operation, "path": path, "mode": mode, "content": content})
+
+        final_entries = dict(base_entries)
+        folded: dict[str, str] = {path.casefold(): path for path in final_entries}
+        plans: list[CandidatePathPlan] = []
+        absence = _absence_ref()
+        self.content_store.publish(absence, b"")
+        for item in expanded:
+            operation = str(item["operation"])
+            path = str(item["path"])
+            key = path.casefold()
+            existing_path = folded.get(key)
+            if existing_path is not None and existing_path != path:
+                _fail("case_collision", "edit paths collide on a case-insensitive filesystem")
+            if operation == "CREATE":
+                if path in final_entries:
+                    _fail("path_already_exists", "CREATE requires an absent path")
+                before, before_ref, before_mode, before_size = b"", absence, 0o644, 0
+                after_mode = int(item["mode"])
+                if "rename_source" in item:
+                    source = str(item["rename_source"])
+                    if source not in base_entries:
+                        _fail("path_not_in_base", "RENAME source must exist in the committed base")
+                    before_source = _read_exact(_safe_child(workspace, source))
+                    after = before_source
+                    after_mode = _file_mode(_safe_child(workspace, source))
+                else:
+                    after = item.get("content")
+                if not isinstance(after, bytes):
+                    _fail("invalid_edit_bytes", "CREATE requires content bytes")
+                after_ref = make_content_ref("application/octet-stream", "m4b-candidate-after-v1", after)
+                self.content_store.publish(before_ref, before)
+                self.content_store.publish(after_ref, after)
+                plan = CandidatePathPlan(path, _digest(before), _digest(after), before_ref, after_ref, before_mode, after_mode, before_size, len(after))
+                plans.append(plan)
+                final_entries[path] = (_blob_oid(after, object_format), "100755" if after_mode & 0o111 else "100644")
+                folded[key] = path
+            elif operation == "DELETE":
+                if path not in final_entries:
+                    _fail("path_not_in_base", "DELETE requires an existing committed path")
+                target = _safe_child(workspace, path)
+                before = _read_exact(target)
+                before_mode = _file_mode(target)
+                before_ref = make_content_ref("application/octet-stream", "m4b-candidate-before-v1", before)
+                self.content_store.publish(before_ref, before)
+                self.content_store.publish(absence, b"")
+                plans.append(CandidatePathPlan(path, _digest(before), _digest(b""), before_ref, absence, before_mode, 0o644, len(before), 0))
+                final_entries.pop(path, None)
+                folded.pop(key, None)
+            else:
+                if path not in final_entries:
+                    _fail("path_not_in_base", "MODIFY requires an existing committed path")
+                target = _safe_child(workspace, path)
+                before = _read_exact(target)
+                before_mode = _file_mode(target)
+                after = item.get("content")
+                if not isinstance(after, bytes):
+                    _fail("invalid_edit_bytes", "MODIFY requires content bytes")
+                before_ref = make_content_ref("application/octet-stream", "m4b-candidate-before-v1", before)
+                after_ref = make_content_ref("application/octet-stream", "m4b-candidate-after-v1", after)
+                self.content_store.publish(before_ref, before)
+                self.content_store.publish(after_ref, after)
+                requested_mode = int(item["mode"])
+                plans.append(CandidatePathPlan(path, _digest(before), _digest(after), before_ref, after_ref, before_mode, before_mode if requested_mode == 0o644 else requested_mode, len(before), len(after)))
+                final_entries[path] = (_blob_oid(after, object_format), "100755" if int(item["mode"]) & 0o111 else "100644")
+        if len(plans) > MAX_PATHS:
+            _fail("invalid_write_set", "expanded edit write set is too large")
+        planned_tree_digest = self._tree_digest(final_entries)
+        effect_material = {
+            "schema": CANDIDATE_EFFECT_SCHEMA,
+            "class": "EXACT_EDIT_V1",
+            "candidate_id": candidate_id,
+            "work_id": work_id,
+            "task_id": task_id,
+            "lease_id": lease_id,
+            "fence": fence,
+            "base_view": base,
+            "base_tree_digest": base_tree_digest,
+            "planned_tree_digest": planned_tree_digest,
+            "workspace_root": str(workspace),
+            "workspace_generation": self.generation,
+            "config_digest": self.config_digest,
+            "paths": [item.as_dict() for item in plans],
+            "operations": [{key: (value.hex() if isinstance(value, bytes) else value) for key, value in item.items()} for item in normalized],
+        }
+        expected_effect_id = semantic_digest(effect_material)
+        if effect_id is not None and effect_id != expected_effect_id:
+            _fail("effect_identity_mismatch", "effect_id does not equal the exact prepared edit digest", details={"expected": expected_effect_id})
+        effect_id = expected_effect_id
+        if self.get(candidate_id) is not None:
+            _fail("candidate_exists", "candidate_id is already bound")
+        begin_control_write(self._connection)
+        try:
+            self._connection.execute(
+                "INSERT INTO m4b_candidate_effects(candidate_id,effect_id,work_id,task_id,state,effect_certainty,base_view_json,workspace_root,workspace_generation,config_digest,lease_id,fence,base_tree_digest,planned_tree_digest,observed_tree_digest,observed_json,candidate_view_json,manifest_digest) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (candidate_id, effect_id, work_id, task_id, CANDIDATE_PREPARED, "NOT_ASSESSED", canonical_json_bytes(base), str(workspace), self.generation, self.config_digest, lease_id, fence, base_tree_digest, planned_tree_digest, None, b"{}", None, None),
+            )
+            for item in plans:
+                self._connection.execute(
+                    "INSERT INTO m4b_candidate_paths(candidate_id,path,before_digest,after_digest,before_ref_json,after_ref_json,before_mode,after_mode,before_size,after_size,observed) VALUES (?,?,?,?,?,?,?,?,?,?,NULL)",
+                    (candidate_id, item.path, item.before_digest, item.after_digest, canonical_json_bytes(item.before_ref.as_dict()), canonical_json_bytes(item.after_ref.as_dict()), item.before_mode, item.after_mode, item.before_size, item.after_size),
+                )
+            commit_control_write(self._connection)
+        except Exception:
+            self._connection.rollback()
+            raise
+        return self.get(candidate_id)  # type: ignore[return-value]
+
+    def reprepare_desired(
+        self,
+        *,
+        candidate_id: str,
+        base_view: CommittedRepoView,
+        workspace_root: str | Path,
+        desired_files: Mapping[str, bytes | None],
+        desired_modes: Mapping[str, int] | None = None,
+    ) -> CandidateRecord:
+        """Replan one unfinished Candidate after a bounded validation loop.
+
+        Edit batches remain durable facts in the engineering-loop table; this
+        method keeps one Candidate identity and replaces only its unsealed
+        plan.  The current workspace is the exact BEFORE image for the next
+        apply, while the original Committed RepoView remains the tree basis.
+        """
+
+        record = self.get(candidate_id)
+        if record is None:
+            _fail("candidate_missing", "Candidate does not exist")
+        if record.state in {CANDIDATE_SEALED, CANDIDATE_INVALIDATED}:
+            _fail("candidate_state_conflict", "sealed or invalidated Candidate cannot be replanned")
+        self._assert_owner(record)
+        base_view.validate_integrity()
+        workspace = _safe_root(Path(workspace_root))
+        if workspace != self._workspace_for(candidate_id):
+            _fail("foreign_workspace", "Candidate workspace must be the generated workspace for this candidate")
+        base_entries = self._base_entries(base_view)
+        actual_entries = self._workspace_entries(workspace, object_format=base_view.object_format)
+        desired: dict[str, bytes | None] = {}
+        for raw_path, content in desired_files.items():
+            path = _path(raw_path)
+            if content is not None and (not isinstance(content, bytes) or len(content) > MAX_FILE_BYTES):
+                _fail("invalid_edit_bytes", "desired file content is invalid or too large")
+            desired[path] = content
+        expected_paths = set(base_entries) | set(desired)
+        if set(actual_entries) - expected_paths:
+            _fail("foreign_candidate_state", "Candidate workspace contains a path outside the accumulated edit plan")
+        plans: list[CandidatePathPlan] = []
+        planned_entries = dict(base_entries)
+        modes = dict(desired_modes or {})
+        for path in sorted(expected_paths):
+            base_present = path in base_entries
+            target_present = path in desired and desired[path] is not None
+            if path in desired:
+                after = desired[path]
+            elif base_present:
+                after = base_view.read_bytes(path)
+            else:
+                after = None
+            current_present = path in actual_entries
+            if current_present:
+                current = _read_exact(_safe_child(workspace, path))
+                current_mode = _file_mode(_safe_child(workspace, path))
+            else:
+                current = None
+                current_mode = 0o644
+            base_bytes = base_view.read_bytes(path) if base_present else None
+            if current == base_bytes and after == base_bytes:
+                continue
+            before_ref = _absence_ref() if current is None else make_content_ref("application/octet-stream", "m4b-candidate-before-v1", current)
+            after_ref = _absence_ref() if after is None else make_content_ref("application/octet-stream", "m4b-candidate-after-v1", after)
+            if current is not None:
+                self.content_store.publish(before_ref, current)
+            else:
+                self.content_store.publish(before_ref, b"")
+            if after is not None:
+                self.content_store.publish(after_ref, after)
+            else:
+                self.content_store.publish(after_ref, b"")
+            after_mode = int(modes.get(path, current_mode if current is not None else (0o755 if path in base_entries and base_entries[path][1] == "100755" else 0o644))) & 0o777
+            plan = CandidatePathPlan(path, _digest(current or b""), _digest(after or b""), before_ref, after_ref, current_mode, after_mode, len(current or b""), len(after or b""))
+            plans.append(plan)
+            if after is None:
+                planned_entries.pop(path, None)
+            else:
+                planned_entries[path] = (_blob_oid(after, base_view.object_format), "100755" if after_mode & 0o111 else "100644")
+        if not plans:
+            _fail("empty_edit_plan", "replanned Candidate has no net change")
+        planned_tree_digest = self._tree_digest(planned_entries)
+        effect_material = {
+            "schema": CANDIDATE_EFFECT_SCHEMA,
+            "class": "EXACT_EDIT_V1",
+            "candidate_id": record.candidate_id,
+            "work_id": record.work_id,
+            "task_id": record.task_id,
+            "lease_id": record.lease_id,
+            "fence": record.fence,
+            "base_view": base_view.to_dict(),
+            "base_tree_digest": record.base_tree_digest,
+            "planned_tree_digest": planned_tree_digest,
+            "workspace_root": str(workspace),
+            "workspace_generation": record.workspace_generation,
+            "config_digest": record.config_digest,
+            "paths": [item.as_dict() for item in plans],
+        }
+        effect_id = semantic_digest(effect_material)
+        begin_control_write(self._connection)
+        try:
+            self._connection.execute("DELETE FROM m4b_candidate_paths WHERE candidate_id=?", (candidate_id,))
+            self._connection.execute(
+                "UPDATE m4b_candidate_effects SET effect_id=?,state=?,effect_certainty=?,base_view_json=?,planned_tree_digest=?,observed_tree_digest=NULL,observed_json=?,candidate_view_json=NULL,manifest_digest=NULL WHERE candidate_id=?",
+                (effect_id, CANDIDATE_PREPARED, "NOT_ASSESSED", canonical_json_bytes(base_view.to_dict()), planned_tree_digest, b"{}", candidate_id),
+            )
+            for item in plans:
+                self._connection.execute(
+                    "INSERT INTO m4b_candidate_paths(candidate_id,path,before_digest,after_digest,before_ref_json,after_ref_json,before_mode,after_mode,before_size,after_size,observed) VALUES (?,?,?,?,?,?,?,?,?,?,NULL)",
+                    (candidate_id, item.path, item.before_digest, item.after_digest, canonical_json_bytes(item.before_ref.as_dict()), canonical_json_bytes(item.after_ref.as_dict()), item.before_mode, item.after_mode, item.before_size, item.after_size),
+                )
+            commit_control_write(self._connection)
+        except Exception:
+            self._connection.rollback()
+            raise
+        return self.get(candidate_id)  # type: ignore[return-value]
+
     def mark_possible(self, candidate_id: str) -> CandidateRecord:
         record = self.get(candidate_id)
         if record is None:
@@ -941,20 +1277,42 @@ class CandidateStore:
         return self.get(candidate_id)  # type: ignore[return-value]
 
     def _observe_one(self, workspace: Path, plan: CandidatePathPlan) -> str:
+        target = _safe_child(workspace, plan.path)
+        exists = _path_exists(target)
+        before_absent = _is_absence_ref(plan.before_ref)
+        after_absent = _is_absence_ref(plan.after_ref)
+        if not exists:
+            if before_absent and after_absent:
+                return "AFTER"
+            if before_absent:
+                return "BEFORE"
+            if after_absent:
+                return "AFTER"
+            return "DIVERGED"
+        if before_absent and after_absent:
+            return "DIVERGED"
         try:
-            actual = _read_exact(_safe_child(workspace, plan.path))
+            actual = _read_exact(target)
         except CandidateError as exc:
             if exc.code == "candidate_path_missing":
                 return "DIVERGED"
             raise
         digest = _digest(actual)
         try:
-            mode = _file_mode(_safe_child(workspace, plan.path))
+            mode = _file_mode(target)
         except CandidateError:
             return "DIVERGED"
-        if digest == plan.before_digest and mode == plan.before_mode:
+        before_mode_matches = mode == plan.before_mode
+        after_mode_matches = mode == plan.after_mode
+        if _is_absence_ref(plan.before_ref):
+            # Windows ACLs commonly expose 0666 for a newly-created regular
+            # file even when the Candidate tree contract is 100644.  For a
+            # path whose BEFORE state was absence, compare the Git mode while
+            # retaining exact filesystem mode checks for existing files.
+            after_mode_matches = _git_mode(target) == ("100755" if plan.after_mode & 0o111 else "100644")
+        if digest == plan.before_digest and before_mode_matches:
             return "BEFORE"
-        if digest == plan.after_digest and mode == plan.after_mode:
+        if digest == plan.after_digest and after_mode_matches:
             return "AFTER"
         return "DIVERGED"
 
@@ -1002,38 +1360,66 @@ class CandidateStore:
         record = self.mark_possible(candidate_id)
         workspace = _safe_root(Path(record.workspace_root))
         observations = {item.path: self._observe_one(workspace, item) for item in record.planned_paths}
-        if any(value != "BEFORE" for value in observations.values()):
+        if any(value not in {"BEFORE", "AFTER"} for value in observations.values()):
+            _fail("apply_requires_before", "apply requires exact BEFORE observations; inspect before retry")
+        if any(value == "AFTER" and not (_is_absence_ref(item.before_ref) and _is_absence_ref(item.after_ref)) for item, value in ((item, observations[item.path]) for item in record.planned_paths)):
             _fail("apply_requires_before", "apply requires exact BEFORE observations; inspect before retry")
         if fault == "before_write":
             raise CandidateError("candidate_apply_interrupted", "apply stopped before first filesystem write", details={"effect_certainty": "POSSIBLE"})
         for index, plan in enumerate(record.planned_paths, start=1):
             self._assert_owner(self.get(candidate_id))  # type: ignore[arg-type]
             target = _safe_child(workspace, plan.path)
-            target.parent.mkdir(parents=True, exist_ok=True)
             _safe_child(workspace, plan.path)
-            current = _read_exact(target)
-            if _digest(current) != plan.before_digest or _file_mode(target) != plan.before_mode:
-                self._set_uncertain(candidate_id, certainty="UNKNOWN", state=CANDIDATE_DIVERGED)
-                _fail("candidate_concurrent_modification", "planned path changed before the filesystem replacement")
+            before_absent = _is_absence_ref(plan.before_ref)
+            after_absent = _is_absence_ref(plan.after_ref)
+            if before_absent and after_absent and not _path_exists(target):
+                if fail_after_paths is not None and index >= fail_after_paths:
+                    self._set_uncertain(candidate_id, certainty="POSSIBLE", state=CANDIDATE_POSSIBLE)
+                    return self.get(candidate_id)  # type: ignore[return-value]
+                continue
+            if before_absent:
+                if _path_exists(target):
+                    self._set_uncertain(candidate_id, certainty="UNKNOWN", state=CANDIDATE_DIVERGED)
+                    _fail("candidate_concurrent_modification", "planned creation path already exists")
+            else:
+                try:
+                    current = _read_exact(target)
+                    current_digest = _digest(current)
+                    current_mode = _file_mode(target)
+                except CandidateError:
+                    self._set_uncertain(candidate_id, certainty="UNKNOWN", state=CANDIDATE_DIVERGED)
+                    _fail("candidate_concurrent_modification", "planned path changed before the filesystem replacement")
+                if current_digest != plan.before_digest or current_mode != plan.before_mode:
+                    self._set_uncertain(candidate_id, certainty="UNKNOWN", state=CANDIDATE_DIVERGED)
+                    _fail("candidate_concurrent_modification", "planned path changed before the filesystem replacement")
             if fault == "during_temp_create":
                 self._set_uncertain(candidate_id, certainty="POSSIBLE", state=CANDIDATE_POSSIBLE)
                 raise CandidateError("candidate_apply_failed", "temporary file creation failed; observation is required", details={"fault": fault})
-            fd, temporary_name = tempfile.mkstemp(prefix=".m4b-", dir=str(target.parent))
-            temporary = Path(temporary_name)
             try:
-                with os.fdopen(fd, "wb") as handle:
-                    handle.write(self.content_store.resolve(plan.after_ref))
-                    if fault == "after_temp_write":
-                        raise OSError("injected filesystem fault: after_temp_write")
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                if fault in {"locked_file", "permission_denied", "disk_full", "during_replace"}:
-                    raise OSError(f"injected filesystem fault: {fault}")
-                _safe_child(workspace, plan.path)
-                os.replace(temporary, target)
-                os.chmod(target, plan.after_mode)
+                if after_absent:
+                    if fault in {"locked_file", "permission_denied", "disk_full", "during_replace"}:
+                        raise OSError(f"injected filesystem fault: {fault}")
+                    target.unlink()
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    fd, temporary_name = tempfile.mkstemp(prefix=".m4b-", dir=str(target.parent))
+                    temporary = Path(temporary_name)
+                    try:
+                        with os.fdopen(fd, "wb") as handle:
+                            handle.write(self.content_store.resolve(plan.after_ref))
+                            if fault == "after_temp_write":
+                                raise OSError("injected filesystem fault: after_temp_write")
+                            handle.flush()
+                            os.fsync(handle.fileno())
+                        if fault in {"locked_file", "permission_denied", "disk_full", "during_replace"}:
+                            raise OSError(f"injected filesystem fault: {fault}")
+                        _safe_child(workspace, plan.path)
+                        os.replace(temporary, target)
+                        os.chmod(target, plan.after_mode)
+                    finally:
+                        if temporary.exists():
+                            temporary.unlink(missing_ok=True)
             except OSError as exc:
-                temporary.unlink(missing_ok=True)
                 self._set_uncertain(candidate_id, certainty="POSSIBLE" if fault else "UNKNOWN", state=CANDIDATE_POSSIBLE if fault else CANDIDATE_UNKNOWN)
                 raise CandidateError("candidate_apply_failed", "filesystem apply failed; exact observation is required", details={"fault": fault or "os_error"}) from exc
             if fail_after_paths is not None and index >= fail_after_paths:
@@ -1100,7 +1486,10 @@ class CandidateStore:
         base_entries = self._base_entries(base_view)
         planned_entries = dict(base_entries)
         for item in record.planned_paths:
-            planned_entries[item.path] = (_blob_oid(self.content_store.resolve(item.after_ref), base_view.object_format), "100755" if item.after_mode & 0o111 else "100644")
+            if _is_absence_ref(item.after_ref):
+                planned_entries.pop(item.path, None)
+            else:
+                planned_entries[item.path] = (_blob_oid(self.content_store.resolve(item.after_ref), base_view.object_format), "100755" if item.after_mode & 0o111 else "100644")
         observed_digest = self._tree_digest(actual_entries)
         planned_digest = self._tree_digest(planned_entries)
         if actual_entries != planned_entries or observed_digest != planned_digest:
@@ -1162,7 +1551,10 @@ class CandidateStore:
             actual = self._workspace_entries(workspace, object_format=base_view.object_format)
             planned = self._base_entries(base_view)
             for item in record.planned_paths:
-                planned[item.path] = (_blob_oid(self.content_store.resolve(item.after_ref), base_view.object_format), "100755" if item.after_mode & 0o111 else "100644")
+                if _is_absence_ref(item.after_ref):
+                    planned.pop(item.path, None)
+                else:
+                    planned[item.path] = (_blob_oid(self.content_store.resolve(item.after_ref), base_view.object_format), "100755" if item.after_mode & 0o111 else "100644")
             changed = changed or actual != planned
         if changed:
             # Revalidation is readable after the producing lease is released,
@@ -1193,7 +1585,10 @@ class CandidateStore:
         actual = self._workspace_entries(_safe_root(workspace_path), object_format=base_view.object_format)
         planned = self._base_entries(base_view)
         for item in record.planned_paths:
-            planned[item.path] = (_blob_oid(self.content_store.resolve(item.after_ref), base_view.object_format), "100755" if item.after_mode & 0o111 else "100644")
+            if _is_absence_ref(item.after_ref):
+                planned.pop(item.path, None)
+            else:
+                planned[item.path] = (_blob_oid(self.content_store.resolve(item.after_ref), base_view.object_format), "100755" if item.after_mode & 0o111 else "100644")
         if actual != planned:
             _fail("candidate_invalidated", "sealed Candidate workspace no longer matches its immutable tree")
         return record

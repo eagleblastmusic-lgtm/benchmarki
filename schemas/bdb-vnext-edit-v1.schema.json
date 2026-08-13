@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-edit-v1",
+  "title": "BDB vNext bounded model-authored edit artifact",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "base_view_id",
+    "expected_tree_digest",
+    "task_id",
+    "work_id",
+    "run_id",
+    "lease_id",
+    "fence",
+    "candidate_id",
+    "workspace_generation",
+    "operations",
+    "budget"
+  ],
+  "properties": {
+    "schema": {"const": "bdb-vnext-edit-v1"},
+    "base_view_id": {"type": "string", "minLength": 1},
+    "expected_tree_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "task_id": {"type": "string", "minLength": 1},
+    "work_id": {"type": "string", "minLength": 1},
+    "run_id": {"type": "string", "minLength": 1},
+    "lease_id": {"type": "string", "minLength": 1},
+    "fence": {"type": "integer", "minimum": 1},
+    "candidate_id": {"type": "string", "minLength": 1},
+    "workspace_generation": {"type": "string", "minLength": 1},
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["operation", "path"],
+        "properties": {
+          "operation": {"enum": ["CREATE", "MODIFY", "DELETE", "RENAME"]},
+          "path": {"type": "string", "minLength": 1},
+          "source_path": {"type": "string", "minLength": 1},
+          "content_b64": {"type": "string", "contentEncoding": "base64"},
+          "mode": {"enum": [420, 493, 33188, 33261]}
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_operations": {"type": "integer", "minimum": 1, "maximum": 32},
+        "max_bytes": {"type": "integer", "minimum": 1, "maximum": 8388608}
+      }
+    },
+    "artifact_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}
