@@ -394,6 +394,14 @@ def test_content_script_uses_deterministic_restart_safe_submission_and_resume() 
     assert "N6 reasoning attestation cancelled" in script
     assert "Resume in this chat" in script
     assert "crypto.randomUUID" not in script
+    assert "BDB-P1-CALC-BROWSER-E2E" in script
+    assert "BDB_EDIT_V1 requires exactly one fenced JSON artifact" in script
+    assert 'send("engineering_artifact"' in script
+    assert 'send("engineering_prepare"' in script
+    assert 'send("engineering_finalize"' in script
+    assert "restoreEngineeringState" in script
+    assert "persistEngineeringState" in script
+    assert "prepared.prompt_digest" in script
 
 
 def test_task_conversation_is_exact_and_fail_closed() -> None:
@@ -500,5 +508,8 @@ makeContext(staleStore, 'https://chatgpt.com/c/stale-12345678', [], 'stale');
 await new Promise((resolve) => setTimeout(resolve, 20));
 if (staleStore.n6_pending_resume !== undefined) throw new Error('stale pending Resume remained actionable');
 """
-    result = subprocess.run(["node", "--input-type=module", "-e", harness], capture_output=True, text=True, timeout=30, check=False)
+    # Pass the generated Browser harness over stdin: Windows command-line
+    # length is bounded and the P1 engineering adapter is intentionally
+    # included in the generated content script.
+    result = subprocess.run(["node", "--input-type=module"], input=harness, capture_output=True, text=True, timeout=30, check=False)
     assert result.returncode == 0, result.stderr or result.stdout

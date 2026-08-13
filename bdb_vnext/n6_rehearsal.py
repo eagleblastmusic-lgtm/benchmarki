@@ -35,6 +35,15 @@ from bdb_vnext.candidate import (
     CANDIDATE_UNKNOWN,
     CandidateError,
 )
+from bdb_vnext.engineering_loop import (
+    EditBatch,
+    EDIT_SCHEMA,
+    EditorPort,
+    ValidationCommand,
+    ValidationPolicy,
+    ValidationRunner,
+    parse_edit_artifact,
+)
 from bdb_vnext.composition import (
     BROWSER_COMPONENT_ID,
     NATIVE_HOST_NAME,
@@ -66,6 +75,11 @@ N6_CAPTURE_CHECKER_VERSION = "1"
 N6_MAX_MESSAGE_BYTES = 1024 * 1024
 N6_MAX_PROMPT_BYTES = 64 * 1024
 N6_MAX_ANSWER_BYTES = 512 * 1024
+P1_ENGINEERING_TARGET_SCHEMA = "bdb-vnext-p1-engineering-target-v1"
+P1_ENGINEERING_PREFIX = "BDB-P1-CALC-BROWSER-E2E"
+P1_ENGINEERING_INTENT_REVISION = "p1-calc-v1"
+P1_ENGINEERING_CHECKER_ID = "bdb-vnext-p1-calculator-checker"
+P1_ENGINEERING_CHECKER_VERSION = "1"
 
 
 class N6RehearsalError(RuntimeError):
@@ -210,6 +224,12 @@ def _normalized_execution_documents(root: Path) -> tuple[dict[str, Any], dict[st
         (config_binding.get("protocol_generation"), package.get("protocol_generation")),
         (config_binding.get("production_activation"), resources.get("production_activation")),
     )
+    if ("engineering_target" in config) != ("engineering_target" in package):
+        _fail("package_execution_binding_mismatch", "N6 config and execution manifest disagree about the engineering target")
+    if "engineering_target" in config:
+        if config.get("engineering_target") != package.get("engineering_target"):
+            _fail("package_execution_binding_mismatch", "N6 config and execution manifest bind different engineering targets")
+        _validated_engineering_target(_mapping(config["engineering_target"], "engineering_target"), forbidden_roots=(_safe_abs(config["repo_root"], "repo_root"), _safe_abs(config["runtime_root"], "runtime_root"), _safe_abs(config["legacy_runtime_root"], "legacy_runtime_root"), _safe_abs(config["package_root"], "package_root"), _safe_abs(config["native_code_root"], "native_code_root")))
     if any(left != right for left, right in coherence):
         _fail("package_execution_binding_mismatch", "N6 config and execution manifest bind different execution subjects")
     config["package_digest"] = "<COMPOUND-IDENTITY>"
@@ -320,6 +340,92 @@ def _browser_native_binding(
     return identity
 
 
+def _validated_engineering_target(
+    value: Mapping[str, Any],
+    *,
+    forbidden_roots: tuple[Path, ...] = (),
+) -> dict[str, Any]:
+    """Validate the optional disposable pilot subject as an exact RepoView.
+
+    This is deliberately a package/config binding, not a new repository
+    authority.  The target is resolved once from its committed object and
+    every Browser artifact must carry the resulting view identity.
+    """
+
+    allowed = {"schema", "repository_id", "repo_root", "branch", "commit", "tree", "view_id", "allowed_paths", "checker"}
+    if not isinstance(value, Mapping) or set(value) != allowed or value.get("schema") != P1_ENGINEERING_TARGET_SCHEMA:
+        _fail("engineering_target_invalid", "engineering target fields/schema differ")
+    root = _safe_abs(value.get("repo_root"), "engineering_target.repo_root")
+    if not root.is_dir():
+        _fail("engineering_target_missing", "engineering target repository does not exist")
+    for forbidden in forbidden_roots:
+        if _overlap(root, forbidden):
+            _fail("foreign_state_overlap", "engineering target overlaps a protected BDB/package root")
+    repository_id = _text(value.get("repository_id"), "engineering_target.repository_id", max_bytes=256)
+    branch = _text(value.get("branch"), "engineering_target.branch", max_bytes=256)
+    commit = _text(value.get("commit"), "engineering_target.commit", max_bytes=40)
+    if len(commit) != 40 or any(char not in "0123456789abcdef" for char in commit):
+        _fail("engineering_target_invalid", "engineering target commit is not an exact Git object")
+    tree = _text(value.get("tree"), "engineering_target.tree", max_bytes=128)
+    view_id = _text(value.get("view_id"), "engineering_target.view_id", max_bytes=256)
+    allowed_paths = value.get("allowed_paths")
+    if not isinstance(allowed_paths, list) or not allowed_paths:
+        _fail("engineering_target_invalid", "engineering target allowed_paths must be a non-empty list")
+    normalized_paths: list[str] = []
+    folded: set[str] = set()
+    for raw in allowed_paths:
+        if not isinstance(raw, str) or not raw or raw.startswith(("/", "\\")) or "\\" in raw or ":" in raw or ".." in raw.split("/") or "" in raw.split("/"):
+            _fail("engineering_target_invalid", "engineering target paths must be relative and traversal-free")
+        key = raw.casefold()
+        if key in folded:
+            _fail("engineering_target_invalid", "engineering target paths collide on Windows")
+        folded.add(key)
+        normalized_paths.append(raw)
+    checker = value.get("checker")
+    if not isinstance(checker, Mapping) or set(checker) != {"checker_id", "checker_version", "argv", "cwd", "timeout_seconds"}:
+        _fail("engineering_target_invalid", "engineering target checker fields differ")
+    checker_id = _text(checker.get("checker_id"), "engineering_target.checker.checker_id", max_bytes=256)
+    checker_version = _text(checker.get("checker_version"), "engineering_target.checker.checker_version", max_bytes=64)
+    argv = checker.get("argv")
+    if not isinstance(argv, list) or not argv or any(not isinstance(item, str) or not item or "\x00" in item for item in argv):
+        _fail("engineering_target_invalid", "engineering target checker argv is invalid")
+    cwd = _text(checker.get("cwd"), "engineering_target.checker.cwd", max_bytes=256)
+    if cwd != ".":
+        _fail("engineering_target_invalid", "engineering target checker cwd must be the target root")
+    timeout = checker.get("timeout_seconds")
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0 or timeout > 300:
+        _fail("engineering_target_invalid", "engineering target checker timeout is outside the bound")
+    try:
+        observed_branch = subprocess.run(["git", "-C", str(root), "branch", "--show-current"], shell=False, capture_output=True, text=True, check=True, timeout=20).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        _fail("engineering_target_invalid", "engineering target branch could not be observed", details={"error": type(exc).__name__})
+    if observed_branch != branch:
+        _fail("engineering_target_branch_mismatch", "engineering target branch differs from the frozen package binding")
+    try:
+        resolved = RepositoryResource.from_path(root, repository_id=repository_id).resolve_committed(commit)
+    except Exception as exc:
+        _fail("engineering_target_invalid", "engineering target committed RepoView could not be resolved", details={"error": type(exc).__name__})
+    if resolved.tree_oid != tree or resolved.view_id != view_id:
+        _fail("engineering_target_repo_view_mismatch", "engineering target tree/view identity differs from the resolved commit")
+    return {
+        "schema": P1_ENGINEERING_TARGET_SCHEMA,
+        "repository_id": repository_id,
+        "repo_root": str(root),
+        "branch": branch,
+        "commit": commit,
+        "tree": tree,
+        "view_id": view_id,
+        "allowed_paths": sorted(normalized_paths),
+        "checker": {
+            "checker_id": checker_id,
+            "checker_version": checker_version,
+            "argv": list(argv),
+            "cwd": ".",
+            "timeout_seconds": float(timeout),
+        },
+    }
+
+
 def _validated_browser_native_binding(value: object) -> dict[str, Any]:
     binding = dict(_mapping(value, "browser_native_binding"))
     required = {
@@ -372,13 +478,14 @@ class N6RehearsalConfig:
     browser_extension_id: str
     native_host_name: str = N6_NATIVE_HOST_NAME
     protocol_generation: str = N6_PROTOCOL_GENERATION
+    engineering_target: Mapping[str, Any] | None = None
 
     @classmethod
     def from_json(cls, path: str | Path) -> "N6RehearsalConfig":
         source = Path(path).expanduser().absolute()
         document = _read_json(source)
-        expected = {"schema", "repo_root", "runtime_root", "legacy_runtime_root", "source_commit", "package_root", "native_code_root", "native_code_digest", "package_digest", "interpreter_identity", "browser_native_binding", "browser_extension_id", "native_host_name", "protocol_generation", "production_activation"}
-        if set(document) != expected or document.get("schema") != N6_CONFIG_SCHEMA:
+        required = {"schema", "repo_root", "runtime_root", "legacy_runtime_root", "source_commit", "package_root", "native_code_root", "native_code_digest", "package_digest", "interpreter_identity", "browser_native_binding", "browser_extension_id", "native_host_name", "protocol_generation", "production_activation"}
+        if not required.issubset(document) or set(document) - (required | {"engineering_target"}) or document.get("schema") != N6_CONFIG_SCHEMA:
             _fail("config_invalid", "N6 config fields/schema differ")
         if document.get("production_activation") is not False:
             _fail("activation_forbidden", "N6 rehearsal config must remain build-only")
@@ -420,7 +527,13 @@ class N6RehearsalConfig:
         )
         if any(left != right for left, right in binding_coherence):
             _fail("config_invalid", "N6 Browser/Native execution binding differs from config")
-        return cls(repo, runtime, legacy, source_commit, package, native_code, _text(document["native_code_digest"], "native_code_digest"), _text(document["package_digest"], "package_digest"), dict(interpreter), binding, _text(document["browser_extension_id"], "browser_extension_id"), _text(document["native_host_name"], "native_host_name"), _text(document["protocol_generation"], "protocol_generation"))
+        target = None
+        if "engineering_target" in document:
+            target = _validated_engineering_target(
+                _mapping(document["engineering_target"], "engineering_target"),
+                forbidden_roots=(repo, runtime, legacy, package, native_code),
+            )
+        return cls(repo, runtime, legacy, source_commit, package, native_code, _text(document["native_code_digest"], "native_code_digest"), _text(document["package_digest"], "package_digest"), dict(interpreter), binding, _text(document["browser_extension_id"], "browser_extension_id"), _text(document["native_host_name"], "native_host_name"), _text(document["protocol_generation"], "protocol_generation"), target)
 
 
 def _event_base(request: Mapping[str, Any]) -> tuple[str, str, str, str, str]:
@@ -473,6 +586,19 @@ class N6RehearsalService:
         if expected_binding != dict(config.browser_native_binding):
             _fail("browser_native_binding_mismatch", "configured Browser/Native execution binding differs from exact package authority")
         self.browser_native_binding = expected_binding
+        self.engineering_target = dict(config.engineering_target) if config.engineering_target is not None else None
+        self.engineering_source = None
+        self.engineering_view = None
+        if self.engineering_target is not None:
+            self.engineering_target = _validated_engineering_target(
+                self.engineering_target,
+                forbidden_roots=(config.repo_root, config.runtime_root, config.legacy_runtime_root, config.package_root, config.native_code_root),
+            )
+            self.engineering_source = RepositoryResource.from_path(
+                self.engineering_target["repo_root"],
+                repository_id=self.engineering_target["repository_id"],
+            )
+            self.engineering_view = self.engineering_source.resolve_committed(self.engineering_target["commit"])
 
     def _open(self):
         existing = (self.config.runtime_root / "browser" / "outbox" / "anchor.json").is_file()
@@ -711,6 +837,270 @@ class N6RehearsalService:
                 "protocol_generation": N6_PROTOCOL_GENERATION,
             }
 
+    def _engineering_ids(self, submission_key: str) -> dict[str, str]:
+        return {
+            "work_id": _stable_id("p1-work", submission_key),
+            "candidate_id": _stable_id("p1-candidate", submission_key),
+            "lease_id": _stable_id("p1-lease", submission_key),
+            "run_id": _stable_id("p1-run", submission_key),
+        }
+
+    def _engineering_checker(self) -> tuple[ValidationCommand, ValidationRunner]:
+        if self.engineering_target is None:
+            _fail("engineering_target_unavailable", "this N6 package has no disposable engineering target")
+        checker = self.engineering_target["checker"]
+        command = ValidationCommand(
+            str(checker["checker_id"]),
+            str(checker["checker_version"]),
+            tuple(str(item) for item in checker["argv"]),
+            str(checker["cwd"]),
+            float(checker["timeout_seconds"]),
+        )
+        return command, ValidationRunner(ValidationPolicy(allowed_argv=(command.argv,), allowed_cwd=command.cwd))
+
+    def _engineering_prepare(
+        self,
+        *,
+        submission_key: str,
+        prompt: str,
+        conversation_id: str,
+        profile_id: str | None,
+    ) -> dict[str, Any]:
+        if self.engineering_view is None or self.engineering_target is None:
+            _fail("engineering_target_unavailable", "engineering target is not present in this package")
+        prompt = _text(prompt, "prompt", max_bytes=N6_MAX_PROMPT_BYTES)
+        conversation_id = _text(conversation_id, "conversation_id")
+        ids = self._engineering_ids(submission_key)
+        prompt_digest = _sha(prompt.encode("utf-8"))
+        with self._open() as plane:
+            request = ShadowSubmissionRequest(
+                submission_key=submission_key,
+                intent_revision=P1_ENGINEERING_INTENT_REVISION,
+                intent={
+                    "operation": "p1-engineering-edit",
+                    "prompt_digest": prompt_digest,
+                    "target_repo_view_id": self.engineering_view.view_id,
+                    "target_tree": self.engineering_view.tree_oid,
+                    "allowed_paths": list(self.engineering_target["allowed_paths"]),
+                },
+                conversation_binding={"conversation_id": conversation_id, "profile_id": profile_id},
+                consumer_binding={"consumer_id": _stable_id("p1-browser", conversation_id), "kind": "browser", "generation": "bdb-vnext-g1"},
+            )
+            request_digest = request.validated_digest()
+            receipt = plane.admission.client.submit(request)
+            work = plane.work_kernel.query(ids["work_id"])
+            if work is None:
+                plane.work_kernel.create_work_item(ids["work_id"], receipt.task_id, kind="p1-engineering")
+                work = plane.work_kernel.query(ids["work_id"])
+            if work is None:
+                _fail("engineering_work_missing", "canonical WorkItem could not be created")
+            if work.work.disposition == "FINISHED":
+                candidate = plane.candidate.get(ids["candidate_id"])
+                return self._engineering_context(receipt.task_id, request_digest, conversation_id, submission_key, work, candidate, plane.candidate.generation, plane.candidate._tree_digest(plane.candidate._base_entries(self.engineering_view)))
+            lease = plane.work_kernel.acquire_lease(ids["work_id"], ids["lease_id"], "p1-browser-engineering", ttl_seconds=900.0)
+            work = plane.work_kernel.query(ids["work_id"])
+            if work is None:
+                _fail("engineering_work_missing", "canonical WorkItem disappeared during preparation")
+            if work.work.disposition == "READY":
+                plane.work_kernel.start_run(ids["work_id"], ids["run_id"], lease.lease_id, lease.fence, work.work.state_version)
+                work = plane.work_kernel.query(ids["work_id"])
+            elif work.work.disposition == "RUNNING" and work.active_run is not None:
+                if work.active_run.run_id != ids["run_id"] or (work.active_run.lease_id, work.active_run.fence) != (lease.lease_id, lease.fence):
+                    _fail("engineering_run_conflict", "engineering WorkItem is owned by a different active Run")
+            candidate = plane.candidate.get(ids["candidate_id"])
+            return self._engineering_context(receipt.task_id, request_digest, conversation_id, submission_key, work, candidate, plane.candidate.generation, plane.candidate._tree_digest(plane.candidate._base_entries(self.engineering_view)))
+
+    def _engineering_context(
+        self,
+        task_id: str,
+        request_digest: str,
+        conversation_id: str,
+        submission_key: str,
+        work: Any,
+        candidate: Any,
+        generation: str,
+        current_tree_digest: str,
+    ) -> dict[str, Any]:
+        if self.engineering_view is None or self.engineering_target is None:
+            _fail("engineering_target_unavailable", "engineering target is not present in this package")
+        ids = self._engineering_ids(submission_key)
+        lease = work.lease
+        run = work.active_run or work.last_run
+        return {
+            "submission_key": submission_key,
+            "task_id": task_id,
+            "intent_revision": P1_ENGINEERING_INTENT_REVISION,
+            "request_digest": request_digest,
+            "conversation_id": conversation_id,
+            "work_id": ids["work_id"],
+            "run_id": run.run_id if run is not None else ids["run_id"],
+            "lease_id": lease.lease_id if lease is not None else ids["lease_id"],
+            "fence": lease.fence if lease is not None else (run.fence if run is not None else 0),
+            "candidate_id": ids["candidate_id"],
+            "workspace_generation": generation,
+            "base_repo_view": self.engineering_view.to_dict(),
+            "current_tree_digest": current_tree_digest,
+            "target": {"repository_id": self.engineering_target["repository_id"], "commit": self.engineering_target["commit"], "tree": self.engineering_target["tree"], "view_id": self.engineering_target["view_id"], "allowed_paths": list(self.engineering_target["allowed_paths"]), "checker": dict(self.engineering_target["checker"])},
+            "candidate_state": candidate.state if candidate is not None else "NOT_PREPARED",
+            "candidate_view_id": candidate.manifest_digest if candidate is not None else None,
+            "work": work.as_dict(),
+        }
+
+    def _engineering_desired_files(self, store: Any, candidate: Any, base_view: Any) -> dict[str, bytes | None]:
+        workspace = Path(candidate.workspace_root)
+        base_entries = store._base_entries(base_view)
+        actual_entries = store._workspace_entries(workspace, object_format=base_view.object_format)
+        desired: dict[str, bytes | None] = {}
+        for path in sorted(set(base_entries) | set(actual_entries)):
+            if path in actual_entries:
+                raw = (workspace / Path(*path.split("/"))).read_bytes()
+                base = base_view.read_bytes(path) if path in base_entries else None
+                if base != raw:
+                    desired[path] = raw
+            elif path in base_entries:
+                desired[path] = None
+        return desired
+
+    def _engineering_artifact(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if self.engineering_view is None or self.engineering_target is None:
+            _fail("engineering_target_unavailable", "engineering target is not present in this package")
+        required = {"submission_key", "conversation_id", "prompt_digest", "raw_answer", "raw_answer_digest", "artifact"}
+        if set(payload) != required:
+            _fail("engineering_payload_invalid", "engineering artifact payload fields differ")
+        submission_key = _text(payload.get("submission_key"), "submission_key")
+        conversation_id = _text(payload.get("conversation_id"), "conversation_id")
+        prompt_digest = _text(payload.get("prompt_digest"), "prompt_digest")
+        raw_answer = _text(payload.get("raw_answer"), "raw_answer", max_bytes=N6_MAX_ANSWER_BYTES)
+        raw_answer_digest = _text(payload.get("raw_answer_digest"), "raw_answer_digest")
+        if raw_answer_digest != _sha(raw_answer.encode("utf-8")):
+            _fail("engineering_raw_digest_mismatch", "Browser raw answer digest differs")
+        artifact = parse_edit_artifact(_mapping(payload.get("artifact"), "artifact"))
+        ids = self._engineering_ids(submission_key)
+        if artifact.base_view_id != self.engineering_view.view_id or artifact.task_id == "" or artifact.work_id != ids["work_id"] or artifact.run_id != ids["run_id"] or artifact.lease_id != ids["lease_id"] or artifact.fence < 1 or artifact.candidate_id != ids["candidate_id"]:
+            _fail("engineering_artifact_binding_mismatch", "BDB_EDIT_V1 artifact is not bound to the exact engineering context")
+        allowed = {str(path).casefold() for path in self.engineering_target["allowed_paths"]}
+        for operation in artifact.operations:
+            paths = [operation.path] + ([operation.source_path] if operation.source_path else [])
+            if any(path.casefold() not in allowed for path in paths):
+                _fail("engineering_path_not_allowlisted", "BDB_EDIT_V1 artifact touches a path outside the target allowlist")
+        with self._open() as plane:
+            found = self._lookup(plane, submission_key)
+            if not found or found.get("task_id") is None:
+                _fail("engineering_submission_not_found", "engineering submission was not canonically admitted")
+            if _task_conversation(found) != conversation_id:
+                _fail("conversation_owner_mismatch", "engineering artifact conversation differs from canonical Task ownership")
+            if artifact.task_id != found["task_id"]:
+                _fail("engineering_task_binding_mismatch", "BDB_EDIT_V1 artifact task_id differs from canonical Task")
+            task = _mapping(found.get("task"), "task")
+            expected_intent_digest = semantic_digest(
+                {
+                    "schema": "bdb-vnext-intent-v1",
+                    "intent_revision": P1_ENGINEERING_INTENT_REVISION,
+                    "intent": {
+                        "operation": "p1-engineering-edit",
+                        "prompt_digest": prompt_digest,
+                        "target_repo_view_id": self.engineering_view.view_id,
+                        "target_tree": self.engineering_view.tree_oid,
+                        "allowed_paths": list(self.engineering_target["allowed_paths"]),
+                    },
+                }
+            )
+            if task.get("intent_digest") != expected_intent_digest:
+                _fail("engineering_prompt_binding_mismatch", "Browser artifact prompt/target does not match canonical Task intent")
+            work = plane.work_kernel.query(ids["work_id"])
+            if work is None or work.active_run is None or work.active_run.run_id != ids["run_id"]:
+                _fail("engineering_run_binding_mismatch", "engineering artifact is not owned by the active Run")
+            if work.lease is None or work.lease.lease_id != artifact.lease_id or work.lease.fence != artifact.fence:
+                _fail("engineering_fence_mismatch", "engineering artifact lease/fence is stale")
+            candidate = plane.candidate.get(ids["candidate_id"])
+            if candidate is not None and candidate.state in {CANDIDATE_SEALED, CANDIDATE_INVALIDATED}:
+                _fail("candidate_state_conflict", "sealed or invalidated engineering Candidate cannot accept another artifact")
+            if candidate is None:
+                workspace_path = plane.candidate.create_workspace(candidate_id=ids["candidate_id"], base_view=self.engineering_view)
+            else:
+                workspace_path = Path(candidate.workspace_root)
+            editor = EditorPort(plane.candidate, evidence_store=plane.evidence)
+            desired = self._engineering_desired_files(plane.candidate, candidate, self.engineering_view) if candidate is not None else None
+            # A raw assistant artifact is immutable evidence before any apply.
+            artifact_evidence = plane.evidence.record_observation(
+                request_id=_stable_id("p1-artifact", submission_key + ":" + artifact.artifact_digest),
+                primary_subject_kind="ENGINEERING_ARTIFACT",
+                primary_subject_identity={"submission_key": submission_key, "conversation_id": conversation_id, "prompt_digest": prompt_digest, "artifact_digest": artifact.artifact_digest, "task_id": found["task_id"], "work_id": ids["work_id"], "run_id": ids["run_id"]},
+                candidate_view_id=None,
+                raw_observation={"schema": N6_EVENT_SCHEMA, "event": "engineering_artifact", "raw_answer": raw_answer, "raw_answer_digest": raw_answer_digest, "artifact": artifact.as_dict()},
+                checker_id="bdb-vnext-p1-browser-artifact",
+                checker_version="1",
+                checker_code_digest=semantic_digest({"schema": EDIT_SCHEMA, "adapter": "bdb_vnext.n6_rehearsal"}),
+                environment={"surface": "normal-chatgpt-browser", "package_digest": self.package_digest, "protocol_generation": N6_PROTOCOL_GENERATION},
+                observation_started_at=_now(), observation_finished_at=_now(), completeness="COMPLETE", applicability="APPLICABLE", status="CAPTURED",
+            )
+            record = editor.prepare_batch(artifact, base_view=self.engineering_view, workspace=workspace_path, desired_files=desired)
+            applied = editor.apply_batch(artifact)
+            observed = plane.candidate.observe(ids["candidate_id"])
+            if observed.state in {CANDIDATE_DIVERGED, CANDIDATE_UNKNOWN}:
+                _fail("engineering_reconciliation_required", "engineering Candidate observation is not exact")
+            command, runner = self._engineering_checker()
+            result = runner.run(command, observed.workspace_root)
+            validation = editor.record_validation(batch=artifact, result=result)
+            current_tree = editor._current_tree_digest(Path(observed.workspace_root), self.engineering_view)
+            return {"status": "VALIDATED", "validation_status": validation.status, "feedback": result.feedback, "artifact_digest": artifact.artifact_digest, "artifact_evidence_id": artifact_evidence.evidence_id, "validation_id": validation.validation_id, "validation_evidence_id": validation.evidence_id, "candidate_id": ids["candidate_id"], "candidate_state": observed.state, "candidate_workspace": observed.workspace_root, "current_tree_digest": current_tree, "expected_tree_digest": artifact.expected_tree_digest, "task_id": found["task_id"], "work_id": ids["work_id"], "run_id": ids["run_id"], "lease_id": artifact.lease_id, "fence": artifact.fence, "ready_to_seal": validation.status == "PASS"}
+
+    def _engineering_finalize(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if self.engineering_view is None or self.engineering_target is None:
+            _fail("engineering_target_unavailable", "engineering target is not present in this package")
+        if set(payload) != {"submission_key", "candidate_id"}:
+            _fail("engineering_payload_invalid", "engineering finalize fields differ")
+        submission_key = _text(payload.get("submission_key"), "submission_key")
+        candidate_id = _text(payload.get("candidate_id"), "candidate_id")
+        ids = self._engineering_ids(submission_key)
+        if candidate_id != ids["candidate_id"]:
+            _fail("engineering_candidate_binding_mismatch", "engineering finalize candidate differs")
+        with self._open() as plane:
+            found = self._lookup(plane, submission_key)
+            if not found:
+                _fail("engineering_submission_not_found", "engineering submission was not canonically admitted")
+            existing_publications = plane.publication.publications_for_task(found["task_id"])
+            if existing_publications:
+                return {"status": "SEALED", "publication": existing_publications[0].as_dict(), "candidate_id": candidate_id, "candidate_view_id": found.get("candidate_view_id")}
+            candidate = plane.candidate.get(candidate_id)
+            if candidate is None or candidate.state != CANDIDATE_OBSERVED:
+                _fail("candidate_not_observed", "engineering Candidate must be exactly observed before seal")
+            validation_row = plane.candidate._connection.execute("SELECT validation_id,status,evidence_id,stdout_ref_json,stderr_ref_json,stdout_digest,stderr_digest,environment_fingerprint,started_at,finished_at,command_json FROM p1_validation_runs WHERE candidate_id=? ORDER BY finished_at DESC LIMIT 1", (candidate_id,)).fetchone()
+            if validation_row is None or str(validation_row[1]) != "PASS":
+                _fail("engineering_validation_not_green", "final engineering validation is not PASS")
+            _sealed, candidate_view = plane.candidate.seal(candidate_id, base_view=self.engineering_view)
+            command, _runner = self._engineering_checker()
+            final_raw = {"schema": "bdb-vnext-p1-final-validation-v1", "validation_id": str(validation_row[0]), "status": str(validation_row[1]), "stdout_ref": json.loads(bytes(validation_row[3]).decode()), "stderr_ref": json.loads(bytes(validation_row[4]).decode()), "stdout_digest": str(validation_row[5]), "stderr_digest": str(validation_row[6]), "environment_fingerprint": str(validation_row[7]), "candidate_view": candidate_view.to_dict()}
+            evidence = plane.evidence.record_observation(
+                request_id=_stable_id("p1-final-evidence", submission_key),
+                primary_subject_kind="CANDIDATE",
+                primary_subject_identity={"schema": "bdb-vnext-p1-engineering-result-v1", "submission_key": submission_key, "candidate_id": candidate_id, "view_id": candidate_view.view_id, "candidate_tree_digest": candidate_view.candidate_tree_digest},
+                candidate_view_id=candidate_view.view_id,
+                raw_observation=final_raw,
+                checker_id=command.checker_id,
+                checker_version=command.checker_version,
+                checker_code_digest=command.checker_code_digest,
+                environment={"fingerprint": str(validation_row[7]), "target": self.engineering_target["repository_id"]},
+                observation_started_at=str(validation_row[8]), observation_finished_at=str(validation_row[9]), completeness="COMPLETE", applicability="APPLICABLE", status="PASS",
+            )
+            evaluation = plane.evidence.evaluate(evidence_id=evidence.evidence_id, evaluator_id="bdb-vnext-p1-calculator-evaluator", evaluator_version="1", evaluator_code_digest=command.checker_code_digest, config_digest=semantic_digest(self.engineering_target), result="PASS", applicability="APPLICABLE", detail={"schema": "bdb-vnext-p1-engineering-result-v1", "candidate_view_id": candidate_view.view_id})
+            disposition = plane.evidence.current_disposition(evidence.evidence_id)
+            if disposition is None:
+                _fail("engineering_disposition_missing", "final engineering evidence has no current disposition")
+            publication = plane.publication.publish(
+                request_id=_stable_id("p1-publication", submission_key),
+                task_id=found["task_id"], work_id=ids["work_id"], intent_revision_id=P1_ENGINEERING_INTENT_REVISION,
+                result_payload={"schema": "bdb-vnext-p1-engineering-publication-v1", "candidate_view_id": candidate_view.view_id, "evidence_id": evidence.evidence_id, "evaluation_id": evaluation.evaluation_id, "disposition_id": disposition.disposition_id, "status": "PASS"},
+                consumer_id=_stable_id("p1-browser", _task_conversation(found)), consumer_kind="BROWSER", conversation_id=_task_conversation(found), profile_id=None, candidate_id=candidate_id, candidate_view_id=candidate_view.view_id, evidence_id=evidence.evidence_id, evaluation_id=evaluation.evaluation_id, disposition_id=disposition.disposition_id, generation="bdb-vnext-g1",
+            )
+            work = plane.work_kernel.query(ids["work_id"])
+            if work is not None and work.active_run is not None and work.lease is not None:
+                plane.work_kernel.finish_run(ids["work_id"], ids["run_id"], work.lease.lease_id, work.lease.fence, work.work.state_version, outcome="SUCCEEDED", effect_certainty="CERTAIN")
+                finished = plane.work_kernel.query(ids["work_id"])
+                if finished is not None and finished.lease is not None and finished.lease.state == "ACTIVE":
+                    plane.work_kernel.release_lease(ids["work_id"], finished.lease.lease_id, finished.lease.fence)
+            return {"status": "SEALED", "candidate_id": candidate_id, "candidate_view": candidate_view.to_dict(), "candidate_view_id": candidate_view.view_id, "candidate_tree_digest": candidate_view.candidate_tree_digest, "evidence_id": evidence.evidence_id, "evaluation_id": evaluation.evaluation_id, "disposition_id": disposition.disposition_id, "publication": publication.as_dict(), "work": (plane.work_kernel.query(ids["work_id"]).as_dict() if plane.work_kernel.query(ids["work_id"]) else None)}
+
     def _publication(self, plane: Any, submission_key: str) -> tuple[dict[str, Any], Any]:
         found = self._lookup(plane, submission_key)
         if not found or not found["publication"]:
@@ -739,6 +1129,20 @@ class N6RehearsalService:
         if event == "status":
             return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": "READY", "package_digest": self.package_digest, "native_code_digest": self.native_code_digest, "interpreter_identity_digest": self.interpreter_identity["identity_digest"], "browser_native_binding_digest": self.browser_native_binding["binding_digest"], "browser_extension_id": self.identity["extension_id"], "native_host_name": N6_NATIVE_HOST_NAME, "protocol_generation": N6_PROTOCOL_GENERATION, "production_activation": False, "rehearsal_infrastructure": "ACTIVE_ONLY_WHEN_EXPLICIT_PACKAGE_LOADED", "production_runtime": "OFF", "production_writer": "OFF"}
         payload = _mapping(request.get("payload"), "payload")
+        if event == "engineering_prepare":
+            result = self._engineering_prepare(
+                submission_key=_text(payload.get("submission_key"), "submission_key"),
+                prompt=_text(payload.get("prompt"), "prompt", max_bytes=N6_MAX_PROMPT_BYTES),
+                conversation_id=_text(payload.get("conversation_id"), "conversation_id"),
+                profile_id=payload.get("profile_id") if isinstance(payload.get("profile_id"), str) else None,
+            )
+            return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": "ENGINEERING_READY", "result": result}
+        if event == "engineering_artifact":
+            result = self._engineering_artifact(payload)
+            return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": "ENGINEERING_VALIDATED", "result": result}
+        if event == "engineering_finalize":
+            result = self._engineering_finalize(payload)
+            return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": "ENGINEERING_SEALED", "result": result}
         if event == "submit_prompt":
             result = self._run_vertical(submission_key=_text(payload.get("submission_key"), "submission_key"), prompt=_text(payload.get("prompt"), "prompt", max_bytes=N6_MAX_PROMPT_BYTES), conversation_id=_text(payload.get("conversation_id"), "conversation_id"), profile_id=payload.get("profile_id") if isinstance(payload.get("profile_id"), str) else None)
             return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": "ACCEPTED", "result": result}
@@ -872,6 +1276,8 @@ def _js_background(binding_digest: str, extension_id: str) -> str:
 const HOST = "com.bartosz.dev_bridge.vnext";
 const PACKAGE = "bdb-vnext-n6-rehearsal-package-v3";
 const PROTOCOL = "bdb-vnext-n6-protocol-v2";
+const P1_ENGINEERING_PREFIX = "__P1_ENGINEERING_PREFIX__";
+const P1_EDIT_SCHEMA = "bdb-vnext-edit-v1";
 const REQUEST_SCHEMA = "bdb-vnext-n6-native-request-v2";
 const RESPONSE_SCHEMA = "bdb-vnext-n6-native-response-v2";
 const BROWSER_NATIVE_BINDING = __N6_BINDING__;
@@ -970,10 +1376,12 @@ const OWNER_SCHEMA = "bdb-vnext-n6-conversation-owner-v1";
 const PENDING_RESUME_SCHEMA = "bdb-vnext-n6-pending-resume-v1";
 const RESUMED_BINDING_SCHEMA = "bdb-vnext-n6-resumed-binding-v1";
 const PROTOCOL = "bdb-vnext-n6-protocol-v2";
+const P1_ENGINEERING_PREFIX = __P1_ENGINEERING_PREFIX__;
 const SCENARIO_BY_PROMPT = new Map(Object.entries(__N6_SCENARIOS__));
 const PROMPT_BY_SCENARIO = new Map([...SCENARIO_BY_PROMPT].map(([prompt, scenario]) => [scenario, prompt]));
 let active = null;
 let resumedBinding = null;
+let engineeringState = null;
 let panel = null;
 let currentConversation = null;
 let currentRoute = null;
@@ -1021,6 +1429,53 @@ async function stableAssistantObservation(expectedPrompt) {
   const second = assistantObservation(expectedPrompt);
   if (streamInProgress() || !second || first.text !== second.text) throw new Error("N6 assistant response completion is not stable");
   return {raw_answer: second.text, completion_observation: "DOM_TEXT_STABLE_AFTER_STREAM_END", dom_author_role: "assistant", extension_ui_ancestor: false};
+}
+function strictEngineeringArtifact(rawAnswer) {
+  const matches = [...String(rawAnswer || "").matchAll(/```(?:json)?\\s*([\\s\\S]*?)\\s*```/gi)].map((match) => match[1].trim()).filter(Boolean);
+  if (matches.length !== 1) throw new Error("BDB_EDIT_V1 requires exactly one fenced JSON artifact");
+  let artifact;
+  try { artifact = JSON.parse(matches[0]); } catch (_) { throw new Error("BDB_EDIT_V1 JSON is malformed"); }
+  if (!artifact || typeof artifact !== "object" || artifact.schema !== P1_EDIT_SCHEMA || Array.isArray(artifact)) throw new Error("BDB_EDIT_V1 schema is missing");
+  return artifact;
+}
+function latestEngineeringPrompt() {
+  const turns = [...document.querySelectorAll("[data-message-author-role]")];
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const node = turns[index];
+    if (node.dataset.messageAuthorRole === "user") {
+      const text = canonicalPrompt(node.innerText || node.textContent || "");
+      if (text.startsWith(P1_ENGINEERING_PREFIX + "\\n")) return {node, text, index, turns};
+    }
+  }
+  return null;
+}
+function engineeringObservation(prompt) {
+  const next = prompt.turns[prompt.index + 1];
+  if (!next || next.dataset.messageAuthorRole !== "assistant" || next.closest("[data-bdb-n6-panel]")) throw new Error("BDB engineering assistant answer is stale or ambiguous");
+  const text = canonicalPrompt(next.innerText || next.textContent || "");
+  return text ? {raw_answer: text} : null;
+}
+async function stableEngineeringObservation(prompt) {
+  if (streamInProgress()) throw new Error("BDB engineering assistant response is still streaming");
+  const first = engineeringObservation(prompt);
+  if (!first) throw new Error("BDB engineering assistant answer is unavailable");
+  await new Promise((resolve) => setTimeout(resolve, 750));
+  const second = engineeringObservation(prompt);
+  if (streamInProgress() || !second || first.raw_answer !== second.raw_answer) throw new Error("BDB engineering assistant response is not stable");
+  return second;
+}
+async function engineeringSubmissionKey(conversation, prompt) { return "p1-browser:" + await digest(PROTOCOL + "\\n" + conversation + "\\n" + prompt); }
+async function engineeringProcessedKey(submissionKey, answerDigest) { return "p1_artifact:" + await digest(submissionKey + "\\n" + answerDigest); }
+async function engineeringStateKey(conversation) { return "p1_state:" + await digest(conversation); }
+async function restoreEngineeringState(conversation) {
+  const key = await engineeringStateKey(conversation);
+  const stored = await chrome.storage.local.get(key);
+  const state = stored[key];
+  return state && state.schema === "bdb-vnext-p1-engineering-state-v1" && state.conversation_id === conversation ? state : null;
+}
+async function persistEngineeringState(conversation, state) {
+  const key = await engineeringStateKey(conversation);
+  await chrome.storage.local.set({[key]: {...state, schema: "bdb-vnext-p1-engineering-state-v1", conversation_id: conversation}});
 }
 function userMessages() { return [...document.querySelectorAll("[data-message-author-role='user']")].map((node) => canonicalPrompt(node.innerText || node.textContent || "")); }
 function send(event, payload) { return chrome.runtime.sendMessage({type: "N6_BROWSER_EVENT", event, payload}); }
@@ -1178,6 +1633,51 @@ async function lookupAndShowResumed(binding, expectedConversation) {
   await chrome.storage.local.remove(await resumedBindingKey(expectedConversation));
   resumedBinding = null;
 }
+function showEngineeringResult(result, submissionKey) {
+  clearPanel(); ensurePanel();
+  const status = result.validation_status || result.status || "READY";
+  write("P1 Calculator engineering\\nSubmission " + submissionKey + "\\nValidation " + status + (result.feedback ? "\\n" + result.feedback.slice(0, 1800) : ""));
+  if (result.ready_to_seal === true) {
+    addButton("Seal engineering Candidate", async () => {
+      const response = await send("engineering_finalize", {submission_key: submissionKey, candidate_id: result.candidate_id});
+      if (!response.ok || !response.response || response.response.status === "ERROR") throw new Error(nativeErrorText(response, "P1 Candidate seal failed"));
+      write(JSON.stringify(response.response));
+    });
+  }
+}
+async function inspectEngineeringScenario(conversation) {
+  if (!conversation) return;
+  const prompt = latestEngineeringPrompt();
+  if (!prompt) return;
+  let prepared = engineeringState && engineeringState.conversation_id === conversation ? engineeringState : await restoreEngineeringState(conversation);
+  if (!prepared) {
+    const submissionKey = await engineeringSubmissionKey(conversation, prompt.text);
+    const promptDigest = await digest(prompt.text);
+    const response = await send("engineering_prepare", {submission_key: submissionKey, prompt: prompt.text, conversation_id: conversation, profile_id: null});
+    const observed = nativeResult(response, "P1 engineering preparation failed");
+    if (!observed.result) { write(observed.error); return; }
+    prepared = {...observed.result, submission_key: submissionKey, prompt_digest: promptDigest, initial_prompt_digest: promptDigest};
+    engineeringState = prepared;
+    await persistEngineeringState(conversation, prepared);
+    showEngineeringResult({status: "ENGINEERING_READY", ...prepared}, submissionKey);
+  }
+  const submissionKey = prepared.submission_key;
+  let observed;
+  try { observed = await stableEngineeringObservation(prompt); } catch (_) { return; }
+  const answerDigest = "sha256:" + await digest(observed.raw_answer);
+  const processedKey = await engineeringProcessedKey(submissionKey, answerDigest);
+  const processed = await chrome.storage.local.get(processedKey);
+  if (processed[processedKey]) return;
+  let artifact;
+  try { artifact = strictEngineeringArtifact(observed.raw_answer); } catch (error) { showEngineeringResult({status: "ARTIFACT_REJECTED", feedback: String(error)}, submissionKey); return; }
+  const response = await send("engineering_artifact", {submission_key: submissionKey, conversation_id: conversation, prompt_digest: prepared.prompt_digest, raw_answer: observed.raw_answer, raw_answer_digest: answerDigest, artifact});
+  const result = nativeResult(response, "P1 engineering artifact rejected");
+  if (!result.result) { showEngineeringResult({status: "ARTIFACT_REJECTED", feedback: result.error}, submissionKey); return; }
+  await chrome.storage.local.set({[processedKey]: {schema: "bdb-vnext-p1-processed-artifact-v1", submission_key: submissionKey, answer_digest: answerDigest, artifact_digest: result.result.artifact_digest}});
+  engineeringState = {...prepared, ...result.result, submission_key: submissionKey, conversation_id: conversation};
+  await persistEngineeringState(conversation, engineeringState);
+  showEngineeringResult(engineeringState, submissionKey);
+}
 async function restoreConversation(conversation) {
   active = null; resumedBinding = null; clearPanel();
   const owner = await readOwner(conversation);
@@ -1220,7 +1720,7 @@ async function synchronizeConversation() {
       if (conversation) { currentConversation = conversation; await restoreConversation(conversation); }
       else { currentConversation = null; await restoreBlankConversation(); }
     }
-    if (conversation) await inspectExactScenario(conversation);
+    if (conversation) { await inspectExactScenario(conversation); await inspectEngineeringScenario(conversation); }
   })().finally(() => { synchronization = null; if ((canonicalConversationId() || BLANK_CHAT_ROUTE) !== currentRoute) void synchronizeConversation(); });
   return synchronization;
 }
@@ -1229,7 +1729,7 @@ window.addEventListener("popstate", () => { void synchronizeConversation(); });
 setInterval(() => { void synchronizeConversation(); }, 1000);
 void synchronizeConversation();
 '''
-    return script.replace("__N6_SCENARIOS__", scenarios)
+    return script.replace("__N6_SCENARIOS__", scenarios).replace("__P1_ENGINEERING_PREFIX__", json.dumps(P1_ENGINEERING_PREFIX))
 
 
 def _cs_shim_source(python_executable: Path, native_code_root: Path, config_path: Path) -> str:
@@ -1267,7 +1767,7 @@ N6_TASKS: tuple[dict[str, str], ...] = (
 )
 
 
-def prepare_package(*, repo_root: str | Path, output: str | Path, runtime_root: str | Path, legacy_runtime_root: str | Path, source_commit: str | None = None, python_executable: str | Path | None = None) -> dict[str, Any]:
+def prepare_package(*, repo_root: str | Path, output: str | Path, runtime_root: str | Path, legacy_runtime_root: str | Path, source_commit: str | None = None, python_executable: str | Path | None = None, engineering_target: Mapping[str, Any] | None = None) -> dict[str, Any]:
     repo = _safe_abs(repo_root, "repo_root")
     output_path = _safe_abs(output, "output")
     runtime = _safe_abs(runtime_root, "runtime_root")
@@ -1288,6 +1788,17 @@ def prepare_package(*, repo_root: str | Path, output: str | Path, runtime_root: 
     config_path = output_path / "native-config.json"
     py = Path(python_executable or sys.executable).expanduser().absolute()
     external_interpreter = interpreter_identity(py)
+    target = None
+    if engineering_target is not None:
+        raw_target = dict(_mapping(engineering_target, "engineering_target"))
+        target_root = _safe_abs(raw_target.get("repo_root"), "engineering_target.repo_root")
+        target_commit = str(raw_target.get("commit") or raw_target.get("source_commit") or "HEAD")
+        target_source = RepositoryResource.from_path(target_root, repository_id=str(raw_target.get("repository_id") or "bdb-p1-calculator"))
+        target_view = target_source.resolve_committed(target_commit)
+        branch_result = subprocess.run(["git", "-C", str(target_root), "branch", "--show-current"], shell=False, capture_output=True, text=True, check=True, timeout=20)
+        target_checker = dict(raw_target.get("checker") or {"checker_id": P1_ENGINEERING_CHECKER_ID, "checker_version": P1_ENGINEERING_CHECKER_VERSION, "argv": [str(py), "tests/test_calculator.py"], "cwd": ".", "timeout_seconds": 60.0})
+        target_document = {"schema": P1_ENGINEERING_TARGET_SCHEMA, "repository_id": target_source.repository_id, "repo_root": str(target_root), "branch": str(raw_target.get("branch") or branch_result.stdout.strip()), "commit": target_view.commit_oid, "tree": target_view.tree_oid, "view_id": target_view.view_id, "allowed_paths": list(raw_target.get("allowed_paths") or ["index.html", "styles.css", "app.js"]), "checker": target_checker}
+        target = _validated_engineering_target(target_document, forbidden_roots=(repo, runtime, legacy, output_path))
     native_code = output_path / "native-code"
     native_code.mkdir(parents=True, exist_ok=True)
     archive = subprocess.run(["git", "-C", str(repo), "archive", "--format=tar", commit, "bdb_vnext", "bdb_shared", "pyproject.toml"], shell=False, capture_output=True, check=True)
@@ -1307,6 +1818,8 @@ def prepare_package(*, repo_root: str | Path, output: str | Path, runtime_root: 
         browser_extension_id=identity["extension_id"],
     )
     config = {"schema": N6_CONFIG_SCHEMA, "repo_root": str(repo), "runtime_root": str(runtime), "legacy_runtime_root": str(legacy), "source_commit": commit, "package_root": str(output_path), "native_code_root": str(native_code), "native_code_digest": native_digest, "package_digest": "pending", "interpreter_identity": external_interpreter, "browser_native_binding": binding, "browser_extension_id": identity["extension_id"], "native_host_name": N6_NATIVE_HOST_NAME, "protocol_generation": N6_PROTOCOL_GENERATION, "production_activation": False}
+    if target is not None:
+        config["engineering_target"] = target
     _write_json(browser / "manifest.json", manifest)
     (browser / "background.js").write_text(_js_background(binding["binding_digest"], identity["extension_id"]), encoding="utf-8")
     (browser / "content.js").write_text(_js_content(), encoding="utf-8")
@@ -1328,7 +1841,10 @@ def prepare_package(*, repo_root: str | Path, output: str | Path, runtime_root: 
         "Write-Output ('Registered dedicated N6 Native Host: ' + $key)\n",
         encoding="utf-8",
     )
-    execution = {"schema": N6_EXECUTION_SCHEMA, "package": {"schema": N6_PACKAGE_SCHEMA, "version": N6_PACKAGE_VERSION, "digest": "pending", "root": str(output_path), "native_code_digest": config["native_code_digest"], "interpreter_identity": external_interpreter, "browser_native_binding": binding, "browser_extension": {"component_id": identity["component_id"], "extension_id": identity["extension_id"], "semantic_digest": identity["semantic_digest"], "manifest": str(browser / "manifest.json")}, "native_host": {"name": N6_NATIVE_HOST_NAME, "manifest": str(native_manifest_path), "path": str(native_path), "registration_script": str(register_script), "executable_ready": shim is not None, "code_root": str(native_code)}, "protocol_generation": N6_PROTOCOL_GENERATION}, "subject": {"repository": "bdb-vnext-n6-subject", "repo_root": str(repo), "branch": "bdb-vnext", "commit": commit, "tree": tree, "view_id": source_view.view_id}, "resources": {"runtime_root": str(runtime), "control_db": str(runtime / "control" / "control.db"), "legacy_runtime_root": str(legacy), "production_activation": False, "rehearsal_infrastructure": "ACTIVE_ONLY_WHEN_EXPLICIT_PACKAGE_LOADED", "legacy_mutation": False}, "prompts": list(N6_TASKS), "manual_gate": "USER_OPERATED_ONLY"}
+    execution_package = {"schema": N6_PACKAGE_SCHEMA, "version": N6_PACKAGE_VERSION, "digest": "pending", "root": str(output_path), "native_code_digest": config["native_code_digest"], "interpreter_identity": external_interpreter, "browser_native_binding": binding, "browser_extension": {"component_id": identity["component_id"], "extension_id": identity["extension_id"], "semantic_digest": identity["semantic_digest"], "manifest": str(browser / "manifest.json")}, "native_host": {"name": N6_NATIVE_HOST_NAME, "manifest": str(native_manifest_path), "path": str(native_path), "registration_script": str(register_script), "executable_ready": shim is not None, "code_root": str(native_code)}, "protocol_generation": N6_PROTOCOL_GENERATION}
+    if target is not None:
+        execution_package["engineering_target"] = target
+    execution = {"schema": N6_EXECUTION_SCHEMA, "package": execution_package, "subject": {"repository": "bdb-vnext-n6-subject", "repo_root": str(repo), "branch": "bdb-vnext", "commit": commit, "tree": tree, "view_id": source_view.view_id}, "resources": {"runtime_root": str(runtime), "control_db": str(runtime / "control" / "control.db"), "legacy_runtime_root": str(legacy), "production_activation": False, "rehearsal_infrastructure": "ACTIVE_ONLY_WHEN_EXPLICIT_PACKAGE_LOADED", "legacy_mutation": False}, "prompts": list(N6_TASKS), "manual_gate": "USER_OPERATED_ONLY"}
     execution_path = output_path / "execution_manifest.json"
     _write_json(execution_path, execution)
     package = package_digest(output_path)
@@ -1345,7 +1861,11 @@ def write_manual_packet(execution: Mapping[str, Any], path: str | Path) -> Path:
     package = _mapping(execution.get("package"), "package")
     subject = _mapping(execution.get("subject"), "subject")
     resources = _mapping(execution.get("resources"), "resources")
-    lines = ["# MANUAL_BROWSER_REHEARSAL_PACKET — N6", "", "## Exact subject", "", f"repository: {subject['repository']}", f"branch: {subject['branch']}", f"HEAD: {subject['commit']}", f"tree: {subject['tree']}", f"RepoView: {subject['view_id']}", f"Browser extension ID: {package['browser_extension']['extension_id']}", f"Browser package digest: {package['digest']}", f"Browser/Native binding: {package['browser_native_binding']['binding_digest']}", f"Browser manifest: {package['browser_extension']['manifest']}", f"Native Host: {package['native_host']['name']}", f"Native Host manifest: {package['native_host']['manifest']}", f"Native registration script: {package['native_host'].get('registration_script')}", f"Native executable ready: {package['native_host']['executable_ready']}", f"Protocol: {package['protocol_generation']}", f"Control DB: {resources['control_db']}", f"Rehearsal runtime root: {resources['runtime_root']}", "", "## Setup", "", "1. Do not touch the installed legacy extension or Native Host.", f"2. Before loading or reloading the extension, verify the dedicated `{package['native_host']['name']}` registry default points to `{package['native_host']['manifest']}` and that the manifest allowed origin is `chrome-extension://{package['browser_extension']['extension_id']}/`. The generated registration script may be used only when that dedicated key is absent; it refuses to overwrite an existing key.", f"3. Only after step 2, load or reload the unpacked folder `{Path(str(package['browser_extension']['manifest'])).parent}` in `chrome://extensions` and verify the pinned extension ID. This ordering prevents Chrome from retaining a Native port opened against an earlier manifest.", "4. Confirm `Native executable ready` is true, then open a normal ChatGPT conversation, choose visible model `GPT-5.6 Sol` and reasoning `Wysoki`, and keep those settings for all paired tasks.", "5. Start with a fresh conversation. Paste each BDB prompt below exactly. Wait for the normal answer before using the extension panel.", "6. For the primary vertical, click `Capture latest answer`, then `Witness presentation`. Use `Mark presentation UNKNOWN` when the DOM witness is intentionally absent.", "7. For Resume, open a new ChatGPT conversation and click `Resume in this chat`; the target conversation must remain distinct.", "8. For restart/lost-ACK, refresh ChatGPT after submitting a marked prompt, then wait for the panel to recover by lookup. Never submit the same prompt twice manually.", "", "## Expected observations", "", "PASS = normal ChatGPT answer is visible, the panel reports canonical IDs, and the requested witness/recovery result is explicit.", "FAIL = extension/Native identity mismatch, duplicate Task/Candidate/Publication, wrong conversation delivery, silent fallback, or mutation outside the rehearsal root.", "INCONCLUSIVE = model/settings/timestamps/raw answer or exact identity cannot be verified.", "", "## Primary vertical", "", "RUN-PRIMARY: use `RUN-05` below. Verify Task → WorkItem → Candidate → Evidence → Publication, capture raw answer, witness same conversation, mark UNKNOWN once, then new-chat Resume.", "", "## Paired prompts (run BDB arm with extension enabled; run NO-BDB arm with extension disabled)", ""]
+    lines = ["# MANUAL_BROWSER_REHEARSAL_PACKET — N6", "", "## Exact subject", "", f"repository: {subject['repository']}", f"branch: {subject['branch']}", f"HEAD: {subject['commit']}", f"tree: {subject['tree']}", f"RepoView: {subject['view_id']}", f"Browser extension ID: {package['browser_extension']['extension_id']}", f"Browser package digest: {package['digest']}", f"Browser/Native binding: {package['browser_native_binding']['binding_digest']}", f"Browser manifest: {package['browser_extension']['manifest']}", f"Native Host: {package['native_host']['name']}", f"Native Host manifest: {package['native_host']['manifest']}", f"Native registration script: {package['native_host'].get('registration_script')}", f"Native executable ready: {package['native_host']['executable_ready']}", f"Protocol: {package['protocol_generation']}", f"Control DB: {resources['control_db']}", f"Rehearsal runtime root: {resources['runtime_root']}", ""]
+    if package.get("engineering_target"):
+        target = _mapping(package["engineering_target"], "engineering_target")
+        lines.extend(["## P1 engineering target", "", f"repository: {target['repository_id']}", f"root: {target['repo_root']}", f"branch: {target['branch']}", f"commit: {target['commit']}", f"tree: {target['tree']}", f"RepoView: {target['view_id']}", f"allowed paths: {', '.join(target['allowed_paths'])}", f"checker: {target['checker']['checker_id']} {target['checker']['checker_version']}", ""])
+    lines.extend(["## Setup", "", "1. Do not touch the installed legacy extension or Native Host.", f"2. Before loading or reloading the extension, verify the dedicated `{package['native_host']['name']}` registry default points to `{package['native_host']['manifest']}` and that the manifest allowed origin is `chrome-extension://{package['browser_extension']['extension_id']}/`. The generated registration script may be used only when that dedicated key is absent; it refuses to overwrite an existing key.", f"3. Only after step 2, load or reload the unpacked folder `{Path(str(package['browser_extension']['manifest'])).parent}` in `chrome://extensions` and verify the pinned extension ID. This ordering prevents Chrome from retaining a Native port opened against an earlier manifest.", "4. Confirm `Native executable ready` is true, then open a normal ChatGPT conversation, choose visible model `GPT-5.6 Sol` and reasoning `Wysoki`, and keep those settings for all paired tasks.", "5. Start with a fresh conversation. Paste each BDB prompt below exactly. Wait for the normal answer before using the extension panel.", "6. For the primary vertical, click `Capture latest answer`, then `Witness presentation`. Use `Mark presentation UNKNOWN` when the DOM witness is intentionally absent.", "7. For Resume, open a new ChatGPT conversation and click `Resume in this chat`; the target conversation must remain distinct.", "8. For restart/lost-ACK, refresh ChatGPT after submitting a marked prompt, then wait for the panel to recover by lookup. Never submit the same prompt twice manually.", "", "## Expected observations", "", "PASS = normal ChatGPT answer is visible, the panel reports canonical IDs, and the requested witness/recovery result is explicit.", "FAIL = extension/Native identity mismatch, duplicate Task/Candidate/Publication, wrong conversation delivery, silent fallback, or mutation outside the rehearsal root.", "INCONCLUSIVE = model/settings/timestamps/raw answer or exact identity cannot be verified.", "", "## Primary vertical", "", "RUN-PRIMARY: use `RUN-05` below. Verify Task → WorkItem → Candidate → Evidence → Publication, capture raw answer, witness same conversation, mark UNKNOWN once, then new-chat Resume.", "", "## Paired prompts (run BDB arm with extension enabled; run NO-BDB arm with extension disabled)", ""])
     for task in execution.get("prompts", []):
         lines.extend([f"### {task['id']} — {task['class']}", "", "BDB arm:", "```text", str(task["bdb"]), "```", "", "NO-BDB arm:", "```text", str(task["plain"]), "```", ""])
     lines.extend(["## Fault actions", "", "- Refresh/reopen ChatGPT only; do not delete runtime files.", "- If the Native Host disconnects, stop and record the visible error; do not retry blindly.", "- To test UNKNOWN, do not click the witness button and click `Mark presentation UNKNOWN`.", "- For new-chat Resume, use a different conversation and confirm the old conversation is not reused.", "", "## Fallback evidence template", "", "```text", "RUN ID:", "START:", "END:", "CHATGPT MODEL/SETTING:", "BROWSER STEP RESULT:", "VISIBLE ERROR:", "REFRESH/RESTART PERFORMED:", "FINAL VISIBLE RESULT:", "NOTES:", "```", "", "N6 remains build-only; no product activation, legacy mutation, Git ref movement or push is authorized."])
