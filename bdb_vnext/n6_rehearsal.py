@@ -48,16 +48,17 @@ from bdb_vnext.provider_root import VNextCompositionRoot
 from bdb_vnext.repo_view import RepositoryResource
 
 
-N6_PACKAGE_SCHEMA = "bdb-vnext-n6-rehearsal-package-v2"
-N6_CONFIG_SCHEMA = "bdb-vnext-n6-rehearsal-config-v2"
-N6_EXECUTION_SCHEMA = "bdb-vnext-n6-execution-manifest-v2"
+N6_PACKAGE_SCHEMA = "bdb-vnext-n6-rehearsal-package-v3"
+N6_CONFIG_SCHEMA = "bdb-vnext-n6-rehearsal-config-v3"
+N6_EXECUTION_SCHEMA = "bdb-vnext-n6-execution-manifest-v3"
 N6_INTERPRETER_SCHEMA = "bdb-vnext-n6-external-interpreter-identity-v1"
+N6_BROWSER_NATIVE_BINDING_SCHEMA = "bdb-vnext-n6-browser-native-binding-v1"
 N6_EVENT_SCHEMA = "bdb-vnext-n6-browser-event-v1"
-N6_NATIVE_REQUEST_SCHEMA = "bdb-vnext-n6-native-request-v1"
-N6_NATIVE_RESPONSE_SCHEMA = "bdb-vnext-n6-native-response-v1"
-N6_PACKAGE_VERSION = "0.2.0"
+N6_NATIVE_REQUEST_SCHEMA = "bdb-vnext-n6-native-request-v2"
+N6_NATIVE_RESPONSE_SCHEMA = "bdb-vnext-n6-native-response-v2"
+N6_PACKAGE_VERSION = "0.3.0"
 N6_NATIVE_CODE_SCHEMA = "bdb-vnext-n6-native-code-v1"
-N6_PROTOCOL_GENERATION = "bdb-vnext-n6-protocol-v1"
+N6_PROTOCOL_GENERATION = "bdb-vnext-n6-protocol-v2"
 N6_NATIVE_HOST_NAME = NATIVE_HOST_NAME
 N6_BROWSER_COMPONENT = BROWSER_COMPONENT_ID
 N6_CAPTURE_CHECKER_ID = "bdb-vnext-n6-browser-capture"
@@ -179,6 +180,10 @@ def _normalized_execution_documents(root: Path) -> tuple[dict[str, Any], dict[st
         _fail("package_identity_invalid", "N6 execution manifest identity sections are incomplete")
     if config.get("package_digest") != package.get("digest"):
         _fail("package_identity_claim_mismatch", "N6 config and execution manifest claim different package identities")
+    config_binding = _validated_browser_native_binding(config.get("browser_native_binding"))
+    execution_binding = _validated_browser_native_binding(package.get("browser_native_binding"))
+    if config_binding != execution_binding:
+        _fail("package_execution_binding_mismatch", "N6 config and execution manifest carry different Browser/Native bindings")
     coherence = (
         (config.get("source_commit"), subject.get("commit")),
         (config.get("repo_root"), subject.get("repo_root")),
@@ -192,6 +197,18 @@ def _normalized_execution_documents(root: Path) -> tuple[dict[str, Any], dict[st
         (config.get("browser_extension_id"), browser_extension.get("extension_id")),
         (config.get("native_host_name"), native_host.get("name")),
         (config.get("protocol_generation"), package.get("protocol_generation")),
+        (config_binding.get("source_commit"), subject.get("commit")),
+        (config_binding.get("source_tree"), subject.get("tree")),
+        (config_binding.get("repo_view_id"), subject.get("view_id")),
+        (config_binding.get("runtime_root"), resources.get("runtime_root")),
+        (config_binding.get("package_root"), package.get("root")),
+        (config_binding.get("legacy_runtime_root"), resources.get("legacy_runtime_root")),
+        (config_binding.get("native_code_digest"), package.get("native_code_digest")),
+        (config_binding.get("interpreter_identity_digest"), package.get("interpreter_identity", {}).get("identity_digest")),
+        (config_binding.get("browser_extension_id"), browser_extension.get("extension_id")),
+        (config_binding.get("native_host_name"), native_host.get("name")),
+        (config_binding.get("protocol_generation"), package.get("protocol_generation")),
+        (config_binding.get("production_activation"), resources.get("production_activation")),
     )
     if any(left != right for left, right in coherence):
         _fail("package_execution_binding_mismatch", "N6 config and execution manifest bind different execution subjects")
@@ -264,6 +281,63 @@ def interpreter_identity(executable: str | Path) -> dict[str, Any]:
     return identity
 
 
+def _browser_native_binding(
+    *,
+    source_commit: str,
+    source_tree: str,
+    repo_view_id: str,
+    runtime_root: Path,
+    package_root: Path,
+    legacy_runtime_root: Path,
+    native_code_digest_value: str,
+    interpreter_identity_digest: str,
+    browser_extension_id: str,
+) -> dict[str, Any]:
+    """Create the non-circular exact execution binding used for Native handshake.
+
+    The final compound package digest includes this binding and the generated
+    Browser code which carries it. The binding itself deliberately excludes the
+    compound digest, avoiding a self-referential hash while still naming every
+    execution-controlling authority required before a semantic Browser event.
+    """
+
+    identity: dict[str, Any] = {
+        "schema": N6_BROWSER_NATIVE_BINDING_SCHEMA,
+        "source_commit": source_commit,
+        "source_tree": source_tree,
+        "repo_view_id": repo_view_id,
+        "runtime_root": str(runtime_root),
+        "package_root": str(package_root),
+        "legacy_runtime_root": str(legacy_runtime_root),
+        "native_code_digest": native_code_digest_value,
+        "interpreter_identity_digest": interpreter_identity_digest,
+        "browser_extension_id": browser_extension_id,
+        "native_host_name": N6_NATIVE_HOST_NAME,
+        "protocol_generation": N6_PROTOCOL_GENERATION,
+        "production_activation": False,
+    }
+    identity["binding_digest"] = semantic_digest(identity)
+    return identity
+
+
+def _validated_browser_native_binding(value: object) -> dict[str, Any]:
+    binding = dict(_mapping(value, "browser_native_binding"))
+    required = {
+        "schema", "source_commit", "source_tree", "repo_view_id",
+        "runtime_root", "package_root", "legacy_runtime_root",
+        "native_code_digest", "interpreter_identity_digest",
+        "browser_extension_id", "native_host_name", "protocol_generation",
+        "production_activation", "binding_digest",
+    }
+    if set(binding) != required or binding.get("schema") != N6_BROWSER_NATIVE_BINDING_SCHEMA:
+        _fail("config_invalid", "N6 Browser/Native execution binding fields differ")
+    digest = binding.pop("binding_digest")
+    if digest != semantic_digest(binding):
+        _fail("config_invalid", "N6 Browser/Native execution binding digest differs")
+    binding["binding_digest"] = digest
+    return binding
+
+
 def _native_code_records(root: Path) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for path in sorted(root.rglob("*")):
@@ -294,6 +368,7 @@ class N6RehearsalConfig:
     native_code_digest: str
     package_digest: str
     interpreter_identity: Mapping[str, Any]
+    browser_native_binding: Mapping[str, Any]
     browser_extension_id: str
     native_host_name: str = N6_NATIVE_HOST_NAME
     protocol_generation: str = N6_PROTOCOL_GENERATION
@@ -302,7 +377,7 @@ class N6RehearsalConfig:
     def from_json(cls, path: str | Path) -> "N6RehearsalConfig":
         source = Path(path).expanduser().absolute()
         document = _read_json(source)
-        expected = {"schema", "repo_root", "runtime_root", "legacy_runtime_root", "source_commit", "package_root", "native_code_root", "native_code_digest", "package_digest", "interpreter_identity", "browser_extension_id", "native_host_name", "protocol_generation", "production_activation"}
+        expected = {"schema", "repo_root", "runtime_root", "legacy_runtime_root", "source_commit", "package_root", "native_code_root", "native_code_digest", "package_digest", "interpreter_identity", "browser_native_binding", "browser_extension_id", "native_host_name", "protocol_generation", "production_activation"}
         if set(document) != expected or document.get("schema") != N6_CONFIG_SCHEMA:
             _fail("config_invalid", "N6 config fields/schema differ")
         if document.get("production_activation") is not False:
@@ -330,17 +405,33 @@ class N6RehearsalConfig:
         claimed_identity_digest = identity.pop("identity_digest", None)
         if claimed_identity_digest != semantic_digest(identity):
             _fail("config_invalid", "N6 external interpreter identity digest differs")
-        return cls(repo, runtime, legacy, source_commit, package, native_code, _text(document["native_code_digest"], "native_code_digest"), _text(document["package_digest"], "package_digest"), dict(interpreter), _text(document["browser_extension_id"], "browser_extension_id"), _text(document["native_host_name"], "native_host_name"), _text(document["protocol_generation"], "protocol_generation"))
+        binding = _validated_browser_native_binding(document["browser_native_binding"])
+        binding_coherence = (
+            (binding["source_commit"], source_commit),
+            (binding["runtime_root"], str(runtime)),
+            (binding["package_root"], str(package)),
+            (binding["legacy_runtime_root"], str(legacy)),
+            (binding["native_code_digest"], document["native_code_digest"]),
+            (binding["interpreter_identity_digest"], interpreter["identity_digest"]),
+            (binding["browser_extension_id"], document["browser_extension_id"]),
+            (binding["native_host_name"], document["native_host_name"]),
+            (binding["protocol_generation"], document["protocol_generation"]),
+            (binding["production_activation"], document["production_activation"]),
+        )
+        if any(left != right for left, right in binding_coherence):
+            _fail("config_invalid", "N6 Browser/Native execution binding differs from config")
+        return cls(repo, runtime, legacy, source_commit, package, native_code, _text(document["native_code_digest"], "native_code_digest"), _text(document["package_digest"], "package_digest"), dict(interpreter), binding, _text(document["browser_extension_id"], "browser_extension_id"), _text(document["native_host_name"], "native_host_name"), _text(document["protocol_generation"], "protocol_generation"))
 
 
-def _event_base(request: Mapping[str, Any]) -> tuple[str, str, str, str]:
+def _event_base(request: Mapping[str, Any]) -> tuple[str, str, str, str, str]:
     if request.get("schema") != N6_NATIVE_REQUEST_SCHEMA:
         _fail("unsupported_schema", "N6 Native request schema differs")
     request_id = _text(request.get("request_id"), "request_id")
     event = _text(request.get("event"), "event")
     package_id = _text(request.get("package_id"), "package_id")
     protocol = _text(request.get("protocol_generation"), "protocol_generation")
-    return request_id, event, package_id, protocol
+    binding_digest = _text(request.get("browser_native_binding_digest"), "browser_native_binding_digest")
+    return request_id, event, package_id, protocol, binding_digest
 
 
 class N6RehearsalService:
@@ -368,6 +459,20 @@ class N6RehearsalService:
         self.interpreter_identity = interpreter_identity(sys.executable)
         if self.interpreter_identity != dict(config.interpreter_identity):
             _fail("interpreter_identity_mismatch", "running external Python differs from the package execution identity")
+        expected_binding = _browser_native_binding(
+            source_commit=config.source_commit,
+            source_tree=self.view.tree_oid,
+            repo_view_id=self.view.view_id,
+            runtime_root=config.runtime_root,
+            package_root=config.package_root,
+            legacy_runtime_root=config.legacy_runtime_root,
+            native_code_digest_value=self.native_code_digest,
+            interpreter_identity_digest=self.interpreter_identity["identity_digest"],
+            browser_extension_id=self.identity["extension_id"],
+        )
+        if expected_binding != dict(config.browser_native_binding):
+            _fail("browser_native_binding_mismatch", "configured Browser/Native execution binding differs from exact package authority")
+        self.browser_native_binding = expected_binding
 
     def _open(self):
         existing = (self.config.runtime_root / "browser" / "outbox" / "anchor.json").is_file()
@@ -626,11 +731,13 @@ class N6RehearsalService:
         }
 
     def handle(self, request: Mapping[str, Any]) -> dict[str, Any]:
-        request_id, event, package_id, protocol = _event_base(request)
+        request_id, event, package_id, protocol, binding_digest = _event_base(request)
         if package_id != N6_PACKAGE_SCHEMA or protocol != N6_PROTOCOL_GENERATION:
             _fail("protocol_mismatch", "N6 package/protocol identity differs")
+        if binding_digest != self.browser_native_binding["binding_digest"]:
+            _fail("browser_native_binding_mismatch", "Browser request belongs to a different N6 execution package")
         if event == "status":
-            return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": "READY", "package_digest": self.package_digest, "native_code_digest": self.native_code_digest, "interpreter_identity_digest": self.interpreter_identity["identity_digest"], "browser_extension_id": self.identity["extension_id"], "native_host_name": N6_NATIVE_HOST_NAME, "protocol_generation": N6_PROTOCOL_GENERATION, "production_activation": False, "rehearsal_infrastructure": "ACTIVE_ONLY_WHEN_EXPLICIT_PACKAGE_LOADED", "production_runtime": "OFF", "production_writer": "OFF"}
+            return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": "READY", "package_digest": self.package_digest, "native_code_digest": self.native_code_digest, "interpreter_identity_digest": self.interpreter_identity["identity_digest"], "browser_native_binding_digest": self.browser_native_binding["binding_digest"], "browser_extension_id": self.identity["extension_id"], "native_host_name": N6_NATIVE_HOST_NAME, "protocol_generation": N6_PROTOCOL_GENERATION, "production_activation": False, "rehearsal_infrastructure": "ACTIVE_ONLY_WHEN_EXPLICIT_PACKAGE_LOADED", "production_runtime": "OFF", "production_writer": "OFF"}
         payload = _mapping(request.get("payload"), "payload")
         if event == "submit_prompt":
             result = self._run_vertical(submission_key=_text(payload.get("submission_key"), "submission_key"), prompt=_text(payload.get("prompt"), "prompt", max_bytes=N6_MAX_PROMPT_BYTES), conversation_id=_text(payload.get("conversation_id"), "conversation_id"), profile_id=payload.get("profile_id") if isinstance(payload.get("profile_id"), str) else None)
@@ -760,41 +867,95 @@ def run_native_host(config_path: str | Path, *, input_stream: BinaryIO | None = 
         _framing_write(source_out, response)
 
 
-def _js_background() -> str:
-    return r'''"use strict";
+def _js_background(binding_digest: str, extension_id: str) -> str:
+    script = r'''"use strict";
 const HOST = "com.bartosz.dev_bridge.vnext";
-const PACKAGE = "bdb-vnext-n6-rehearsal-package-v2";
-const PROTOCOL = "bdb-vnext-n6-protocol-v1";
+const PACKAGE = "bdb-vnext-n6-rehearsal-package-v3";
+const PROTOCOL = "bdb-vnext-n6-protocol-v2";
+const REQUEST_SCHEMA = "bdb-vnext-n6-native-request-v2";
+const RESPONSE_SCHEMA = "bdb-vnext-n6-native-response-v2";
+const BROWSER_NATIVE_BINDING = __N6_BINDING__;
+const EXTENSION_ID = __N6_EXTENSION__;
 let port = null;
+let validated = false;
+let validation = null;
 const pending = new Map();
 function id(prefix) { return `${prefix}:${crypto.randomUUID()}`; }
-function send(event, payload) {
-  const request = {schema: "bdb-vnext-n6-native-request-v1", request_id: id(event), event, package_id: PACKAGE, protocol_generation: PROTOCOL, payload};
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { pending.delete(request.request_id); reject(new Error("N6 Native response timeout")); }, 120000);
-    pending.set(request.request_id, {resolve, reject, timer});
-    try {
-      if (!port) port = chrome.runtime.connectNative(HOST);
-      port.postMessage(request);
-    } catch (error) { clearTimeout(timer); pending.delete(request.request_id); port = null; reject(error); }
-  });
+function nativeError(response, fallback = "N6 Native Host identity handshake failed") {
+  const error = response && response.error;
+  const code = error && typeof error.code === "string" ? error.code : "native_status_invalid";
+  const message = error && typeof error.message === "string" ? error.message : fallback;
+  return new Error(`${code}: ${message}`);
 }
-function disconnect(error) { for (const item of pending.values()) { clearTimeout(item.timer); item.reject(error); } pending.clear(); port = null; }
+function disconnect(activePort, error) {
+  for (const [requestId, item] of pending.entries()) {
+    if (item.port !== activePort) continue;
+    clearTimeout(item.timer); pending.delete(requestId); item.reject(error);
+  }
+  if (port === activePort) { port = null; validated = false; }
+}
+function dropPort(error) {
+  const activePort = port;
+  if (!activePort) { validated = false; return; }
+  disconnect(activePort, error);
+  try { activePort.disconnect(); } catch (_) {}
+}
 function ensurePort() {
   if (port) return port;
-  port = chrome.runtime.connectNative(HOST);
-  port.onMessage.addListener((response) => { const item = pending.get(response.request_id); if (!item) return; pending.delete(response.request_id); clearTimeout(item.timer); item.resolve(response); });
-  port.onDisconnect.addListener(() => disconnect(new Error((chrome.runtime.lastError && chrome.runtime.lastError.message) || "N6 Native Host disconnected")));
-  return port;
+  const connected = chrome.runtime.connectNative(HOST);
+  port = connected;
+  connected.onMessage.addListener((response) => {
+    const item = response && pending.get(response.request_id);
+    if (!item || item.port !== connected) return;
+    pending.delete(response.request_id); clearTimeout(item.timer); item.resolve(response);
+  });
+  connected.onDisconnect.addListener(() => disconnect(connected, new Error((chrome.runtime.lastError && chrome.runtime.lastError.message) || "N6 Native Host disconnected")));
+  return connected;
+}
+function post(event, payload, timeoutMs = 120000) {
+  const request = {schema: REQUEST_SCHEMA, request_id: id(event), event, package_id: PACKAGE, protocol_generation: PROTOCOL, browser_native_binding_digest: BROWSER_NATIVE_BINDING, payload};
+  return new Promise((resolve, reject) => {
+    const activePort = ensurePort();
+    const timer = setTimeout(() => { pending.delete(request.request_id); reject(new Error("N6 Native response timeout")); }, timeoutMs);
+    pending.set(request.request_id, {resolve, reject, timer, port: activePort});
+    try { activePort.postMessage(request); }
+    catch (error) { clearTimeout(timer); pending.delete(request.request_id); dropPort(error); reject(error); }
+  });
+}
+function exactStatus(response) {
+  return Boolean(response && response.schema === RESPONSE_SCHEMA && response.status === "READY" && response.browser_native_binding_digest === BROWSER_NATIVE_BINDING && response.browser_extension_id === EXTENSION_ID && response.protocol_generation === PROTOCOL && response.production_activation === false);
+}
+async function ensureValidatedPort() {
+  if (validated && port) return;
+  if (validation) return validation;
+  validation = (async () => {
+    let failure = new Error("N6 Native Host identity handshake failed");
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const response = await post("status", {}, 15000);
+        if (!exactStatus(response)) throw nativeError(response);
+        validated = true;
+        return;
+      } catch (error) {
+        failure = error instanceof Error ? error : new Error(String(error));
+        dropPort(failure);
+      }
+    }
+    throw failure;
+  })().finally(() => { validation = null; });
+  return validation;
+}
+async function send(event, payload) {
+  await ensureValidatedPort();
+  return post(event, payload);
 }
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.type !== "N6_BROWSER_EVENT") return false;
-  ensurePort();
   send(message.event, message.payload || {}).then((response) => sendResponse({ok: true, response}), (error) => sendResponse({ok: false, error: String(error)}));
   return true;
 });
-chrome.runtime.onInstalled.addListener(() => { ensurePort(); send("status", {}).catch(() => {}); });
 '''
+    return script.replace("__N6_BINDING__", json.dumps(binding_digest)).replace("__N6_EXTENSION__", json.dumps(extension_id))
 
 
 def _js_content() -> str:
@@ -808,7 +969,7 @@ def _js_content() -> str:
 const OWNER_SCHEMA = "bdb-vnext-n6-conversation-owner-v1";
 const PENDING_RESUME_SCHEMA = "bdb-vnext-n6-pending-resume-v1";
 const RESUMED_BINDING_SCHEMA = "bdb-vnext-n6-resumed-binding-v1";
-const PROTOCOL = "bdb-vnext-n6-protocol-v1";
+const PROTOCOL = "bdb-vnext-n6-protocol-v2";
 const SCENARIO_BY_PROMPT = new Map(Object.entries(__N6_SCENARIOS__));
 const PROMPT_BY_SCENARIO = new Map([...SCENARIO_BY_PROMPT].map(([prompt, scenario]) => [scenario, prompt]));
 let active = null;
@@ -863,6 +1024,20 @@ async function stableAssistantObservation(expectedPrompt) {
 }
 function userMessages() { return [...document.querySelectorAll("[data-message-author-role='user']")].map((node) => canonicalPrompt(node.innerText || node.textContent || "")); }
 function send(event, payload) { return chrome.runtime.sendMessage({type: "N6_BROWSER_EVENT", event, payload}); }
+function nativeErrorText(response, fallback = "N6 Native request failed") {
+  if (response && response.response && response.response.error) {
+    const error = response.response.error;
+    const code = typeof error.code === "string" ? error.code : "native_error";
+    const message = typeof error.message === "string" ? error.message : "Native Host rejected the request";
+    return `${fallback}: ${code}: ${message}`;
+  }
+  if (response && typeof response.error === "string") return `${fallback}: ${response.error}`;
+  return fallback;
+}
+function nativeResult(response, fallback) {
+  if (!response || response.ok !== true || !response.response || response.response.status === "ERROR" || !response.response.result) return {result: null, error: nativeErrorText(response, fallback)};
+  return {result: response.response.result, error: null};
+}
 async function digest(value) { const raw = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)); return [...new Uint8Array(raw)].map((byte) => byte.toString(16).padStart(2, "0")).join(""); }
 async function ownerKey(conversation) { return "n6_owner:" + await digest(conversation); }
 async function stableSubmissionKey(conversation, scenarioId, promptText) { return "n6-browser:" + await digest(PROTOCOL + "\n" + conversation + "\n" + scenarioId + "\n" + promptText); }
@@ -980,8 +1155,9 @@ async function lookupAndShow(owner, expectedConversation) {
   active = owner;
   const response = await send("lookup", {submission_key: owner.submission_key});
   if (expectedConversation !== currentConversation || canonicalConversationId() !== expectedConversation) return;
-  if (response.ok && response.response && response.response.result) showPanel(response.response.result);
-  else write(response.error || "N6 canonical lookup failed");
+  const observed = nativeResult(response, "N6 canonical lookup failed");
+  if (observed.result) showPanel(observed.result);
+  else write(observed.error);
 }
 async function lookupAndShowPending(owner, expectedConversation) {
   const response = await send("lookup", {submission_key: owner.submission_key});
@@ -1028,8 +1204,9 @@ async function inspectExactScenario(conversation) {
     active = owner;
     const response = await send("submit_prompt", {submission_key: submissionKey, prompt: text, conversation_id: conversation, profile_id: null});
     if (conversation !== currentConversation || canonicalConversationId() !== conversation) return;
-    if (!response.ok) { write(response.error); return; }
-    showPanel(response.response.result);
+    const observed = nativeResult(response, "N6 canonical admission failed");
+    if (!observed.result) { write(observed.error); return; }
+    showPanel(observed.result);
     return;
   }
 }
@@ -1102,9 +1279,6 @@ def prepare_package(*, repo_root: str | Path, output: str | Path, runtime_root: 
     browser.mkdir(parents=True, exist_ok=True)
     identity = load_browser_identity()
     manifest = {"manifest_version": 3, "name": "BDB vNext N6 Rehearsal", "version": N6_PACKAGE_VERSION, "description": "Build-only user-operated BDB vNext rehearsal; not product activation.", "key": identity["public_key_spki_der_base64"], "permissions": ["nativeMessaging", "storage"], "host_permissions": ["https://chatgpt.com/*", "https://chat.openai.com/*"], "background": {"service_worker": "background.js"}, "content_scripts": [{"matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"], "js": ["content.js"], "run_at": "document_idle"}]}
-    _write_json(browser / "manifest.json", manifest)
-    (browser / "background.js").write_text(_js_background(), encoding="utf-8")
-    (browser / "content.js").write_text(_js_content(), encoding="utf-8")
     requested_commit = source_commit or "HEAD"
     commit = subprocess.run(["git", "-C", str(repo), "rev-parse", f"{requested_commit}^{{commit}}"], shell=False, capture_output=True, text=True, check=True).stdout.strip()
     if len(commit) != 40 or any(char not in "0123456789abcdef" for char in commit):
@@ -1114,15 +1288,28 @@ def prepare_package(*, repo_root: str | Path, output: str | Path, runtime_root: 
     config_path = output_path / "native-config.json"
     py = Path(python_executable or sys.executable).expanduser().absolute()
     external_interpreter = interpreter_identity(py)
-    config = {"schema": N6_CONFIG_SCHEMA, "repo_root": str(repo), "runtime_root": str(runtime), "legacy_runtime_root": str(legacy), "source_commit": commit, "package_root": str(output_path), "package_digest": "pending", "interpreter_identity": external_interpreter, "browser_extension_id": identity["extension_id"], "native_host_name": N6_NATIVE_HOST_NAME, "protocol_generation": N6_PROTOCOL_GENERATION, "production_activation": False}
     native_code = output_path / "native-code"
     native_code.mkdir(parents=True, exist_ok=True)
     archive = subprocess.run(["git", "-C", str(repo), "archive", "--format=tar", commit, "bdb_vnext", "bdb_shared", "pyproject.toml"], shell=False, capture_output=True, check=True)
     import tarfile
     with tarfile.open(fileobj=__import__("io").BytesIO(archive.stdout), mode="r:") as tar:
         tar.extractall(native_code)
-    config["native_code_root"] = str(native_code)
-    config["native_code_digest"] = native_code_digest(native_code)
+    native_digest = native_code_digest(native_code)
+    binding = _browser_native_binding(
+        source_commit=commit,
+        source_tree=tree,
+        repo_view_id=source_view.view_id,
+        runtime_root=runtime,
+        package_root=output_path,
+        legacy_runtime_root=legacy,
+        native_code_digest_value=native_digest,
+        interpreter_identity_digest=external_interpreter["identity_digest"],
+        browser_extension_id=identity["extension_id"],
+    )
+    config = {"schema": N6_CONFIG_SCHEMA, "repo_root": str(repo), "runtime_root": str(runtime), "legacy_runtime_root": str(legacy), "source_commit": commit, "package_root": str(output_path), "native_code_root": str(native_code), "native_code_digest": native_digest, "package_digest": "pending", "interpreter_identity": external_interpreter, "browser_native_binding": binding, "browser_extension_id": identity["extension_id"], "native_host_name": N6_NATIVE_HOST_NAME, "protocol_generation": N6_PROTOCOL_GENERATION, "production_activation": False}
+    _write_json(browser / "manifest.json", manifest)
+    (browser / "background.js").write_text(_js_background(binding["binding_digest"], identity["extension_id"]), encoding="utf-8")
+    (browser / "content.js").write_text(_js_content(), encoding="utf-8")
     _write_json(config_path, config)
     shim = _build_shim(output_path, python_executable=py, native_code_root=native_code, config_path=config_path)
     native_manifest_path = output_path / "native-host-manifest.json"
@@ -1141,7 +1328,7 @@ def prepare_package(*, repo_root: str | Path, output: str | Path, runtime_root: 
         "Write-Output ('Registered dedicated N6 Native Host: ' + $key)\n",
         encoding="utf-8",
     )
-    execution = {"schema": N6_EXECUTION_SCHEMA, "package": {"schema": N6_PACKAGE_SCHEMA, "version": N6_PACKAGE_VERSION, "digest": "pending", "root": str(output_path), "native_code_digest": config["native_code_digest"], "interpreter_identity": external_interpreter, "browser_extension": {"component_id": identity["component_id"], "extension_id": identity["extension_id"], "semantic_digest": identity["semantic_digest"], "manifest": str(browser / "manifest.json")}, "native_host": {"name": N6_NATIVE_HOST_NAME, "manifest": str(native_manifest_path), "path": str(native_path), "registration_script": str(register_script), "executable_ready": shim is not None, "code_root": str(native_code)}, "protocol_generation": N6_PROTOCOL_GENERATION}, "subject": {"repository": "bdb-vnext-n6-subject", "repo_root": str(repo), "branch": "bdb-vnext", "commit": commit, "tree": tree, "view_id": source_view.view_id}, "resources": {"runtime_root": str(runtime), "control_db": str(runtime / "control" / "control.db"), "legacy_runtime_root": str(legacy), "production_activation": False, "rehearsal_infrastructure": "ACTIVE_ONLY_WHEN_EXPLICIT_PACKAGE_LOADED", "legacy_mutation": False}, "prompts": list(N6_TASKS), "manual_gate": "USER_OPERATED_ONLY"}
+    execution = {"schema": N6_EXECUTION_SCHEMA, "package": {"schema": N6_PACKAGE_SCHEMA, "version": N6_PACKAGE_VERSION, "digest": "pending", "root": str(output_path), "native_code_digest": config["native_code_digest"], "interpreter_identity": external_interpreter, "browser_native_binding": binding, "browser_extension": {"component_id": identity["component_id"], "extension_id": identity["extension_id"], "semantic_digest": identity["semantic_digest"], "manifest": str(browser / "manifest.json")}, "native_host": {"name": N6_NATIVE_HOST_NAME, "manifest": str(native_manifest_path), "path": str(native_path), "registration_script": str(register_script), "executable_ready": shim is not None, "code_root": str(native_code)}, "protocol_generation": N6_PROTOCOL_GENERATION}, "subject": {"repository": "bdb-vnext-n6-subject", "repo_root": str(repo), "branch": "bdb-vnext", "commit": commit, "tree": tree, "view_id": source_view.view_id}, "resources": {"runtime_root": str(runtime), "control_db": str(runtime / "control" / "control.db"), "legacy_runtime_root": str(legacy), "production_activation": False, "rehearsal_infrastructure": "ACTIVE_ONLY_WHEN_EXPLICIT_PACKAGE_LOADED", "legacy_mutation": False}, "prompts": list(N6_TASKS), "manual_gate": "USER_OPERATED_ONLY"}
     execution_path = output_path / "execution_manifest.json"
     _write_json(execution_path, execution)
     package = package_digest(output_path)
@@ -1158,7 +1345,7 @@ def write_manual_packet(execution: Mapping[str, Any], path: str | Path) -> Path:
     package = _mapping(execution.get("package"), "package")
     subject = _mapping(execution.get("subject"), "subject")
     resources = _mapping(execution.get("resources"), "resources")
-    lines = ["# MANUAL_BROWSER_REHEARSAL_PACKET — N6", "", "## Exact subject", "", f"repository: {subject['repository']}", f"branch: {subject['branch']}", f"HEAD: {subject['commit']}", f"tree: {subject['tree']}", f"RepoView: {subject['view_id']}", f"Browser extension ID: {package['browser_extension']['extension_id']}", f"Browser package digest: {package['digest']}", f"Browser manifest: {package['browser_extension']['manifest']}", f"Native Host: {package['native_host']['name']}", f"Native Host manifest: {package['native_host']['manifest']}", f"Native registration script: {package['native_host'].get('registration_script')}", f"Native executable ready: {package['native_host']['executable_ready']}", f"Protocol: {package['protocol_generation']}", f"Control DB: {resources['control_db']}", f"Rehearsal runtime root: {resources['runtime_root']}", "", "## Setup", "", "1. Do not touch the installed legacy extension or Native Host.", f"2. Load the unpacked folder `{Path(str(package['browser_extension']['manifest'])).parent}` in `chrome://extensions` and verify the pinned extension ID.", f"3. Confirm `Native executable ready` is true. In an elevated PowerShell only if the dedicated key is absent, run exactly `& '{package['native_host'].get('registration_script')}'`; the script refuses to overwrite an existing key. Verify the registry default points to `{package['native_host']['manifest']}` and the manifest allowed origin is `chrome-extension://{package['browser_extension']['extension_id']}/`. If the key already exists with another manifest, STOP and report the identity conflict.", "4. Open a normal ChatGPT conversation, choose visible model `GPT-5.6 Sol` and reasoning `Wysoki`, and keep those settings for all paired tasks.", "5. Start with a fresh conversation. Paste each BDB prompt below exactly. Wait for the normal answer before using the extension panel.", "6. For the primary vertical, click `Capture latest answer`, then `Witness presentation`. Use `Mark presentation UNKNOWN` when the DOM witness is intentionally absent.", "7. For Resume, open a new ChatGPT conversation and click `Resume in this chat`; the target conversation must remain distinct.", "8. For restart/lost-ACK, refresh ChatGPT after submitting a marked prompt, then wait for the panel to recover by lookup. Never submit the same prompt twice manually.", "", "## Expected observations", "", "PASS = normal ChatGPT answer is visible, the panel reports canonical IDs, and the requested witness/recovery result is explicit.", "FAIL = extension/Native identity mismatch, duplicate Task/Candidate/Publication, wrong conversation delivery, silent fallback, or mutation outside the rehearsal root.", "INCONCLUSIVE = model/settings/timestamps/raw answer or exact identity cannot be verified.", "", "## Primary vertical", "", "RUN-PRIMARY: use `RUN-05` below. Verify Task → WorkItem → Candidate → Evidence → Publication, capture raw answer, witness same conversation, mark UNKNOWN once, then new-chat Resume.", "", "## Paired prompts (run BDB arm with extension enabled; run NO-BDB arm with extension disabled)", ""]
+    lines = ["# MANUAL_BROWSER_REHEARSAL_PACKET — N6", "", "## Exact subject", "", f"repository: {subject['repository']}", f"branch: {subject['branch']}", f"HEAD: {subject['commit']}", f"tree: {subject['tree']}", f"RepoView: {subject['view_id']}", f"Browser extension ID: {package['browser_extension']['extension_id']}", f"Browser package digest: {package['digest']}", f"Browser/Native binding: {package['browser_native_binding']['binding_digest']}", f"Browser manifest: {package['browser_extension']['manifest']}", f"Native Host: {package['native_host']['name']}", f"Native Host manifest: {package['native_host']['manifest']}", f"Native registration script: {package['native_host'].get('registration_script')}", f"Native executable ready: {package['native_host']['executable_ready']}", f"Protocol: {package['protocol_generation']}", f"Control DB: {resources['control_db']}", f"Rehearsal runtime root: {resources['runtime_root']}", "", "## Setup", "", "1. Do not touch the installed legacy extension or Native Host.", f"2. Before loading or reloading the extension, verify the dedicated `{package['native_host']['name']}` registry default points to `{package['native_host']['manifest']}` and that the manifest allowed origin is `chrome-extension://{package['browser_extension']['extension_id']}/`. The generated registration script may be used only when that dedicated key is absent; it refuses to overwrite an existing key.", f"3. Only after step 2, load or reload the unpacked folder `{Path(str(package['browser_extension']['manifest'])).parent}` in `chrome://extensions` and verify the pinned extension ID. This ordering prevents Chrome from retaining a Native port opened against an earlier manifest.", "4. Confirm `Native executable ready` is true, then open a normal ChatGPT conversation, choose visible model `GPT-5.6 Sol` and reasoning `Wysoki`, and keep those settings for all paired tasks.", "5. Start with a fresh conversation. Paste each BDB prompt below exactly. Wait for the normal answer before using the extension panel.", "6. For the primary vertical, click `Capture latest answer`, then `Witness presentation`. Use `Mark presentation UNKNOWN` when the DOM witness is intentionally absent.", "7. For Resume, open a new ChatGPT conversation and click `Resume in this chat`; the target conversation must remain distinct.", "8. For restart/lost-ACK, refresh ChatGPT after submitting a marked prompt, then wait for the panel to recover by lookup. Never submit the same prompt twice manually.", "", "## Expected observations", "", "PASS = normal ChatGPT answer is visible, the panel reports canonical IDs, and the requested witness/recovery result is explicit.", "FAIL = extension/Native identity mismatch, duplicate Task/Candidate/Publication, wrong conversation delivery, silent fallback, or mutation outside the rehearsal root.", "INCONCLUSIVE = model/settings/timestamps/raw answer or exact identity cannot be verified.", "", "## Primary vertical", "", "RUN-PRIMARY: use `RUN-05` below. Verify Task → WorkItem → Candidate → Evidence → Publication, capture raw answer, witness same conversation, mark UNKNOWN once, then new-chat Resume.", "", "## Paired prompts (run BDB arm with extension enabled; run NO-BDB arm with extension disabled)", ""]
     for task in execution.get("prompts", []):
         lines.extend([f"### {task['id']} — {task['class']}", "", "BDB arm:", "```text", str(task["bdb"]), "```", "", "NO-BDB arm:", "```text", str(task["plain"]), "```", ""])
     lines.extend(["## Fault actions", "", "- Refresh/reopen ChatGPT only; do not delete runtime files.", "- If the Native Host disconnects, stop and record the visible error; do not retry blindly.", "- To test UNKNOWN, do not click the witness button and click `Mark presentation UNKNOWN`.", "- For new-chat Resume, use a different conversation and confirm the old conversation is not reused.", "", "## Fallback evidence template", "", "```text", "RUN ID:", "START:", "END:", "CHATGPT MODEL/SETTING:", "BROWSER STEP RESULT:", "VISIBLE ERROR:", "REFRESH/RESTART PERFORMED:", "FINAL VISIBLE RESULT:", "NOTES:", "```", "", "N6 remains build-only; no product activation, legacy mutation, Git ref movement or push is authorized."])

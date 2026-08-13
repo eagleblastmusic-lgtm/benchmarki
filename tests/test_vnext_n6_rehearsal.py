@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from bdb_shared.evidence import semantic_digest
 from bdb_vnext.m3c_admission import M3cError
 from bdb_vnext.n4_publication import N4Error
 from bdb_vnext.n6_rehearsal import (
@@ -22,6 +23,7 @@ from bdb_vnext.n6_rehearsal import (
     N6RehearsalService,
     N6_TASKS,
     native_code_digest,
+    _js_background,
     _js_content,
     _task_conversation,
     prepare_package,
@@ -60,6 +62,7 @@ def test_prepare_package_isolated_and_status_ready(tmp_path: Path, monkeypatch) 
     assert config["schema"] == N6_CONFIG_SCHEMA
     assert N6RehearsalConfig.from_json(config_path).package_digest == execution["package"]["digest"]
     parsed = N6RehearsalConfig.from_json(config_path)
+    assert parsed.browser_native_binding == execution["package"]["browser_native_binding"]
     assert parsed.native_code_root == package_root / "native-code"
     assert parsed.native_code_root != repo
     assert parsed.native_code_digest == execution["package"]["native_code_digest"] == native_code_digest(parsed.native_code_root)
@@ -76,10 +79,12 @@ def test_prepare_package_isolated_and_status_ready(tmp_path: Path, monkeypatch) 
         "event": "status",
         "package_id": N6_PACKAGE_SCHEMA,
         "protocol_generation": N6_PROTOCOL_GENERATION,
+        "browser_native_binding_digest": parsed.browser_native_binding["binding_digest"],
         "payload": {},
     })
     assert response["status"] == "READY"
     assert response["interpreter_identity_digest"] == parsed.interpreter_identity["identity_digest"]
+    assert response["browser_native_binding_digest"] == parsed.browser_native_binding["binding_digest"]
     assert response["production_activation"] is False
 
     packet_path = write_manual_packet(execution, package_root / "MANUAL_BROWSER_REHEARSAL_PACKET.md")
@@ -100,6 +105,80 @@ def test_native_package_code_does_not_follow_live_checkout(tmp_path: Path, monke
     assert bundled
     assert config.native_code_root.is_relative_to(package_root)
     assert config.native_code_digest == execution["package"]["native_code_digest"]
+
+
+def test_native_rejects_foreign_browser_binding_before_runtime_open(tmp_path: Path, monkeypatch) -> None:
+    repo = Path(__file__).parents[1].absolute()
+    package_root = tmp_path / "package"
+    runtime_root = tmp_path / "runtime"
+    monkeypatch.setattr("bdb_vnext.n6_rehearsal._build_shim", lambda *args, **kwargs: None)
+    prepare_package(repo_root=repo, output=package_root, runtime_root=runtime_root, legacy_runtime_root=tmp_path / "legacy", source_commit="HEAD", python_executable=sys.executable)
+    service = N6RehearsalService(N6RehearsalConfig.from_json(package_root / "native-config.json"))
+
+    with pytest.raises(N6RehearsalError) as mismatch:
+        service.handle({
+            "schema": N6_NATIVE_REQUEST_SCHEMA,
+            "request_id": "n6:test:foreign-binding",
+            "event": "status",
+            "package_id": N6_PACKAGE_SCHEMA,
+            "protocol_generation": N6_PROTOCOL_GENERATION,
+            "browser_native_binding_digest": "sha256:" + "0" * 64,
+            "payload": {},
+        })
+    assert mismatch.value.code == "browser_native_binding_mismatch"
+    assert not runtime_root.exists()
+
+
+def test_background_revalidates_stale_native_port_before_one_semantic_send() -> None:
+    generated = json.dumps(_js_background("sha256:exact-binding", "exact-extension"))
+    harness = f"""
+const vm = await import('node:vm');
+const {{ webcrypto }} = await import('node:crypto');
+const generated = {generated};
+let listener = null;
+const ports = [];
+function event() {{ const listeners = []; return {{ addListener: (callback) => listeners.push(callback), emit: (value) => listeners.forEach((callback) => callback(value)) }}; }}
+function makePort(index) {{
+  const onMessage = event();
+  const onDisconnect = event();
+  const messages = [];
+  return {{
+    onMessage, onDisconnect, messages,
+    postMessage(request) {{
+      messages.push(request);
+      queueMicrotask(() => {{
+        if (index === 0) {{
+          onMessage.emit({{schema: 'bdb-vnext-n6-native-response-v1', request_id: request.request_id, status: 'ERROR', error: {{code: 'protocol_mismatch', message: 'old package'}}}});
+        }} else if (request.event === 'status') {{
+          onMessage.emit({{schema: 'bdb-vnext-n6-native-response-v2', request_id: request.request_id, status: 'READY', browser_native_binding_digest: 'sha256:exact-binding', browser_extension_id: 'exact-extension', protocol_generation: 'bdb-vnext-n6-protocol-v2', production_activation: false}});
+        }} else {{
+          onMessage.emit({{schema: 'bdb-vnext-n6-native-response-v2', request_id: request.request_id, status: 'ACCEPTED', result: {{task_id: 'task-1'}}}});
+        }}
+      }});
+    }},
+    disconnect() {{ onDisconnect.emit(); }},
+  }};
+}}
+const chrome = {{ runtime: {{
+  lastError: null,
+  connectNative() {{ const port = makePort(ports.length); ports.push(port); return port; }},
+  onMessage: {{ addListener(callback) {{ listener = callback; }} }},
+}} }};
+vm.runInNewContext(generated, {{chrome, crypto: webcrypto, setTimeout, clearTimeout, console}});
+if (ports.length !== 0) throw new Error('background eagerly opened Native Host before a semantic event');
+const response = await new Promise((resolve, reject) => {{
+  if (!listener({{type: 'N6_BROWSER_EVENT', event: 'submit_prompt', payload: {{submission_key: 'one'}}}}, {{}}, resolve)) reject(new Error('listener did not keep response channel open'));
+  setTimeout(() => reject(new Error('background response timeout')), 1000);
+}});
+if (!response.ok || response.response.status !== 'ACCEPTED') throw new Error(JSON.stringify(response));
+if (ports.length !== 2) throw new Error(`expected stale-port reconnect, got ${{ports.length}} ports`);
+if (ports[0].messages.length !== 1 || ports[0].messages[0].event !== 'status') throw new Error('old Native Host received a semantic event');
+if (ports[1].messages.length !== 2 || ports[1].messages[0].event !== 'status' || ports[1].messages[1].event !== 'submit_prompt') throw new Error('new Native Host handshake/send sequence differs');
+const semantic = ports.flatMap((port) => port.messages).filter((message) => message.event === 'submit_prompt');
+if (semantic.length !== 1 || semantic[0].browser_native_binding_digest !== 'sha256:exact-binding') throw new Error('semantic request was duplicated or unbound');
+"""
+    result = subprocess.run(["node", "--input-type=module", "-e", harness], capture_output=True, text=True, timeout=30, check=False)
+    assert result.returncode == 0, result.stderr or result.stdout
 
 
 def test_compound_package_identity_binds_config_manifest_and_external_interpreter(tmp_path: Path, monkeypatch) -> None:
@@ -123,9 +202,15 @@ def test_compound_package_identity_binds_config_manifest_and_external_interprete
 
     changed_config = dict(original_config)
     changed_config["runtime_root"] = str((tmp_path / "different-runtime").absolute())
+    changed_binding = dict(changed_config["browser_native_binding"])
+    changed_binding["runtime_root"] = changed_config["runtime_root"]
+    changed_binding.pop("binding_digest")
+    changed_binding["binding_digest"] = semantic_digest(changed_binding)
+    changed_config["browser_native_binding"] = changed_binding
     changed_config["package_digest"] = "pending"
     changed_execution = json.loads(json.dumps(original_manifest))
     changed_execution["resources"]["runtime_root"] = changed_config["runtime_root"]
+    changed_execution["package"]["browser_native_binding"] = changed_binding
     changed_execution["package"]["digest"] = "pending"
     config_path.write_text(json.dumps(changed_config, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
     manifest_path.write_text(json.dumps(changed_execution, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
@@ -212,6 +297,7 @@ def test_n6_presentation_requires_independent_exact_assistant_capture(tmp_path: 
             "event": event,
             "package_id": N6_PACKAGE_SCHEMA,
             "protocol_generation": N6_PROTOCOL_GENERATION,
+            "browser_native_binding_digest": service.browser_native_binding["binding_digest"],
             "payload": {"submission_key": submission_key, **payload},
         })
 
@@ -353,6 +439,7 @@ function makeContext(store, href, userTexts, mode = 'valid') {{
   const chrome = {{
     storage: {{ local: storage }},
     runtime: {{ sendMessage: async (message) => {{
+      if (mode === 'protocol_mismatch') return {{ ok: true, response: {{ status: 'ERROR', error: {{ code: 'protocol_mismatch', message: 'old package' }} }} }};
       if (message.event === 'lookup') {{
         if (mode === 'stale') return {{ ok: true, response: {{ status: 'ERROR', error: {{ code: 'submission_not_found' }} }} }};
         return {{ ok: true, response: {{ result: {{ task_id: 'task-1', publication_id: 'publication-1' }} }} }};
@@ -397,6 +484,16 @@ if (blankPendingStore.n6_pending_resume === undefined) throw new Error('blank-ch
 const markerContext = makeContext({{}}, 'https://chatgpt.com/c/marker-12345678', ['quoted BDB-N6-REHEARSAL RUN-05 inside diagnostic code']);
 await new Promise((resolve) => setTimeout(resolve, 20));
 if (markerContext.root.children.some((item) => item.dataset.bdbN6Panel === 'true' && !item.removed)) throw new Error('marker/code tab claimed ownership');
+
+const failedStore = {{}};
+const failedContext = makeContext(failedStore, 'https://chatgpt.com/c/failure-12345678', [{json.dumps(N6_TASKS[4]["bdb"])}], 'protocol_mismatch');
+await new Promise((resolve) => setTimeout(resolve, 20));
+panel = failedContext.root.children.find((item) => item.dataset.bdbN6Panel === 'true' && !item.removed);
+if (!panel || !panel.textContent.includes('N6 canonical admission failed: protocol_mismatch: old package')) throw new Error('initial Native protocol failure was collapsed');
+const failedRefresh = makeContext(failedStore, 'https://chatgpt.com/c/failure-12345678', [], 'protocol_mismatch');
+await new Promise((resolve) => setTimeout(resolve, 20));
+panel = failedRefresh.root.children.find((item) => item.dataset.bdbN6Panel === 'true' && !item.removed);
+if (!panel || !panel.textContent.includes('N6 canonical lookup failed: protocol_mismatch: old package')) throw new Error('lookup Native protocol failure was collapsed after refresh');
 
 const staleStore = {{ n6_pending_resume: {{ schema: 'bdb-vnext-n6-pending-resume-v1', state: 'PREPARED', owner: {{ ...owner, submission_key: 'missing' }} }} }};
 makeContext(staleStore, 'https://chatgpt.com/c/stale-12345678', [], 'stale');
