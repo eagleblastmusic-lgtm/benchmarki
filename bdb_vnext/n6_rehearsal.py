@@ -48,13 +48,14 @@ from bdb_vnext.provider_root import VNextCompositionRoot
 from bdb_vnext.repo_view import RepositoryResource
 
 
-N6_PACKAGE_SCHEMA = "bdb-vnext-n6-rehearsal-package-v1"
-N6_CONFIG_SCHEMA = "bdb-vnext-n6-rehearsal-config-v1"
-N6_EXECUTION_SCHEMA = "bdb-vnext-n6-execution-manifest-v1"
+N6_PACKAGE_SCHEMA = "bdb-vnext-n6-rehearsal-package-v2"
+N6_CONFIG_SCHEMA = "bdb-vnext-n6-rehearsal-config-v2"
+N6_EXECUTION_SCHEMA = "bdb-vnext-n6-execution-manifest-v2"
+N6_INTERPRETER_SCHEMA = "bdb-vnext-n6-external-interpreter-identity-v1"
 N6_EVENT_SCHEMA = "bdb-vnext-n6-browser-event-v1"
 N6_NATIVE_REQUEST_SCHEMA = "bdb-vnext-n6-native-request-v1"
 N6_NATIVE_RESPONSE_SCHEMA = "bdb-vnext-n6-native-response-v1"
-N6_PACKAGE_VERSION = "0.1.1"
+N6_PACKAGE_VERSION = "0.2.0"
 N6_NATIVE_CODE_SCHEMA = "bdb-vnext-n6-native-code-v1"
 N6_PROTOCOL_GENERATION = "bdb-vnext-n6-protocol-v1"
 N6_NATIVE_HOST_NAME = NATIVE_HOST_NAME
@@ -160,11 +161,107 @@ def _package_files(root: Path) -> list[dict[str, Any]]:
     return records
 
 
+def _normalized_execution_documents(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    config = _read_json(root / "native-config.json")
+    execution = _read_json(root / "execution_manifest.json")
+    if config.get("schema") != N6_CONFIG_SCHEMA or execution.get("schema") != N6_EXECUTION_SCHEMA:
+        _fail("package_identity_invalid", "N6 execution-controlling documents have unsupported schemas")
+    config = json.loads(json.dumps(config))
+    execution = json.loads(json.dumps(execution))
+    package = execution.get("package")
+    if not isinstance(package, dict):
+        _fail("package_identity_invalid", "N6 execution manifest lacks package identity")
+    subject = execution.get("subject")
+    resources = execution.get("resources")
+    native_host = package.get("native_host")
+    browser_extension = package.get("browser_extension")
+    if not all(isinstance(item, dict) for item in (subject, resources, native_host, browser_extension)):
+        _fail("package_identity_invalid", "N6 execution manifest identity sections are incomplete")
+    if config.get("package_digest") != package.get("digest"):
+        _fail("package_identity_claim_mismatch", "N6 config and execution manifest claim different package identities")
+    coherence = (
+        (config.get("source_commit"), subject.get("commit")),
+        (config.get("repo_root"), subject.get("repo_root")),
+        (config.get("package_root"), package.get("root")),
+        (config.get("runtime_root"), resources.get("runtime_root")),
+        (config.get("legacy_runtime_root"), resources.get("legacy_runtime_root")),
+        (config.get("production_activation"), resources.get("production_activation")),
+        (config.get("native_code_root"), native_host.get("code_root")),
+        (config.get("native_code_digest"), package.get("native_code_digest")),
+        (config.get("interpreter_identity"), package.get("interpreter_identity")),
+        (config.get("browser_extension_id"), browser_extension.get("extension_id")),
+        (config.get("native_host_name"), native_host.get("name")),
+        (config.get("protocol_generation"), package.get("protocol_generation")),
+    )
+    if any(left != right for left, right in coherence):
+        _fail("package_execution_binding_mismatch", "N6 config and execution manifest bind different execution subjects")
+    config["package_digest"] = "<COMPOUND-IDENTITY>"
+    package["digest"] = "<COMPOUND-IDENTITY>"
+    return config, execution
+
+
 def package_digest(root: str | Path) -> str:
-    records = _package_files(Path(root).expanduser().absolute())
+    path = Path(root).expanduser().absolute()
+    records = _package_files(path)
     if not records:
         _fail("package_empty", "N6 rehearsal package contains no immutable files")
-    return _sha(_json_bytes({"schema": N6_PACKAGE_SCHEMA, "version": N6_PACKAGE_VERSION, "files": records}))
+    config, execution = _normalized_execution_documents(path)
+    return _sha(_json_bytes({
+        "schema": N6_PACKAGE_SCHEMA,
+        "version": N6_PACKAGE_VERSION,
+        "files": records,
+        "native_config": config,
+        "execution_manifest": execution,
+    }))
+
+
+def interpreter_identity(executable: str | Path) -> dict[str, Any]:
+    """Attest the selected external interpreter without claiming its stdlib."""
+
+    path = Path(executable).expanduser().absolute()
+    if not path.is_file():
+        _fail("interpreter_unavailable", "selected N6 Python executable is unavailable")
+    probe_source = (
+        "import json,os,platform,sys,sysconfig;"
+        "print(json.dumps({'executable':os.path.abspath(sys.executable),"
+        "'implementation':sys.implementation.name,'version':platform.python_version(),"
+        "'cache_tag':sys.implementation.cache_tag,'platform':platform.platform(),"
+        "'prefix':os.path.abspath(sys.prefix),'base_prefix':os.path.abspath(sys.base_prefix),"
+        "'stdlib_path':os.path.abspath(sysconfig.get_paths()['stdlib'])},sort_keys=True,separators=(',',':')))"
+    )
+    try:
+        completed = subprocess.run(
+            [str(path), "-I", "-S", "-c", probe_source],
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        observed = json.loads(completed.stdout) if completed.returncode == 0 else None
+        executable_digest = _sha(path.read_bytes())
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        raise N6RehearsalError("interpreter_unavailable", "selected N6 Python identity could not be observed") from exc
+    if not isinstance(observed, dict):
+        _fail("interpreter_unavailable", "selected N6 Python identity probe failed")
+    identity = {
+        "schema": N6_INTERPRETER_SCHEMA,
+        "ownership": "EXTERNAL_NOT_PACKAGE_OWNED",
+        "attestation_scope": "EXECUTABLE_BYTES_AND_RUNTIME_METADATA",
+        "executable_path": str(path),
+        "executable_digest": executable_digest,
+        "implementation": observed.get("implementation"),
+        "version": observed.get("version"),
+        "cache_tag": observed.get("cache_tag"),
+        "platform": observed.get("platform"),
+        "prefix": observed.get("prefix"),
+        "base_prefix": observed.get("base_prefix"),
+        "stdlib_path": observed.get("stdlib_path"),
+        "stdlib_ownership": "EXTERNAL_NOT_PACKAGE_OWNED",
+        "stdlib_bytes_digest": "NOT_ATTESTED",
+    }
+    identity["identity_digest"] = semantic_digest(identity)
+    return identity
 
 
 def _native_code_records(root: Path) -> list[dict[str, Any]]:
@@ -196,6 +293,7 @@ class N6RehearsalConfig:
     native_code_root: Path
     native_code_digest: str
     package_digest: str
+    interpreter_identity: Mapping[str, Any]
     browser_extension_id: str
     native_host_name: str = N6_NATIVE_HOST_NAME
     protocol_generation: str = N6_PROTOCOL_GENERATION
@@ -204,7 +302,7 @@ class N6RehearsalConfig:
     def from_json(cls, path: str | Path) -> "N6RehearsalConfig":
         source = Path(path).expanduser().absolute()
         document = _read_json(source)
-        expected = {"schema", "repo_root", "runtime_root", "legacy_runtime_root", "source_commit", "package_root", "native_code_root", "native_code_digest", "package_digest", "browser_extension_id", "native_host_name", "protocol_generation", "production_activation"}
+        expected = {"schema", "repo_root", "runtime_root", "legacy_runtime_root", "source_commit", "package_root", "native_code_root", "native_code_digest", "package_digest", "interpreter_identity", "browser_extension_id", "native_host_name", "protocol_generation", "production_activation"}
         if set(document) != expected or document.get("schema") != N6_CONFIG_SCHEMA:
             _fail("config_invalid", "N6 config fields/schema differ")
         if document.get("production_activation") is not False:
@@ -225,7 +323,14 @@ class N6RehearsalConfig:
         source_commit = _text(document["source_commit"], "source_commit", max_bytes=40)
         if len(source_commit) != 40 or any(char not in "0123456789abcdef" for char in source_commit):
             _fail("config_invalid", "source_commit is not an exact Git object")
-        return cls(repo, runtime, legacy, source_commit, package, native_code, _text(document["native_code_digest"], "native_code_digest"), _text(document["package_digest"], "package_digest"), _text(document["browser_extension_id"], "browser_extension_id"), _text(document["native_host_name"], "native_host_name"), _text(document["protocol_generation"], "protocol_generation"))
+        interpreter = _mapping(document["interpreter_identity"], "interpreter_identity")
+        if interpreter.get("schema") != N6_INTERPRETER_SCHEMA or interpreter.get("ownership") != "EXTERNAL_NOT_PACKAGE_OWNED":
+            _fail("config_invalid", "N6 external interpreter identity is invalid")
+        identity = dict(interpreter)
+        claimed_identity_digest = identity.pop("identity_digest", None)
+        if claimed_identity_digest != semantic_digest(identity):
+            _fail("config_invalid", "N6 external interpreter identity digest differs")
+        return cls(repo, runtime, legacy, source_commit, package, native_code, _text(document["native_code_digest"], "native_code_digest"), _text(document["package_digest"], "package_digest"), dict(interpreter), _text(document["browser_extension_id"], "browser_extension_id"), _text(document["native_host_name"], "native_host_name"), _text(document["protocol_generation"], "protocol_generation"))
 
 
 def _event_base(request: Mapping[str, Any]) -> tuple[str, str, str, str]:
@@ -260,6 +365,9 @@ class N6RehearsalService:
         self.native_code_digest = native_code_digest(config.native_code_root)
         if self.native_code_digest != config.native_code_digest:
             _fail("native_code_identity_mismatch", "N6 Native code digest differs from config")
+        self.interpreter_identity = interpreter_identity(sys.executable)
+        if self.interpreter_identity != dict(config.interpreter_identity):
+            _fail("interpreter_identity_mismatch", "running external Python differs from the package execution identity")
 
     def _open(self):
         existing = (self.config.runtime_root / "browser" / "outbox" / "anchor.json").is_file()
@@ -522,7 +630,7 @@ class N6RehearsalService:
         if package_id != N6_PACKAGE_SCHEMA or protocol != N6_PROTOCOL_GENERATION:
             _fail("protocol_mismatch", "N6 package/protocol identity differs")
         if event == "status":
-            return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": "READY", "package_digest": self.package_digest, "native_code_digest": self.native_code_digest, "browser_extension_id": self.identity["extension_id"], "native_host_name": N6_NATIVE_HOST_NAME, "protocol_generation": N6_PROTOCOL_GENERATION, "production_activation": False, "rehearsal_infrastructure": "ACTIVE_ONLY_WHEN_EXPLICIT_PACKAGE_LOADED", "production_runtime": "OFF", "production_writer": "OFF"}
+            return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": "READY", "package_digest": self.package_digest, "native_code_digest": self.native_code_digest, "interpreter_identity_digest": self.interpreter_identity["identity_digest"], "browser_extension_id": self.identity["extension_id"], "native_host_name": N6_NATIVE_HOST_NAME, "protocol_generation": N6_PROTOCOL_GENERATION, "production_activation": False, "rehearsal_infrastructure": "ACTIVE_ONLY_WHEN_EXPLICIT_PACKAGE_LOADED", "production_runtime": "OFF", "production_writer": "OFF"}
         payload = _mapping(request.get("payload"), "payload")
         if event == "submit_prompt":
             result = self._run_vertical(submission_key=_text(payload.get("submission_key"), "submission_key"), prompt=_text(payload.get("prompt"), "prompt", max_bytes=N6_MAX_PROMPT_BYTES), conversation_id=_text(payload.get("conversation_id"), "conversation_id"), profile_id=payload.get("profile_id") if isinstance(payload.get("profile_id"), str) else None)
@@ -547,14 +655,46 @@ class N6RehearsalService:
                 raw = {"schema": N6_EVENT_SCHEMA, "event": "assistant_capture", "submission_key": submission_key, "task_id": found["task_id"], "work_id": found["work_id"], "candidate_id": found["candidate_id"], "candidate_view_id": found["candidate_view_id"], "publication_id": publication.publication_id, "conversation_id": conversation_id, "profile_id": payload.get("profile_id"), "profile_attestation": "NOT_OBSERVABLE", "model": model, "reasoning": reasoning, "model_attestation": "OPERATOR_VISIBLE_ATTESTATION", "reasoning_attestation": "OPERATOR_VISIBLE_ATTESTATION", "started_at": started, "finished_at": finished, "timing_attestation": "BROWSER_CLOCK_OBSERVATION", "completion_observation": completion, "raw_answer": answer, "raw_answer_digest": _sha(answer.encode("utf-8"))}
                 request_id_value = _stable_id("n6-browser-answer", submission_key)
                 evidence = plane.evidence.record_observation(request_id=request_id_value, primary_subject_kind="N6_BROWSER_RUN", primary_subject_identity={"submission_key": submission_key, "task_id": found["task_id"], "work_id": found["work_id"], "publication_id": publication.publication_id}, candidate_view_id=found["candidate_view_id"], raw_observation=raw, checker_id=N6_CAPTURE_CHECKER_ID, checker_version=N6_CAPTURE_CHECKER_VERSION, checker_code_digest=semantic_digest({"schema": N6_EVENT_SCHEMA, "module": "bdb_vnext.n6_rehearsal"}), environment={"model": model, "reasoning": reasoning, "model_attestation": "OPERATOR_VISIBLE_ATTESTATION", "reasoning_attestation": "OPERATOR_VISIBLE_ATTESTATION", "profile_attestation": "NOT_OBSERVABLE", "surface": "normal-chatgpt-browser", "package_digest": self.package_digest, "protocol_generation": N6_PROTOCOL_GENERATION}, observation_started_at=started, observation_finished_at=finished, completeness="COMPLETE" if answer and completion == "DOM_TEXT_STABLE_AFTER_STREAM_END" else "INCOMPLETE", applicability="APPLICABLE" if model == "GPT-5.6 Sol" and reasoning == "Wysoki" else "INCONCLUSIVE", status="CAPTURED")
-                return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": "CAPTURED", "result": {"evidence_id": evidence.evidence_id, "raw_digest": evidence.raw_digest, "applicability": evidence.applicability, "completeness": evidence.completeness}}
+                return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": "CAPTURED", "result": {"evidence_id": evidence.evidence_id, "raw_digest": evidence.raw_digest, "raw_answer_digest": raw["raw_answer_digest"], "applicability": evidence.applicability, "completeness": evidence.completeness}}
             if event == "witness":
                 conversation_id = _text(payload.get("conversation_id"), "conversation_id")
                 if conversation_id != _task_conversation(found):
                     _fail("conversation_owner_mismatch", "Browser witness conversation differs from canonical Task ownership")
                 consumer_id = _stable_id("n6-browser", conversation_id)
                 marker = _text(payload.get("marker"), "marker")
-                binding = plane.publication.observe_presentation(publication_id=publication.publication_id, consumer_id=consumer_id, conversation_id=conversation_id, profile_id=payload.get("profile_id") if isinstance(payload.get("profile_id"), str) else None, marker=marker, result_digest=_text(payload.get("observed_result_digest"), "observed_result_digest"), composer_preserved=payload.get("composer_preserved") is not False, witness={"source": "chatgpt-dom-exact-publication", "observation": "EXACT_RESULT_VISIBLE", "observed_publication_id": _text(payload.get("observed_publication_id"), "observed_publication_id"), "observed_conversation_id": conversation_id, "observed_marker": _text(payload.get("observed_marker"), "observed_marker"), "observed_result_digest": _text(payload.get("observed_result_digest"), "observed_result_digest")})
+                capture_evidence_id = _text(payload.get("capture_evidence_id"), "capture_evidence_id")
+                capture = plane.evidence.get(capture_evidence_id)
+                if (
+                    capture is None
+                    or capture.request_id != _stable_id("n6-browser-answer", submission_key)
+                    or capture.checker_id != N6_CAPTURE_CHECKER_ID
+                    or capture.checker_version != N6_CAPTURE_CHECKER_VERSION
+                    or capture.primary_subject_kind != "N6_BROWSER_RUN"
+                    or capture.primary_subject_identity.get("submission_key") != submission_key
+                    or capture.primary_subject_identity.get("publication_id") != publication.publication_id
+                ):
+                    _fail("presentation_not_observed", "Browser witness lacks the exact canonical assistant capture")
+                binding = plane.publication.observe_presentation(
+                    publication_id=publication.publication_id,
+                    consumer_id=consumer_id,
+                    conversation_id=conversation_id,
+                    profile_id=payload.get("profile_id") if isinstance(payload.get("profile_id"), str) else None,
+                    marker=marker,
+                    result_digest=_text(payload.get("observed_result_digest"), "observed_result_digest"),
+                    composer_preserved=payload.get("composer_preserved") is not False,
+                    witness={
+                        "source": "chatgpt-assistant-dom-capture",
+                        "observation": "EXACT_CAPTURED_ASSISTANT_RESULT_VISIBLE",
+                        "observed_publication_id": _text(payload.get("observed_publication_id"), "observed_publication_id"),
+                        "observed_conversation_id": conversation_id,
+                        "observed_result_digest": _text(payload.get("observed_result_digest"), "observed_result_digest"),
+                        "capture_evidence_id": capture_evidence_id,
+                        "observed_answer_digest": _text(payload.get("observed_answer_digest"), "observed_answer_digest"),
+                        "dom_author_role": payload.get("dom_author_role"),
+                        "completion_observation": payload.get("completion_observation"),
+                        "extension_ui_ancestor": payload.get("extension_ui_ancestor"),
+                    },
+                )
                 return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": "PRESENTED", "result": binding.as_dict()}
             if event == "unknown":
                 conversation_id = _text(payload.get("conversation_id"), "conversation_id")
@@ -623,7 +763,7 @@ def run_native_host(config_path: str | Path, *, input_stream: BinaryIO | None = 
 def _js_background() -> str:
     return r'''"use strict";
 const HOST = "com.bartosz.dev_bridge.vnext";
-const PACKAGE = "bdb-vnext-n6-rehearsal-package-v1";
+const PACKAGE = "bdb-vnext-n6-rehearsal-package-v2";
 const PROTOCOL = "bdb-vnext-n6-protocol-v1";
 let port = null;
 const pending = new Map();
@@ -670,6 +810,7 @@ const PENDING_RESUME_SCHEMA = "bdb-vnext-n6-pending-resume-v1";
 const RESUMED_BINDING_SCHEMA = "bdb-vnext-n6-resumed-binding-v1";
 const PROTOCOL = "bdb-vnext-n6-protocol-v1";
 const SCENARIO_BY_PROMPT = new Map(Object.entries(__N6_SCENARIOS__));
+const PROMPT_BY_SCENARIO = new Map([...SCENARIO_BY_PROMPT].map(([prompt, scenario]) => [scenario, prompt]));
 let active = null;
 let resumedBinding = null;
 let panel = null;
@@ -693,28 +834,32 @@ function canonicalConversationId(href = location.href) {
   } catch (_) {}
   return null;
 }
-function assistantText() {
-  const nodes = [...document.querySelectorAll("[data-message-author-role='assistant']")];
-  const node = nodes.at(-1);
-  const direct = node ? canonicalPrompt(node.innerText || node.textContent || "") : "";
-  if (direct) return direct;
-  const turns = [...document.querySelectorAll("section[data-testid^='conversation-turn-'][data-turn='assistant']")];
-  const turn = turns.at(-1);
-  if (!turn) return "";
-  const message = turn.querySelector("[data-message-author-role='assistant']");
-  return canonicalPrompt((message && (message.innerText || message.textContent)) || "");
+function assistantObservation(expectedPrompt) {
+  const turns = [...document.querySelectorAll("[data-message-author-role]")];
+  let promptIndex = -1;
+  for (let index = 0; index < turns.length; index += 1) {
+    const node = turns[index];
+    if (node.dataset.messageAuthorRole === "user" && canonicalPrompt(node.innerText || node.textContent || "") === expectedPrompt) promptIndex = index;
+  }
+  if (promptIndex < 0) throw new Error("N6 exact frozen user prompt is unavailable in the canonical conversation DOM");
+  const following = turns.slice(promptIndex + 1);
+  if (following.length !== 1 || following[0].dataset.messageAuthorRole !== "assistant") throw new Error("N6 assistant answer is stale, ambiguous, or not the exact response to the frozen prompt");
+  const node = following[0];
+  if (node.closest("[data-bdb-n6-panel]")) throw new Error("N6 extension UI cannot witness its own presentation");
+  const text = canonicalPrompt(node.innerText || node.textContent || "");
+  return text ? {node, text} : null;
 }
 function streamInProgress() {
   return Boolean(document.querySelector("[data-testid='stop-button'],button[aria-label*='Stop'],button[aria-label*='Zatrzymaj']"));
 }
-async function stableAssistantObservation() {
+async function stableAssistantObservation(expectedPrompt) {
   if (streamInProgress()) throw new Error("N6 assistant response is still streaming");
-  const first = assistantText();
+  const first = assistantObservation(expectedPrompt);
   if (!first) throw new Error("N6 visible assistant answer is unavailable");
   await new Promise((resolve) => setTimeout(resolve, 750));
-  const second = assistantText();
-  if (streamInProgress() || first !== second) throw new Error("N6 assistant response completion is not stable");
-  return {raw_answer: second, completion_observation: "DOM_TEXT_STABLE_AFTER_STREAM_END"};
+  const second = assistantObservation(expectedPrompt);
+  if (streamInProgress() || !second || first.text !== second.text) throw new Error("N6 assistant response completion is not stable");
+  return {raw_answer: second.text, completion_observation: "DOM_TEXT_STABLE_AFTER_STREAM_END", dom_author_role: "assistant", extension_ui_ancestor: false};
 }
 function userMessages() { return [...document.querySelectorAll("[data-message-author-role='user']")].map((node) => canonicalPrompt(node.innerText || node.textContent || "")); }
 function send(event, payload) { return chrome.runtime.sendMessage({type: "N6_BROWSER_EVENT", event, payload}); }
@@ -780,17 +925,9 @@ function showPanel(result) {
   const publicationId = result.publication_id || (result.publication && result.publication.publication_id) || "unknown";
   const presentation = result.presentation || {};
   write("Task " + (result.task_id || "unknown") + "\nPublication " + publicationId + "\nOwner " + active.conversation_id);
-  if (presentation.publication_id === publicationId && typeof presentation.rendered_label === "string") {
-    const rendered = document.createElement("div");
-    rendered.dataset.bdbN6Publication = publicationId;
-    rendered.dataset.bdbN6Marker = presentation.marker;
-    rendered.dataset.bdbN6ResultDigest = presentation.result_digest;
-    rendered.textContent = presentation.rendered_label;
-    panel.append(rendered);
-  }
   if (active.conversation_id === currentConversation) {
-    addButton("Capture latest answer", async () => { const conversation = ownedConversation(); const observed = await stableAssistantObservation(); const model = prompt("Visible ChatGPT model (exactly as shown):", "GPT-5.6 Sol"); if (model === null) throw new Error("N6 model attestation cancelled"); const reasoning = prompt("Visible reasoning setting (exactly as shown):", "Wysoki"); if (reasoning === null) throw new Error("N6 reasoning attestation cancelled"); const now = new Date().toISOString(); const response = await send("capture_answer", {submission_key: active.submission_key, conversation_id: conversation, profile_id: null, raw_answer: observed.raw_answer, completion_observation: observed.completion_observation, model, reasoning, started_at: active.started_at, finished_at: now}); write(JSON.stringify(response.response || response)); });
-    addButton("Witness presentation", async () => { const conversation = ownedConversation(); const selector = "[data-bdb-n6-publication='" + CSS.escape(publicationId) + "']"; const rendered = document.querySelector(selector); if (!rendered || rendered.dataset.bdbN6Marker !== presentation.marker || rendered.dataset.bdbN6ResultDigest !== presentation.result_digest || rendered.textContent !== presentation.rendered_label) throw new Error("N6 exact Publication identity is not physically present in the canonical conversation DOM"); const response = await send("witness", {submission_key: active.submission_key, conversation_id: conversation, marker: rendered.dataset.bdbN6Marker, observed_marker: rendered.dataset.bdbN6Marker, observed_publication_id: rendered.dataset.bdbN6Publication, observed_result_digest: rendered.dataset.bdbN6ResultDigest, composer_preserved: true}); write(JSON.stringify(response.response || response)); });
+    addButton("Capture latest answer", async () => { const conversation = ownedConversation(); const expectedPrompt = PROMPT_BY_SCENARIO.get(active.scenario_id); if (!expectedPrompt) throw new Error("N6 frozen prompt identity is unavailable"); const observed = await stableAssistantObservation(expectedPrompt); const model = prompt("Visible ChatGPT model (exactly as shown):", "GPT-5.6 Sol"); if (model === null) throw new Error("N6 model attestation cancelled"); const reasoning = prompt("Visible reasoning setting (exactly as shown):", "Wysoki"); if (reasoning === null) throw new Error("N6 reasoning attestation cancelled"); const now = new Date().toISOString(); const response = await send("capture_answer", {submission_key: active.submission_key, conversation_id: conversation, profile_id: null, raw_answer: observed.raw_answer, completion_observation: observed.completion_observation, model, reasoning, started_at: active.started_at, finished_at: now}); const captured = response && response.response && response.response.result; if (!response.ok || !captured || typeof captured.evidence_id !== "string" || typeof captured.raw_answer_digest !== "string") throw new Error("N6 canonical assistant capture failed"); active = {...active, capture_evidence_id: captured.evidence_id, capture_answer_digest: captured.raw_answer_digest}; await persistOwner(active); write(JSON.stringify(response.response)); });
+    addButton("Witness presentation", async () => { const conversation = ownedConversation(); if (typeof active.capture_evidence_id !== "string" || typeof active.capture_answer_digest !== "string") throw new Error("N6 exact assistant capture is required before presentation witness"); const expectedPrompt = PROMPT_BY_SCENARIO.get(active.scenario_id); if (!expectedPrompt) throw new Error("N6 frozen prompt identity is unavailable"); const observed = await stableAssistantObservation(expectedPrompt); const observedAnswerDigest = "sha256:" + await digest(observed.raw_answer); if (observedAnswerDigest !== active.capture_answer_digest) throw new Error("N6 visible assistant answer differs from the exact captured result"); const response = await send("witness", {submission_key: active.submission_key, conversation_id: conversation, marker: presentation.marker, observed_publication_id: publicationId, observed_result_digest: presentation.result_digest, capture_evidence_id: active.capture_evidence_id, observed_answer_digest: observedAnswerDigest, dom_author_role: observed.dom_author_role, completion_observation: observed.completion_observation, extension_ui_ancestor: observed.extension_ui_ancestor, composer_preserved: true}); write(JSON.stringify(response.response || response)); });
     addButton("Mark presentation UNKNOWN", async () => { const conversation = ownedConversation(); const response = await send("unknown", {submission_key: active.submission_key, conversation_id: conversation, reason: "manual_dom_witness_not_observed"}); write(JSON.stringify(response.response || response)); });
     addButton("Prepare new-chat Resume", setPendingResume);
   } else {
@@ -976,7 +1113,8 @@ def prepare_package(*, repo_root: str | Path, output: str | Path, runtime_root: 
     source_view = RepositoryResource.from_path(repo, repository_id="bdb-vnext-n6-subject").resolve_committed(commit)
     config_path = output_path / "native-config.json"
     py = Path(python_executable or sys.executable).expanduser().absolute()
-    config = {"schema": N6_CONFIG_SCHEMA, "repo_root": str(repo), "runtime_root": str(runtime), "legacy_runtime_root": str(legacy), "source_commit": commit, "package_root": str(output_path), "package_digest": "pending", "browser_extension_id": identity["extension_id"], "native_host_name": N6_NATIVE_HOST_NAME, "protocol_generation": N6_PROTOCOL_GENERATION, "production_activation": False}
+    external_interpreter = interpreter_identity(py)
+    config = {"schema": N6_CONFIG_SCHEMA, "repo_root": str(repo), "runtime_root": str(runtime), "legacy_runtime_root": str(legacy), "source_commit": commit, "package_root": str(output_path), "package_digest": "pending", "interpreter_identity": external_interpreter, "browser_extension_id": identity["extension_id"], "native_host_name": N6_NATIVE_HOST_NAME, "protocol_generation": N6_PROTOCOL_GENERATION, "production_activation": False}
     native_code = output_path / "native-code"
     native_code.mkdir(parents=True, exist_ok=True)
     archive = subprocess.run(["git", "-C", str(repo), "archive", "--format=tar", commit, "bdb_vnext", "bdb_shared", "pyproject.toml"], shell=False, capture_output=True, check=True)
@@ -1003,11 +1141,16 @@ def prepare_package(*, repo_root: str | Path, output: str | Path, runtime_root: 
         "Write-Output ('Registered dedicated N6 Native Host: ' + $key)\n",
         encoding="utf-8",
     )
+    execution = {"schema": N6_EXECUTION_SCHEMA, "package": {"schema": N6_PACKAGE_SCHEMA, "version": N6_PACKAGE_VERSION, "digest": "pending", "root": str(output_path), "native_code_digest": config["native_code_digest"], "interpreter_identity": external_interpreter, "browser_extension": {"component_id": identity["component_id"], "extension_id": identity["extension_id"], "semantic_digest": identity["semantic_digest"], "manifest": str(browser / "manifest.json")}, "native_host": {"name": N6_NATIVE_HOST_NAME, "manifest": str(native_manifest_path), "path": str(native_path), "registration_script": str(register_script), "executable_ready": shim is not None, "code_root": str(native_code)}, "protocol_generation": N6_PROTOCOL_GENERATION}, "subject": {"repository": "bdb-vnext-n6-subject", "repo_root": str(repo), "branch": "bdb-vnext", "commit": commit, "tree": tree, "view_id": source_view.view_id}, "resources": {"runtime_root": str(runtime), "control_db": str(runtime / "control" / "control.db"), "legacy_runtime_root": str(legacy), "production_activation": False, "rehearsal_infrastructure": "ACTIVE_ONLY_WHEN_EXPLICIT_PACKAGE_LOADED", "legacy_mutation": False}, "prompts": list(N6_TASKS), "manual_gate": "USER_OPERATED_ONLY"}
+    execution_path = output_path / "execution_manifest.json"
+    _write_json(execution_path, execution)
     package = package_digest(output_path)
     config["package_digest"] = package
+    execution["package"]["digest"] = package
     _write_json(config_path, config)
-    execution = {"schema": N6_EXECUTION_SCHEMA, "package": {"schema": N6_PACKAGE_SCHEMA, "version": N6_PACKAGE_VERSION, "digest": package, "root": str(output_path), "native_code_digest": config["native_code_digest"], "browser_extension": {"component_id": identity["component_id"], "extension_id": identity["extension_id"], "semantic_digest": identity["semantic_digest"], "manifest": str(browser / "manifest.json")}, "native_host": {"name": N6_NATIVE_HOST_NAME, "manifest": str(native_manifest_path), "path": str(native_path), "registration_script": str(register_script), "executable_ready": shim is not None, "code_root": str(native_code)}, "protocol_generation": N6_PROTOCOL_GENERATION}, "subject": {"repository": "bdb-vnext-n6-subject", "repo_root": str(repo), "branch": "bdb-vnext", "commit": commit, "tree": tree, "view_id": source_view.view_id}, "resources": {"runtime_root": str(runtime), "control_db": str(runtime / "control" / "control.db"), "legacy_runtime_root": str(legacy), "production_activation": False, "rehearsal_infrastructure": "ACTIVE_ONLY_WHEN_EXPLICIT_PACKAGE_LOADED", "legacy_mutation": False}, "prompts": list(N6_TASKS), "manual_gate": "USER_OPERATED_ONLY"}
-    _write_json(output_path / "execution_manifest.json", execution)
+    _write_json(execution_path, execution)
+    if package_digest(output_path) != package:
+        _fail("package_identity_unstable", "N6 compound execution identity is not deterministic")
     return execution
 
 

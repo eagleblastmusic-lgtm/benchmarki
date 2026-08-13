@@ -43,11 +43,13 @@ Navigation index only. The linked documents are authoritative records in their s
 ## Current vNext implementation status (fresh observed living status)
 
 - N1 / N2 / N3 / N4 / N5 / N6 = `DONE` (N6 remains build-only rehearsal infrastructure).
-- Post-N6 findings repair = `LOCAL REPAIR COMPLETE; AUTOMATED_BROWSER_EVIDENCE BLOCKED_BY_AUTOMATION_ENVIRONMENT; HUMAN_BROWSER_EVIDENCE PASS; DETERMINISTIC RECONCILIATION PASS`.
+- Independent Sol post-repair audit = `MATERIAL_REPAIR_REQUIRED_BEFORE_STRATEGIC_PLANNING`; it invalidated the previous final closure and established `AUD-018` through `AUD-023` as concrete implementation blockers.
+- Post-Sol blocker repair = `LOCAL IMPLEMENTATION + ADVERSARIAL VALIDATION COMPLETE`; the exact fresh package is a post-commit artifact and remains subject to the human gate and independent re-audit.
 - Production runtime / writer / activation = `OFF / OFF / OFF`.
 - Isolated rehearsal infrastructure = `ACTIVE ONLY WHEN EXPLICIT PACKAGE LOADED`; loaded test extension and registered test Native Host are not production activation.
-- N6 package/native identity = exact package-bound code and manifest identity; no live-checkout import is authoritative for the packaged Native path.
+- N6 package/native identity = compound execution identity binds package bytes, native config, execution manifest and an honest separately owned external-interpreter identity; no live-checkout import is authoritative for packaged Native semantics.
 - M3 Task, M4 WorkItem, N2 Candidate, N3 Evidence/Disposition, and N4 Publication remain separate canonical authorities with no Browser/UI writer.
 - Legacy = `OPERATIONAL + ISOLATED + UNTOUCHED`.
 - M5+ / successor roadmap = `NOT STARTED`; no successor EU is started by this repair pass.
-- Final N6 closure = human minimal re-gate PASS on the exact package/HEAD; automated evidence remains explicitly blocked by the controlled-Chrome environment and is not represented as human evidence.
+- Previous human N6 evidence = `HISTORICAL / INVALIDATED FOR NEW PACKAGE` because it is bound to pre-repair `6370d3f...`; fresh human Browser re-gate, deterministic runtime reconciliation and final independent Sol acceptance are `PENDING`.
+- Strategic synthesis readiness = `NOT_READY_FOR_CHATGPT_WORK_STRATEGIC_SYNTHESIS` until all pending gates above pass.

@@ -13,7 +13,9 @@ from bdb_vnext.n4_publication import N4Error
 from bdb_vnext.n6_rehearsal import (
     N6_CONFIG_SCHEMA,
     N6_EVENT_SCHEMA,
+    N6_EXECUTION_SCHEMA,
     N6_NATIVE_REQUEST_SCHEMA,
+    N6_PACKAGE_SCHEMA,
     N6_PROTOCOL_GENERATION,
     N6RehearsalError,
     N6RehearsalConfig,
@@ -44,7 +46,7 @@ def test_prepare_package_isolated_and_status_ready(tmp_path: Path, monkeypatch) 
         python_executable=sys.executable,
     )
 
-    assert execution["schema"] == "bdb-vnext-n6-execution-manifest-v1"
+    assert execution["schema"] == N6_EXECUTION_SCHEMA
     assert execution["manual_gate"] == "USER_OPERATED_ONLY"
     assert execution["resources"]["production_activation"] is False
     assert execution["resources"]["legacy_mutation"] is False
@@ -61,6 +63,9 @@ def test_prepare_package_isolated_and_status_ready(tmp_path: Path, monkeypatch) 
     assert parsed.native_code_root == package_root / "native-code"
     assert parsed.native_code_root != repo
     assert parsed.native_code_digest == execution["package"]["native_code_digest"] == native_code_digest(parsed.native_code_root)
+    assert parsed.interpreter_identity == execution["package"]["interpreter_identity"]
+    assert parsed.interpreter_identity["ownership"] == "EXTERNAL_NOT_PACKAGE_OWNED"
+    assert parsed.interpreter_identity["stdlib_bytes_digest"] == "NOT_ATTESTED"
     assert "PYTHONPATH" not in (package_root / "native-host.py").read_text(encoding="utf-8")
     assert "native-code" in (package_root / "native-host.py").read_text(encoding="utf-8")
 
@@ -69,11 +74,12 @@ def test_prepare_package_isolated_and_status_ready(tmp_path: Path, monkeypatch) 
         "schema": N6_NATIVE_REQUEST_SCHEMA,
         "request_id": "n6:test:status",
         "event": "status",
-        "package_id": "bdb-vnext-n6-rehearsal-package-v1",
+        "package_id": N6_PACKAGE_SCHEMA,
         "protocol_generation": N6_PROTOCOL_GENERATION,
         "payload": {},
     })
     assert response["status"] == "READY"
+    assert response["interpreter_identity_digest"] == parsed.interpreter_identity["identity_digest"]
     assert response["production_activation"] is False
 
     packet_path = write_manual_packet(execution, package_root / "MANUAL_BROWSER_REHEARSAL_PACKET.md")
@@ -94,6 +100,60 @@ def test_native_package_code_does_not_follow_live_checkout(tmp_path: Path, monke
     assert bundled
     assert config.native_code_root.is_relative_to(package_root)
     assert config.native_code_digest == execution["package"]["native_code_digest"]
+
+
+def test_compound_package_identity_binds_config_manifest_and_external_interpreter(tmp_path: Path, monkeypatch) -> None:
+    repo = Path(__file__).parents[1].absolute()
+    package_root = tmp_path / "package"
+    monkeypatch.setattr("bdb_vnext.n6_rehearsal._build_shim", lambda *args, **kwargs: None)
+    execution = prepare_package(
+        repo_root=repo,
+        output=package_root,
+        runtime_root=tmp_path / "runtime",
+        legacy_runtime_root=tmp_path / "legacy",
+        source_commit="HEAD",
+        python_executable=sys.executable,
+    )
+    original = execution["package"]["digest"]
+    native_before = native_code_digest(package_root / "native-code")
+    config_path = package_root / "native-config.json"
+    manifest_path = package_root / "execution_manifest.json"
+    original_config = json.loads(config_path.read_text(encoding="utf-8"))
+    original_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    changed_config = dict(original_config)
+    changed_config["runtime_root"] = str((tmp_path / "different-runtime").absolute())
+    changed_config["package_digest"] = "pending"
+    changed_execution = json.loads(json.dumps(original_manifest))
+    changed_execution["resources"]["runtime_root"] = changed_config["runtime_root"]
+    changed_execution["package"]["digest"] = "pending"
+    config_path.write_text(json.dumps(changed_config, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    manifest_path.write_text(json.dumps(changed_execution, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    assert package_digest(package_root) != original
+    changed_digest = package_digest(package_root)
+    changed_config["package_digest"] = changed_digest
+    changed_execution["package"]["digest"] = changed_digest
+    config_path.write_text(json.dumps(changed_config, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    manifest_path.write_text(json.dumps(changed_execution, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    changed_service = N6RehearsalService(N6RehearsalConfig.from_json(config_path))
+    assert changed_service.package_digest == changed_digest != original
+
+    config_path.write_text(json.dumps(original_config, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    manifest_path.write_text(json.dumps(original_manifest, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    changed_manifest = dict(original_manifest)
+    changed_manifest["manual_gate"] = "MUTATED_EXECUTION_SEMANTICS"
+    manifest_path.write_text(json.dumps(changed_manifest, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    assert package_digest(package_root) != original
+    assert native_code_digest(package_root / "native-code") == native_before
+
+    manifest_path.write_text(json.dumps(original_manifest, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    assert package_digest(package_root) == original
+    changed_claim = dict(original_config)
+    changed_claim["package_digest"] = "sha256:" + "0" * 64
+    config_path.write_text(json.dumps(changed_claim, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    with pytest.raises(N6RehearsalError) as claim_failure:
+        N6RehearsalService(N6RehearsalConfig.from_json(config_path))
+    assert claim_failure.value.code == "package_identity_claim_mismatch"
 
 
 def test_n6_vertical_reconciles_lost_admission_and_publication_responses(tmp_path: Path, monkeypatch) -> None:
@@ -124,6 +184,87 @@ def test_n6_vertical_reconciles_lost_admission_and_publication_responses(tmp_pat
     assert replay["work"]["work"]["disposition"] == "FINISHED"
 
 
+def test_n6_presentation_requires_independent_exact_assistant_capture(tmp_path: Path, monkeypatch) -> None:
+    repo = Path(__file__).parents[1].absolute()
+    subject = tmp_path / "subject"
+    subject.mkdir()
+    shutil.copytree(repo / "bdb_vnext", subject / "bdb_vnext", ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(repo / "bdb_shared", subject / "bdb_shared", ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copy2(repo / "pyproject.toml", subject / "pyproject.toml")
+    subprocess.run(["git", "init", "-q", "-b", "main", str(subject)], check=True)
+    subprocess.run(["git", "-C", str(subject), "config", "user.name", "N6"], check=True)
+    subprocess.run(["git", "-C", str(subject), "config", "user.email", "n6@example.invalid"], check=True)
+    subprocess.run(["git", "-C", str(subject), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(subject), "commit", "-qm", "n6 subject"], check=True)
+    package_root = tmp_path / "package"
+    monkeypatch.setattr("bdb_vnext.n6_rehearsal._build_shim", lambda *args, **kwargs: None)
+    prepare_package(repo_root=subject, output=package_root, runtime_root=tmp_path / "runtime", legacy_runtime_root=tmp_path / "legacy", source_commit="HEAD", python_executable=sys.executable)
+    service = N6RehearsalService(N6RehearsalConfig.from_json(package_root / "native-config.json"))
+    submission_key = "n6:assistant-witness"
+    conversation_id = "chatgpt-conversation:n6-assistant-witness"
+    vertical = service._run_vertical(submission_key=submission_key, prompt="RUN-05", conversation_id=conversation_id, profile_id=None)
+    presentation = vertical["presentation"]
+
+    def request(event: str, payload: dict[str, object]) -> dict[str, object]:
+        return service.handle({
+            "schema": N6_NATIVE_REQUEST_SCHEMA,
+            "request_id": f"n6:test:{event}",
+            "event": event,
+            "package_id": N6_PACKAGE_SCHEMA,
+            "protocol_generation": N6_PROTOCOL_GENERATION,
+            "payload": {"submission_key": submission_key, **payload},
+        })
+
+    with pytest.raises(N6RehearsalError) as self_witness:
+        request("witness", {
+            "conversation_id": conversation_id,
+            "marker": presentation["marker"],
+            "observed_publication_id": vertical["publication_id"],
+            "observed_result_digest": presentation["result_digest"],
+            "capture_evidence_id": "extension-panel-marker",
+            "observed_answer_digest": "sha256:" + "0" * 64,
+            "dom_author_role": "assistant",
+            "completion_observation": "DOM_TEXT_STABLE_AFTER_STREAM_END",
+            "extension_ui_ancestor": False,
+            "composer_preserved": True,
+        })
+    assert self_witness.value.code == "presentation_not_observed"
+
+    answer = "Actual stable ChatGPT assistant result for the canonical RUN-05 conversation."
+    captured = request("capture_answer", {
+        "conversation_id": conversation_id,
+        "profile_id": None,
+        "raw_answer": answer,
+        "completion_observation": "DOM_TEXT_STABLE_AFTER_STREAM_END",
+        "model": "GPT-5.6 Sol",
+        "reasoning": "Wysoki",
+        "started_at": "2026-08-13T00:00:00Z",
+        "finished_at": "2026-08-13T00:00:10Z",
+    })
+    capture = captured["result"]
+    assert isinstance(capture, dict)
+
+    exact_payload = {
+        "conversation_id": conversation_id,
+        "marker": presentation["marker"],
+        "observed_publication_id": vertical["publication_id"],
+        "observed_result_digest": presentation["result_digest"],
+        "capture_evidence_id": capture["evidence_id"],
+        "observed_answer_digest": capture["raw_answer_digest"],
+        "dom_author_role": "assistant",
+        "completion_observation": "DOM_TEXT_STABLE_AFTER_STREAM_END",
+        "extension_ui_ancestor": False,
+        "composer_preserved": True,
+    }
+    with pytest.raises(N4Error) as stale_answer:
+        request("witness", {**exact_payload, "observed_answer_digest": "sha256:" + "1" * 64})
+    assert stale_answer.value.code == "presentation_not_observed"
+    witnessed = request("witness", exact_payload)
+    assert witnessed["status"] == "PRESENTED"
+    retained = request("unknown", {"conversation_id": conversation_id, "reason": "post-witness uncertainty request"})
+    assert retained["status"] == "PRESENTED"
+
+
 def test_n6_capture_contract_preserves_model_and_reasoning_attestation() -> None:
     source = {"schema": N6_EVENT_SCHEMA, "model": "GPT-5.6 Sol", "reasoning": "Wysoki"}
     assert source["model"] == "GPT-5.6 Sol"
@@ -152,8 +293,18 @@ def test_content_script_uses_deterministic_restart_safe_submission_and_resume() 
     assert "N6 conversation ownership conflict" in script
     assert "N6 Browser conversation ownership changed" in script
     assert "canonicalConversationId() !== expectedConversation" in script
-    assert "section[data-testid^='conversation-turn-'][data-turn='assistant']" in script
+    assert 'querySelectorAll("[data-message-author-role]")' in script
+    assert "PROMPT_BY_SCENARIO" in script
+    assert "following.length !== 1" in script
+    assert "assistant answer is stale, ambiguous" in script
     assert "N6 visible assistant answer is unavailable" in script
+    assert "N6 extension UI cannot witness its own presentation" in script
+    assert "capture_evidence_id" in script
+    assert "capture_answer_digest" in script
+    assert "EXACT_CAPTURED_ASSISTANT_RESULT_VISIBLE" not in script  # canonicalized by Native, never self-asserted by the panel
+    assert "data-bdb-n6-publication" not in script
+    assert "dataset.bdbN6Publication" not in script
+    assert "closest(\"[data-bdb-n6-panel]\")" in script
     assert "N6 reasoning attestation cancelled" in script
     assert "Resume in this chat" in script
     assert "crypto.randomUUID" not in script

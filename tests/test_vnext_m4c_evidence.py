@@ -172,6 +172,33 @@ def test_evaluator_versions_are_immutable_and_superseded_explicitly(tmp_path: Pa
         assert history["evaluations"][0]["result"] == "PASS"
 
 
+def test_evaluation_rechecks_candidate_applicability_inside_writer_transaction(tmp_path: Path, monkeypatch) -> None:
+    with _stack(tmp_path) as (_runtime, _subject_path, candidate_store, evidence, candidate):
+        original = candidate_store.verify_current_applicability
+        calls = 0
+
+        def invalidate_after_preflight(candidate_id: str, *, connection=None):
+            nonlocal calls
+            calls += 1
+            record = original(candidate_id, connection=connection)
+            if calls == 1:
+                workspace = Path(candidate_store.get(candidate_id).workspace_root)  # type: ignore[union-attr]
+                (workspace / "one.txt").write_bytes(b"stale during evaluation\n")
+                invalidated = candidate_store.invalidate_if_changed(candidate_id)
+                assert invalidated.state == "INVALIDATED"
+            return record
+
+        monkeypatch.setattr(candidate_store, "verify_current_applicability", invalidate_after_preflight)
+        checker = MinimumCandidateChecker(Path(__file__).parents[1], evidence)
+        evaluation = checker.check(candidate, request_id="m4c:check:interleaved-applicability")
+        assert calls >= 2
+        assert evaluation.result == "INCONCLUSIVE"
+        assert evaluation.applicability == "INCONCLUSIVE"
+        current = evidence.current_disposition(evaluation.evidence_id)
+        assert current is not None and current.disposition == "INCONCLUSIVE"
+        assert evidence.query(evaluation.evidence_id)["effective_disposition"] == "INCONCLUSIVE"
+
+
 def test_missing_rq2_raw_is_a_typed_gap_not_reconstructed_evidence(tmp_path: Path) -> None:
     runtime = tmp_path / "runtime"
     runtime.mkdir()

@@ -33,7 +33,9 @@ from bdb_vnext.repo_view import CommittedRepoView, RepoTreeEntry, RepositoryReso
 CANDIDATE_SCHEMA = "bdb-vnext-candidate-v1"
 CANDIDATE_PATH_SCHEMA = "bdb-vnext-candidate-path-v1"
 CANDIDATE_EFFECT_SCHEMA = "bdb-vnext-candidate-effect-v1"
-CANDIDATE_VIEW_SCHEMA = "bdb-vnext-candidate-repo-view-v1"
+CANDIDATE_VIEW_SCHEMA_V1 = "bdb-vnext-candidate-repo-view-v1"
+CANDIDATE_VIEW_SCHEMA = "bdb-vnext-candidate-repo-view-v2"
+CANDIDATE_BASE_AUTHORITY_SCHEMA = "bdb-vnext-candidate-base-git-bundle-v1"
 CANDIDATE_KIND = "CANDIDATE"
 CANDIDATE_EFFECT_CLASS = "EXACT_REPLACEMENT_V1"
 CANDIDATE_PREPARED = "PREPARED"
@@ -282,6 +284,7 @@ class CandidateRepoView:
     candidate_tree_digest: str
     changed_paths: tuple[str, ...]
     path_bindings: tuple[CandidatePathPlan, ...]
+    base_authority: Mapping[str, Any]
     manifest_digest: str
     workspace_generation: str
     config_digest: str
@@ -289,13 +292,15 @@ class CandidateRepoView:
     _base_view: CommittedRepoView | None = field(repr=False, compare=False, default=None)
 
     def __post_init__(self) -> None:
-        if self.schema != CANDIDATE_VIEW_SCHEMA or self.kind != CANDIDATE_KIND or self._store is None:
+        if self.schema not in {CANDIDATE_VIEW_SCHEMA_V1, CANDIDATE_VIEW_SCHEMA} or self.kind != CANDIDATE_KIND or self._store is None:
             _fail("candidate_view_invalid", "unsupported Candidate RepoView")
+        if self.schema == CANDIDATE_VIEW_SCHEMA and not self.base_authority:
+            _fail("candidate_base_authority_missing", "v2 Candidate RepoView requires archived base authority")
         if semantic_digest(self._identity_payload()) != self.manifest_digest:
             _fail("candidate_view_integrity_failure", "Candidate view identity digest differs")
 
     def _identity_payload(self) -> dict[str, Any]:
-        return {
+        identity = {
             "schema": self.schema,
             "kind": self.kind,
             "candidate_id": self.candidate_id,
@@ -312,6 +317,9 @@ class CandidateRepoView:
             "workspace_generation": self.workspace_generation,
             "config_digest": self.config_digest,
         }
+        if self.schema == CANDIDATE_VIEW_SCHEMA:
+            identity["base_authority"] = dict(self.base_authority)
+        return identity
 
     @property
     def view_id(self) -> str:
@@ -391,6 +399,7 @@ class CandidateStore:
         _safe_root(self.workspace_root)
         self.generation = _id(generation, field="workspace_generation")
         self.work_kernel = work_kernel
+        self._verified_base_archives: set[str] = set()
         self._connection = self.bindings._connection
         configure_connection(self._connection)
         ensure_identity(self._connection)
@@ -500,26 +509,152 @@ class CandidateStore:
             _fail("candidate_base_mismatch", "reopened Candidate base differs from the prepared exact RepoView")
         return view
 
-    def verify_current_applicability(self, candidate_id: str) -> CandidateRecord:
+    def _archive_base_authority(self, workspace: Path, view: CommittedRepoView) -> dict[str, Any]:
+        """Publish a self-contained exact Git object authority into Content CAS."""
+
+        with tempfile.TemporaryDirectory(prefix="bdb-m4b-base-") as directory:
+            bundle = Path(directory) / "base.bundle"
+            completed = subprocess.run(
+                ["git", "-C", str(workspace), "bundle", "create", str(bundle), "HEAD"],
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            if completed.returncode != 0 or not bundle.is_file():
+                raise CandidateError(
+                    "candidate_base_archive_failed",
+                    "exact Candidate base Git objects could not be archived",
+                    details={"returncode": completed.returncode},
+                )
+            raw = bundle.read_bytes()
+        try:
+            ref = make_content_ref("application/x-git-bundle", CANDIDATE_BASE_AUTHORITY_SCHEMA, raw)
+            self.content_store.publish(ref, raw)
+        except Exception as exc:
+            raise CandidateError("candidate_base_archive_failed", "exact Candidate base archive could not enter Content CAS") from exc
+        return {
+            "schema": CANDIDATE_BASE_AUTHORITY_SCHEMA,
+            "kind": "GIT_BUNDLE_CAS_V1",
+            "content_ref": ref.as_dict(),
+            "repository_id": view.repository_id,
+            "repository_identity_digest": view.repository_identity_digest,
+            "object_format": view.object_format,
+            "commit_oid": view.commit_oid,
+            "tree_oid": view.tree_oid,
+        }
+
+    def _verify_base_authority(self, record: CandidateRecord) -> Mapping[str, Any]:
+        document = record.candidate_view_id
+        if not isinstance(document, Mapping) or document.get("schema") != CANDIDATE_VIEW_SCHEMA:
+            _fail("candidate_base_authority_missing", "sealed Candidate lacks restorable exact Git authority")
+        authority = document.get("base_authority")
+        if not isinstance(authority, Mapping) or authority.get("schema") != CANDIDATE_BASE_AUTHORITY_SCHEMA or authority.get("kind") != "GIT_BUNDLE_CAS_V1":
+            _fail("candidate_base_authority_missing", "sealed Candidate base authority is incomplete")
+        base = record.base_view
+        repository = base.get("repository")
+        expected = {
+            "repository_id": repository.get("repository_id") if isinstance(repository, Mapping) else None,
+            "repository_identity_digest": repository.get("identity_digest") if isinstance(repository, Mapping) else None,
+            "object_format": repository.get("object_format") if isinstance(repository, Mapping) else None,
+            "commit_oid": base.get("commit_oid"),
+            "tree_oid": base.get("tree_oid"),
+        }
+        if any(authority.get(key) != value for key, value in expected.items()):
+            _fail("candidate_base_mismatch", "Candidate base archive binding differs from the prepared RepoView")
+        try:
+            ref = ContentRef.from_mapping(authority.get("content_ref"))
+            raw = self.content_store.resolve(ref)
+        except Exception as exc:
+            raise CandidateError("candidate_base_unavailable", "Candidate base Git authority is unavailable from Content CAS") from exc
+        if ref.raw_digest in self._verified_base_archives:
+            return authority
+        with tempfile.TemporaryDirectory(prefix="bdb-m4b-verify-") as directory:
+            root = Path(directory)
+            bundle = root / "base.bundle"
+            repository_root = root / "repository.git"
+            bundle.write_bytes(raw)
+            cloned = subprocess.run(
+                ["git", "clone", "--bare", str(bundle), str(repository_root)],
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            if cloned.returncode != 0:
+                _fail("candidate_base_unavailable", "Candidate base Git bundle failed exact object verification")
+            commit = subprocess.run(
+                ["git", "-C", str(repository_root), "rev-parse", f"{expected['commit_oid']}^{{commit}}"],
+                shell=False, capture_output=True, text=True, timeout=10, check=False,
+            )
+            tree = subprocess.run(
+                ["git", "-C", str(repository_root), "rev-parse", f"{expected['commit_oid']}^{{tree}}"],
+                shell=False, capture_output=True, text=True, timeout=10, check=False,
+            )
+            object_format = subprocess.run(
+                ["git", "-C", str(repository_root), "rev-parse", "--show-object-format"],
+                shell=False, capture_output=True, text=True, timeout=10, check=False,
+            )
+            if (
+                commit.returncode != 0
+                or commit.stdout.strip() != expected["commit_oid"]
+                or tree.returncode != 0
+                or tree.stdout.strip() != expected["tree_oid"]
+                or object_format.returncode != 0
+                or object_format.stdout.strip() != expected["object_format"]
+            ):
+                _fail("candidate_base_mismatch", "Candidate base Git bundle contains different exact objects")
+        self._verified_base_archives.add(ref.raw_digest)
+        return authority
+
+    def _verify_view_document(self, record: CandidateRecord) -> Mapping[str, Any]:
+        document = record.candidate_view_id
+        if not isinstance(document, Mapping) or record.manifest_digest is None:
+            _fail("candidate_view_integrity_failure", "sealed Candidate manifest is missing")
+        identity = dict(document)
+        view_id = identity.pop("view_id", None)
+        manifest_digest = identity.pop("manifest_digest", None)
+        if view_id != record.manifest_digest or manifest_digest != record.manifest_digest or semantic_digest(identity) != record.manifest_digest:
+            _fail("candidate_view_integrity_failure", "sealed Candidate manifest digest differs")
+        return document
+
+    def verify_current_applicability(self, candidate_id: str, *, connection: sqlite3.Connection | None = None) -> CandidateRecord:
         """Positively prove the current sealed Candidate before consumption.
 
         This is the canonical read-side applicability boundary used by
-        Evidence, Publication and recovery.  Missing retained workspaces are
-        valid because the immutable manifest + CAS + exact committed base are
-        the post-seal authority; a retained workspace, when present, must still
-        equal that authority exactly.
+        Evidence, Publication and recovery. Missing or later-edited retained
+        workspaces do not redefine a v2 sealed Candidate: its manifest, exact
+        Git bundle and content CAS are the post-seal authority. Explicit
+        workspace observation may invalidate that subject, but consumers never
+        derive applicability from mutable filesystem bytes on their own.
         """
 
-        record = self.get(candidate_id)
+        record = self.get(candidate_id, connection=connection)
         if record is None:
             _fail("candidate_missing", "Candidate does not exist")
         if record.state != CANDIDATE_SEALED:
             _fail("candidate_not_sealed", "Candidate has no sealed immutable view")
-        base_view = self._bound_base_view(record)
-        current = self.invalidate_if_changed(record.candidate_id, base_view=base_view)
-        if current.state != CANDIDATE_SEALED:
-            _fail("candidate_invalidated", "Candidate no longer matches its immutable sealed view")
-        return self.verify_sealed(record.candidate_id, base_view=base_view)
+        document = self._verify_view_document(record)
+        if document.get("schema") == CANDIDATE_VIEW_SCHEMA:
+            self._verify_base_authority(record)
+            for plan in record.planned_paths:
+                try:
+                    before = self.content_store.resolve(plan.before_ref)
+                    after = self.content_store.resolve(plan.after_ref)
+                except Exception as exc:
+                    raise CandidateError("candidate_content_unavailable", "sealed Candidate CAS content is unavailable") from exc
+                if _digest(before) != plan.before_digest or _digest(after) != plan.after_digest:
+                    _fail("candidate_content_integrity_failure", "sealed Candidate content digest differs")
+            return record
+        if document.get("schema") == CANDIDATE_VIEW_SCHEMA_V1:
+            base_view = self._bound_base_view(record)
+            current = self.invalidate_if_changed(record.candidate_id, base_view=base_view)
+            if current.state != CANDIDATE_SEALED:
+                _fail("candidate_invalidated", "Candidate no longer matches its immutable sealed view")
+            return self.verify_sealed(record.candidate_id, base_view=base_view)
+        _fail("candidate_view_integrity_failure", "sealed Candidate view schema is unsupported")
 
     def retention_inventory(self) -> tuple[dict[str, Any], ...]:
         """Classify retained Candidate workspaces without deleting evidence."""
@@ -537,7 +672,16 @@ class CandidateStore:
                     count = 0
                 if count:
                     references.append(table)
-            if references:
+            current = self.get(str(candidate_id)) if manifest_digest else None
+            archive_backed = bool(
+                current
+                and isinstance(current.candidate_view_id, Mapping)
+                and current.candidate_view_id.get("schema") == CANDIDATE_VIEW_SCHEMA
+                and isinstance(current.candidate_view_id.get("base_authority"), Mapping)
+            )
+            if references and archive_backed:
+                classification = "canonically_referenced_archive_backed"
+            elif references:
                 classification = "canonically_referenced"
             elif state in {CANDIDATE_PREPARED, CANDIDATE_POSSIBLE, CANDIDATE_APPLIED, CANDIDATE_UNKNOWN, CANDIDATE_DIVERGED}:
                 classification = "recovery_required"
@@ -545,7 +689,7 @@ class CandidateStore:
                 classification = "disposable_candidate"
             else:
                 classification = "historical_evidence"
-            inventory.append({"candidate_id": str(candidate_id), "state": str(state), "workspace_root": str(workspace_root), "manifest_digest": manifest_digest, "classification": classification, "referenced_by": references})
+            inventory.append({"candidate_id": str(candidate_id), "state": str(state), "workspace_root": str(workspace_root), "manifest_digest": manifest_digest, "classification": classification, "workspace_recovery_required": not archive_backed, "referenced_by": references})
         return tuple(inventory)
 
     def _base_entries(self, view: CommittedRepoView) -> dict[str, tuple[str, str]]:
@@ -610,8 +754,9 @@ class CandidateStore:
             int(row[6]), int(row[7]), int(row[8]), int(row[9]),
         )
 
-    def _record_row(self, row: tuple[Any, ...]) -> CandidateRecord:
-        paths = tuple(self._plan_from_row(item) for item in self._connection.execute(
+    def _record_row(self, row: tuple[Any, ...], *, connection: sqlite3.Connection | None = None) -> CandidateRecord:
+        source = connection or self._connection
+        paths = tuple(self._plan_from_row(item) for item in source.execute(
             "SELECT candidate_id,path,before_digest,after_digest,before_ref_json,after_ref_json,before_mode,after_mode,before_size,after_size FROM m4b_candidate_paths WHERE candidate_id=? ORDER BY path",
             (row[0],),
         ).fetchall())
@@ -623,12 +768,13 @@ class CandidateStore:
             paths, json.loads(bytes(row[15]).decode("utf-8")), view, str(row[17]) if row[17] else None,
         )
 
-    def get(self, candidate_id: str) -> CandidateRecord | None:
-        row = self._connection.execute(
+    def get(self, candidate_id: str, *, connection: sqlite3.Connection | None = None) -> CandidateRecord | None:
+        source = connection or self._connection
+        row = source.execute(
             "SELECT candidate_id,effect_id,work_id,task_id,state,effect_certainty,base_view_json,workspace_root,workspace_generation,config_digest,lease_id,fence,base_tree_digest,planned_tree_digest,observed_tree_digest,observed_json,candidate_view_json,manifest_digest FROM m4b_candidate_effects WHERE candidate_id=?",
             (_id(candidate_id, field="candidate_id"),),
         ).fetchone()
-        return self._record_row(row) if row else None
+        return self._record_row(row, connection=source) if row else None
 
     def create_workspace(self, *, candidate_id: str, base_view: CommittedRepoView) -> Path:
         candidate_id = _id(candidate_id, field="candidate_id")
@@ -896,9 +1042,12 @@ class CandidateStore:
         document = record.manifest_digest
         if record.state != CANDIDATE_SEALED or not document or not isinstance(record.candidate_view_id, Mapping):
             _fail("candidate_not_sealed", "Candidate has no immutable sealed view")
+        schema = record.candidate_view_id.get("schema")
+        if schema not in {CANDIDATE_VIEW_SCHEMA_V1, CANDIDATE_VIEW_SCHEMA}:
+            _fail("candidate_view_integrity_failure", "persisted Candidate view schema is unsupported")
         base = record.base_view
         expected_document = {
-            "schema": CANDIDATE_VIEW_SCHEMA,
+            "schema": schema,
             "kind": CANDIDATE_KIND,
             "candidate_id": record.candidate_id,
             "effect_id": record.effect_id,
@@ -916,13 +1065,15 @@ class CandidateStore:
             "view_id": document,
             "manifest_digest": document,
         }
+        if schema == CANDIDATE_VIEW_SCHEMA:
+            expected_document["base_authority"] = record.candidate_view_id.get("base_authority")
         if dict(record.candidate_view_id) != expected_document:
             _fail("candidate_view_integrity_failure", "persisted Candidate view differs from its sealed record")
         return CandidateRepoView(
-            CANDIDATE_VIEW_SCHEMA, CANDIDATE_KIND, record.candidate_id, record.effect_id, record.work_id, record.task_id,
+            str(schema), CANDIDATE_KIND, record.candidate_id, record.effect_id, record.work_id, record.task_id,
             str(base["repository"]["repository_id"]), str(base["view_id"]), str(base["commit_oid"]), str(base["tree_oid"]),
             record.observed_tree_digest or record.planned_tree_digest, tuple(item.path for item in record.planned_paths), record.planned_paths,
-            document, record.workspace_generation, record.config_digest, self, view,
+            dict(record.candidate_view_id["base_authority"]) if schema == CANDIDATE_VIEW_SCHEMA else {}, document, record.workspace_generation, record.config_digest, self, view,
         )
 
     def seal(self, candidate_id: str, *, base_view: CommittedRepoView | None = None, fault: str | None = None) -> tuple[CandidateRecord, CandidateRepoView]:
@@ -949,6 +1100,7 @@ class CandidateStore:
             self._connection.execute("UPDATE m4b_candidate_effects SET state=?,effect_certainty=?,observed_tree_digest=? WHERE candidate_id=?", (CANDIDATE_DIVERGED, "UNKNOWN", observed_digest, record.candidate_id))
             self._connection.commit()
             _fail("candidate_tree_mismatch", "observed Candidate tree is not exactly the planned tree", details={"planned": planned_digest, "observed": observed_digest})
+        base_authority = self._archive_base_authority(workspace, base_view)
         identity = {
             "schema": CANDIDATE_VIEW_SCHEMA,
             "kind": CANDIDATE_KIND,
@@ -963,6 +1115,7 @@ class CandidateStore:
             "candidate_tree_digest": observed_digest,
             "changed_paths": [item.path for item in record.planned_paths],
             "path_bindings": [item.as_dict() for item in record.planned_paths],
+            "base_authority": base_authority,
             "workspace_generation": record.workspace_generation,
             "config_digest": record.config_digest,
         }
@@ -1063,5 +1216,5 @@ class CandidateStore:
 __all__ = [
     "CANDIDATE_EFFECT_CLASS", "CANDIDATE_EFFECT_SCHEMA", "CANDIDATE_KIND", "CANDIDATE_PREPARED", "CANDIDATE_POSSIBLE",
     "CANDIDATE_OBSERVED", "CANDIDATE_SEALED", "CANDIDATE_DIVERGED", "CANDIDATE_UNKNOWN", "CANDIDATE_INVALIDATED",
-    "CANDIDATE_SCHEMA", "CANDIDATE_VIEW_SCHEMA", "CandidateError", "CandidatePathPlan", "CandidateRecord", "CandidateRepoView", "CandidateStore",
+    "CANDIDATE_SCHEMA", "CANDIDATE_VIEW_SCHEMA", "CANDIDATE_VIEW_SCHEMA_V1", "CANDIDATE_BASE_AUTHORITY_SCHEMA", "CandidateError", "CandidatePathPlan", "CandidateRecord", "CandidateRepoView", "CandidateStore",
 ]

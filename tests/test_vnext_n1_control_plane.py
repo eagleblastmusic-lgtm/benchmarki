@@ -17,7 +17,7 @@ from bdb_vnext.composition import VNextLayout, build_vnext_composition_manifest
 from bdb_vnext.content_store import DurableBindingStore, TypedContextFragment, make_content_ref
 from bdb_vnext.m3a_submission import ShadowSubmissionRequest
 from bdb_vnext.provider_root import VNextCompositionRoot
-from bdb_vnext.control_store import ControlStoreError
+from bdb_vnext.control_store import CONTROL_DB_USER_VERSION, CONTROL_PREVIOUS_USER_VERSION, ControlStoreError
 from bdb_vnext.m4a_work_kernel import M4aError, WorkKernelStore
 
 
@@ -96,7 +96,7 @@ def test_gate_b_root_constructs_typed_control_plane_without_activation(tmp_path:
         assert plane.admission.authority.control_database_path == plane.work_kernel.database_path
         assert plane.work_kernel.writer_id == "m4a-vnext-work-kernel-writer"
         with sqlite3.connect(plane.work_kernel.database_path) as connection:
-            assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+            assert connection.execute("PRAGMA user_version").fetchone()[0] == CONTROL_DB_USER_VERSION
 
 
 def test_control_schema_version_and_layout_fail_closed(tmp_path: Path) -> None:
@@ -108,6 +108,49 @@ def test_control_schema_version_and_layout_fail_closed(tmp_path: Path) -> None:
         connection.commit()
     with pytest.raises(ControlStoreError, match="user_version"):
         root.open_control_plane()
+
+
+@pytest.mark.parametrize(
+    ("damage", "expected_code"),
+    (("missing_table", "control_layout_missing"), ("changed_column", "control_layout_mismatch")),
+)
+def test_current_control_layout_is_rejected_before_implicit_repair(tmp_path: Path, damage: str, expected_code: str) -> None:
+    root, _runtime, _legacy = _manifest(tmp_path)
+    with root.open_control_plane() as plane:
+        database = plane.work_kernel.database_path
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == CONTROL_DB_USER_VERSION
+        if damage == "missing_table":
+            connection.execute("DROP TABLE m4a_work_items")
+        else:
+            connection.execute("ALTER TABLE m4a_work_items RENAME COLUMN disposition TO damaged_disposition")
+        connection.commit()
+        before_schema = tuple(connection.execute("SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"))
+        before_version = connection.execute("PRAGMA user_version").fetchone()[0]
+    with pytest.raises(ControlStoreError) as caught:
+        root.open_control_plane()
+    assert caught.value.code == expected_code
+    with sqlite3.connect(database) as connection:
+        after_schema = tuple(connection.execute("SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"))
+        assert after_schema == before_schema
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == before_version
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(m4a_work_items)")}
+        if damage == "missing_table":
+            assert columns == set()
+        else:
+            assert "damaged_disposition" in columns and "disposition" not in columns
+
+
+def test_intact_previous_control_version_is_validated_then_migrated(tmp_path: Path) -> None:
+    root, _runtime, _legacy = _manifest(tmp_path)
+    with root.open_control_plane() as plane:
+        database = plane.work_kernel.database_path
+    with sqlite3.connect(database) as connection:
+        connection.execute(f"PRAGMA user_version={CONTROL_PREVIOUS_USER_VERSION}")
+        connection.commit()
+    with root.open_control_plane(existing_outbox=True) as plane:
+        with sqlite3.connect(plane.work_kernel.database_path) as connection:
+            assert connection.execute("PRAGMA user_version").fetchone()[0] == CONTROL_DB_USER_VERSION
 
 
 def test_gate_d_v2_backup_restores_semantic_state_and_reachable_content(tmp_path: Path) -> None:
@@ -297,6 +340,8 @@ def test_gate_c_maps_known_legacy_terminal_rows_and_rejects_ambiguous_cancelled(
         connection.execute(
             "INSERT INTO m4a_runs VALUES ('n1:legacy-run', 'n1:legacy-terminal', 'FINISHED', 'FAILED', 'POSSIBLE', 'lease', 1, 1, 2)"
         )
+        connection.execute("DROP TABLE IF EXISTS vnext_control_layout")
+        connection.execute("PRAGMA user_version=0")
         connection.commit()
         migrated = WorkKernelStore.open(runtime, task_authority=plane.admission.authority, legacy_root=legacy)
         try:
@@ -329,6 +374,8 @@ def test_gate_c_maps_known_legacy_terminal_rows_and_rejects_ambiguous_cancelled(
             "INSERT INTO m4a_work_items VALUES (?, ?, 'inspect', 'CANCELLED', 1, 1, 1, 1.0, 1.0)",
             ("n1:legacy-cancelled", accepted2.task_id),
         )
+        connection.execute("DROP TABLE IF EXISTS vnext_control_layout")
+        connection.execute("PRAGMA user_version=0")
         connection.commit()
         with pytest.raises(M4aError) as failure:
             WorkKernelStore.open(runtime2, task_authority=plane2.admission.authority, legacy_root=legacy2)

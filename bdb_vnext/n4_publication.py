@@ -351,7 +351,8 @@ class PublicationStore:
             _fail("conversation_binding_required", "Browser consumers require an exact conversation binding")
         return cid, kind, conv, _optional_text(profile_id, "profile_id"), _text(generation, "generation")
 
-    def _validate_lineage(self, *, task_id: str, work_id: str, intent_revision_id: str, candidate_id: str | None, candidate_view_id: str | None, evidence_id: str | None, evaluation_id: str | None, disposition_id: str | None) -> None:
+    def _validate_lineage(self, *, task_id: str, work_id: str, intent_revision_id: str, candidate_id: str | None, candidate_view_id: str | None, evidence_id: str | None, evaluation_id: str | None, disposition_id: str | None, connection: sqlite3.Connection | None = None) -> None:
+        source = connection or self._connection
         task = self.task_authority.task(_text(task_id, "task_id"))
         if task is None:
             _fail("task_missing", "Publication requires an accepted canonical Task")
@@ -364,33 +365,34 @@ class PublicationStore:
             _fail("candidate_binding_incomplete", "Candidate identity requires both candidate_id and candidate_view_id")
         if candidate_id is not None:
             try:
-                record = self.candidate_store.verify_current_applicability(_text(candidate_id, "candidate_id"))
+                record = self.candidate_store.verify_current_applicability(
+                    _text(candidate_id, "candidate_id"), connection=source
+                )
             except Exception as exc:
                 _fail("candidate_not_applicable", "Publication Candidate is not currently applicable", details={"cause": getattr(exc, "code", type(exc).__name__)})
             if record.state != CANDIDATE_SEALED or record.manifest_digest != candidate_view_id:
                 _fail("candidate_binding_mismatch", "Publication Candidate binding is not the exact sealed view")
         if evidence_id is not None:
-            evidence = self.evidence_store.get(_text(evidence_id, "evidence_id"))
-            if evidence is None:
-                _fail("evidence_missing", "Publication evidence binding does not exist")
-            if candidate_view_id is not None and evidence.candidate_view_id != candidate_view_id:
-                _fail("evidence_binding_mismatch", "Publication Evidence is bound to a different Candidate view")
-            evidence_query = self.evidence_store.query(evidence_id)
-            current_document = evidence_query.get("current_disposition")
-            current = self.evidence_store.current_disposition(evidence_id)
-            if not (evidence_query.get("applicability", {}).get("applicable") is True and evidence_query.get("effective_disposition") in {"PASS", "FAIL"}):
-                # A freshly sealed Candidate may be valid while the checker
-                # result was made INCONCLUSIVE by an interrupted observation.
-                # Surface that distinction instead of hiding it behind a
-                # generic publication failure.
-                _fail("evidence_not_applicable", "Publication Evidence has no positively applicable current disposition")
-            if current_document is None or current is None:
-                _fail("disposition_missing", "Publication Evidence has no current disposition")
-            if disposition_id is not None and (current is None or current.disposition_id != disposition_id):
-                _fail("disposition_binding_mismatch", "Publication disposition is not the current Evidence disposition")
-            if evaluation_id is not None:
-                if current.evaluation_id != evaluation_id:
-                    _fail("evaluation_binding_mismatch", "Publication evaluation is not the current positively applicable Evidence evaluation")
+            try:
+                self.evidence_store.authorize_current(
+                    _text(evidence_id, "evidence_id"),
+                    candidate_view_id=candidate_view_id,
+                    evaluation_id=evaluation_id,
+                    disposition_id=disposition_id,
+                    connection=source,
+                )
+            except Exception as exc:
+                code = getattr(exc, "code", "evidence_not_applicable")
+                if code in {
+                    "evidence_missing", "evidence_binding_mismatch",
+                    "evaluation_binding_mismatch", "disposition_binding_mismatch",
+                }:
+                    _fail(code, str(exc))
+                _fail(
+                    "evidence_not_applicable",
+                    "Publication Evidence has no positively applicable current disposition",
+                    details={"cause": code},
+                )
 
     def _identity(self, *, task_id: str, work_id: str, intent_revision_id: str, result_ref: ContentRef, candidate_id: str | None, candidate_view_id: str | None, evidence_id: str | None, evaluation_id: str | None, disposition_id: str | None) -> dict[str, Any]:
         return {
@@ -444,6 +446,9 @@ class PublicationStore:
                 _fail("publication_conflict", "publication identity is already bound to different content")
             self.bind_consumer(publication_id=publication_id, consumer_id=consumer_id, consumer_kind=consumer_kind, conversation_id=conversation_id, profile_id=profile_id, generation=generation)
             return existing
+        # This is only an early diagnostic check. Canonical authorization is
+        # repeated after BEGIN IMMEDIATE below and only that locked check may
+        # authorize the durable Publication.
         self._validate_lineage(task_id=task_id, work_id=work_id, intent_revision_id=intent_revision_id, candidate_id=candidate_id, candidate_view_id=candidate_view_id, evidence_id=evidence_id, evaluation_id=evaluation_id, disposition_id=disposition_id)
         self.content_store.publish(ref, raw)
         created_at = _now()
@@ -451,6 +456,44 @@ class PublicationStore:
         binding_id = semantic_digest(binding_identity)
         self._connection.execute("BEGIN IMMEDIATE")
         try:
+            # Resolve request/publication replays only after acquiring the
+            # writer lock. This turns concurrent same/same into deterministic
+            # replay and same/request-different into a typed conflict.
+            locked_request = self._connection.execute(
+                "SELECT publication_id FROM n4_publications WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            if locked_request is not None:
+                record = self.get(str(locked_request[0]))
+                if record is None or record.publication_id != publication_id or record.result_ref != ref or record.consumer_id != consumer_id or record.consumer_kind != consumer_kind or record.conversation_id != conversation_id or record.profile_id != profile_id or record.generation != generation:
+                    _fail("publication_request_conflict", "request_id is already bound to different publication inputs")
+                self._connection.rollback()
+                return record
+            locked_publication = self.get(publication_id)
+            if locked_publication is not None:
+                if locked_publication.result_ref != ref:
+                    _fail("publication_conflict", "publication identity is already bound to different content")
+                self._connection.rollback()
+                self.bind_consumer(
+                    publication_id=publication_id,
+                    consumer_id=consumer_id,
+                    consumer_kind=consumer_kind,
+                    conversation_id=conversation_id,
+                    profile_id=profile_id,
+                    generation=generation,
+                )
+                return locked_publication
+            self._validate_lineage(
+                task_id=task_id,
+                work_id=work_id,
+                intent_revision_id=intent_revision_id,
+                candidate_id=candidate_id,
+                candidate_view_id=candidate_view_id,
+                evidence_id=evidence_id,
+                evaluation_id=evaluation_id,
+                disposition_id=disposition_id,
+                connection=self._connection,
+            )
             # Allocate the global publication sequence only after acquiring
             # the writer lock.  A pre-transaction MAX()+1 allowed two
             # connections to race and surface a raw UNIQUE error instead of
@@ -462,6 +505,22 @@ class PublicationStore:
             if fault == "before_commit":
                 _fail("publication_commit_interrupted", "publication interrupted before durable commit")
             self._connection.commit()
+        except sqlite3.IntegrityError as exc:
+            if self._connection.in_transaction:
+                self._connection.rollback()
+            replay_row = self._connection.execute(
+                "SELECT publication_id FROM n4_publications WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            if replay_row is not None:
+                replay = self.get(str(replay_row[0]))
+                if replay is not None and replay.publication_id == publication_id and replay.result_ref == ref and replay.consumer_id == consumer_id and replay.consumer_kind == consumer_kind and replay.conversation_id == conversation_id and replay.profile_id == profile_id and replay.generation == generation:
+                    return replay
+                _fail("publication_request_conflict", "request_id is already bound to different publication inputs")
+            raise N4Error(
+                "publication_identity_conflict",
+                "Publication identity conflicted with canonical Control DB state",
+            ) from exc
         except Exception:
             if self._connection.in_transaction:
                 self._connection.rollback()
@@ -581,13 +640,46 @@ class PublicationStore:
             _fail("presentation_digest_mismatch", "presentation witness result differs from Publication content")
         marker = _text(marker, "marker")
         observation = dict(witness or {})
+        capture_evidence_id = observation.get("capture_evidence_id")
+        if not isinstance(capture_evidence_id, str) or not capture_evidence_id:
+            _fail("presentation_not_observed", "PRESENTED requires exact captured assistant Evidence")
+        capture = self.evidence_store.get(capture_evidence_id)
+        if (
+            capture is None
+            or capture.primary_subject_kind != "N6_BROWSER_RUN"
+            or capture.completeness != "COMPLETE"
+            or capture.status != "CAPTURED"
+            or capture.primary_subject_identity.get("publication_id") != publication_id
+            or capture.primary_subject_identity.get("task_id") != pub.task_id
+            or capture.primary_subject_identity.get("work_id") != pub.work_id
+        ):
+            _fail("presentation_not_observed", "assistant Evidence is not bound to this exact Publication")
+        try:
+            captured_raw = json.loads(self.evidence_store.raw_observation(capture_evidence_id).decode("utf-8"))
+        except Exception as exc:
+            raise N4Error("presentation_not_observed", "captured assistant Evidence is unavailable") from exc
+        if not isinstance(captured_raw, Mapping):
+            _fail("presentation_not_observed", "captured assistant Evidence payload is invalid")
+        observed_answer_digest = observation.get("observed_answer_digest")
+        if (
+            captured_raw.get("event") != "assistant_capture"
+            or captured_raw.get("publication_id") != publication_id
+            or captured_raw.get("conversation_id") != binding.conversation_id
+            or captured_raw.get("completion_observation") != "DOM_TEXT_STABLE_AFTER_STREAM_END"
+            or captured_raw.get("raw_answer_digest") != observed_answer_digest
+        ):
+            _fail("presentation_not_observed", "visible assistant content differs from exact captured result Evidence")
         required_witness = {
-            "source": "chatgpt-dom-exact-publication",
-            "observation": "EXACT_RESULT_VISIBLE",
+            "source": "chatgpt-assistant-dom-capture",
+            "observation": "EXACT_CAPTURED_ASSISTANT_RESULT_VISIBLE",
             "observed_publication_id": publication_id,
             "observed_conversation_id": binding.conversation_id,
-            "observed_marker": marker,
             "observed_result_digest": pub.result_digest,
+            "capture_evidence_id": capture_evidence_id,
+            "observed_answer_digest": captured_raw.get("raw_answer_digest"),
+            "dom_author_role": "assistant",
+            "completion_observation": "DOM_TEXT_STABLE_AFTER_STREAM_END",
+            "extension_ui_ancestor": False,
         }
         if any(observation.get(key) != value for key, value in required_witness.items()):
             _fail("presentation_not_observed", "PRESENTED requires a positive exact-result DOM observation")
@@ -620,15 +712,20 @@ class PublicationStore:
         return self.get_binding(publication_id, binding.consumer_id, generation=binding.generation)  # type: ignore[return-value]
 
     def mark_unknown(self, *, publication_id: str, consumer_id: str, reason: str, generation: str | None = None) -> ConsumerBinding:
-        binding = self.get_binding(publication_id, _text(consumer_id, "consumer_id"), generation=generation or self.generation)
-        if binding is None:
-            _fail("consumer_binding_missing", "consumer is not bound to this Publication")
-        if binding.presentation == PRESENTED:
-            return binding
-        _text(reason, "reason")
+        consumer_id = _text(consumer_id, "consumer_id")
+        generation = generation or self.generation
+        reason = _text(reason, "reason")
         self._connection.execute("BEGIN IMMEDIATE")
         try:
-            self._connection.execute("UPDATE n4_consumer_bindings SET presentation=?,presentation_reason=?,updated_at=? WHERE binding_id=?", (UNKNOWN, _text(reason, "reason"), _now(), binding.binding_id))
+            # Presentation is monotonic for one binding. Re-read only after the
+            # writer lock so a concurrent UNKNOWN cannot overwrite PRESENTED.
+            binding = self.get_binding(publication_id, consumer_id, generation=generation)
+            if binding is None:
+                _fail("consumer_binding_missing", "consumer is not bound to this Publication")
+            if binding.presentation == PRESENTED:
+                self._connection.rollback()
+                return binding
+            self._connection.execute("UPDATE n4_consumer_bindings SET presentation=?,presentation_reason=?,updated_at=? WHERE binding_id=?", (UNKNOWN, reason, _now(), binding.binding_id))
             self._connection.commit()
         except Exception:
             if self._connection.in_transaction:

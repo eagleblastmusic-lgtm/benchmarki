@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from bdb_shared.evidence import canonical_json_bytes, semantic_digest
 from bdb_vnext.candidate import (
     CANDIDATE_DIVERGED,
     CANDIDATE_INVALIDATED,
@@ -20,6 +21,7 @@ from bdb_vnext.candidate import (
 )
 from bdb_vnext.control_store import read_identity
 from bdb_vnext.bootstrap import create_coordinated_backup, restore_backup, verify_backup
+from bdb_vnext.content_store import ContentRef
 from bdb_vnext.m3a_submission import ShadowSubmissionRequest
 from bdb_vnext.m3c_admission import open_vnext_admission_composition
 from bdb_vnext.m4a_work_kernel import WorkKernelStore
@@ -196,7 +198,7 @@ def test_unfinished_effect_can_be_adopted_only_by_current_fence(tmp_path: Path) 
 
 
 def test_schema_documents_are_closed_and_control_identity_is_unified(tmp_path: Path) -> None:
-    schema_names = ["bdb-vnext-m4b-candidate-v1.schema.json", "bdb-vnext-candidate-repo-view-v1.schema.json"]
+    schema_names = ["bdb-vnext-m4b-candidate-v1.schema.json", "bdb-vnext-candidate-repo-view-v1.schema.json", "bdb-vnext-candidate-repo-view-v2.schema.json"]
     for name in schema_names:
         document = json.loads((Path(__file__).parents[1] / "schemas" / name).read_text(encoding="utf-8"))
         assert document["$schema"].endswith("2020-12/schema")
@@ -224,6 +226,12 @@ def test_sealed_candidate_manifest_and_cas_survive_cold_restore(tmp_path: Path) 
             required_control_schema=1, source_is_quiesced=True, include_control_identity=True,
         )
         verified = verify_backup(backup.path)
+        assert verified.path == backup.path
+        inventory = next(item for item in store.retention_inventory() if item["candidate_id"] == prepared.candidate_id)
+        assert inventory["classification"] == "historical_evidence"
+        assert inventory["workspace_recovery_required"] is False
+        _remove_candidate_worktree(subject, workspace)
+        assert not workspace.exists()
         restored = tmp_path / "restored"
         restore_backup(backup.path, restored, authority_root=tmp_path / "authority", legacy_runtime_root=tmp_path / "legacy", forbidden_roots=(tmp_path / "runtime",))
         reopened = CandidateStore(restored)
@@ -232,11 +240,45 @@ def test_sealed_candidate_manifest_and_cas_survive_cold_restore(tmp_path: Path) 
             assert record is not None and record.manifest_digest == sealed.manifest_digest
             assert record.state == CANDIDATE_SEALED
             assert record.candidate_view_id is not None
-            restored_view = reopened.get_view(prepared.candidate_id, view)
-            assert restored_view.read_bytes("one.txt") == b"backup\n"
+            assert reopened.verify_current_applicability(prepared.candidate_id).manifest_digest == sealed.manifest_digest
+            authority = record.candidate_view_id["base_authority"]
+            base_ref = ContentRef.from_mapping(authority["content_ref"])
+            reopened.content_store.object_path(base_ref).unlink()
+            reopened._verified_base_archives.clear()
+            with pytest.raises(CandidateError) as caught:
+                reopened.verify_current_applicability(prepared.candidate_id)
+            assert caught.value.code == "candidate_base_unavailable"
         finally:
             reopened.close()
-        _remove_candidate_worktree(subject, workspace)
+
+
+def test_historical_v1_candidate_view_remains_explicitly_readable(tmp_path: Path) -> None:
+    with _stack(tmp_path) as (_subject_path, view, _kernel, store, work_id, task_id, lease):
+        workspace = store.create_workspace(candidate_id="candidate:v1-compat", base_view=view)
+        prepared = store.prepare(
+            candidate_id="candidate:v1-compat", work_id=work_id, task_id=task_id,
+            lease_id=lease.lease_id, fence=lease.fence, base_view=view,
+            workspace_root=workspace, replacements={"one.txt": b"v1-compatible\n"},
+        )
+        store.apply(prepared.candidate_id)
+        sealed, _candidate = store.seal(prepared.candidate_id, base_view=view)
+        document = dict(sealed.candidate_view_id)
+        document.pop("base_authority")
+        document.pop("view_id")
+        document.pop("manifest_digest")
+        document["schema"] = "bdb-vnext-candidate-repo-view-v1"
+        v1_digest = semantic_digest(document)
+        document["view_id"] = v1_digest
+        document["manifest_digest"] = v1_digest
+        store._connection.execute(
+            "UPDATE m4b_candidate_effects SET candidate_view_json=?,manifest_digest=? WHERE candidate_id=?",
+            (canonical_json_bytes(document), v1_digest, prepared.candidate_id),
+        )
+        store._connection.commit()
+        historical = store.get_view(prepared.candidate_id, view)
+        assert historical.schema == "bdb-vnext-candidate-repo-view-v1"
+        assert historical.view_id == v1_digest
+        assert historical.read_bytes("one.txt") == b"v1-compatible\n"
 
 
 def test_multifile_tree_proof_rejects_foreign_state_and_partial_apply_is_not_retried(tmp_path: Path) -> None:

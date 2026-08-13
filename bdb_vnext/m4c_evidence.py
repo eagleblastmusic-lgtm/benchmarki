@@ -123,8 +123,9 @@ class EvidenceStore:
     def _record_from_row(self, row: tuple[Any, ...]) -> EvidenceRecord:
         return EvidenceRecord(str(row[0]),str(row[1]),str(row[2]),json.loads(bytes(row[3]).decode()),str(row[4]) if row[4] else None,ContentRef.from_mapping(json.loads(bytes(row[5]).decode())),str(row[6]),str(row[7]),str(row[8]),str(row[9]),json.loads(bytes(row[10]).decode()),str(row[11]),str(row[12]),str(row[13]),str(row[14]),str(row[15]),str(row[16]))
 
-    def get(self, evidence_id: str) -> EvidenceRecord | None:
-        row = self._connection.execute("SELECT evidence_id,request_id,primary_subject_kind,primary_subject_identity_json,candidate_view_id,raw_ref_json,raw_digest,checker_id,checker_version,checker_code_digest,environment_json,observation_started_at,observation_finished_at,completeness,applicability,status,created_at FROM m4c_evidence_records WHERE evidence_id=?",(evidence_id,)).fetchone()
+    def get(self, evidence_id: str, *, connection: sqlite3.Connection | None = None) -> EvidenceRecord | None:
+        source = connection or self._connection
+        row = source.execute("SELECT evidence_id,request_id,primary_subject_kind,primary_subject_identity_json,candidate_view_id,raw_ref_json,raw_digest,checker_id,checker_version,checker_code_digest,environment_json,observation_started_at,observation_finished_at,completeness,applicability,status,created_at FROM m4c_evidence_records WHERE evidence_id=?",(evidence_id,)).fetchone()
         return self._record_from_row(row) if row else None
 
     def _existing_request(self, request_id: str) -> EvidenceRecord | None:
@@ -192,22 +193,61 @@ class EvidenceStore:
     def dispositions(self,evidence_id:str)->tuple[DispositionRecord,...]:
         rows=self._connection.execute("SELECT disposition_id,evidence_id,evaluation_id,disposition,supersedes,created_at FROM m4c_dispositions WHERE evidence_id=? ORDER BY rowid",(evidence_id,)).fetchall(); return tuple(self._disposition_from_row(row) for row in rows)
 
-    def current_disposition(self,evidence_id:str)->DispositionRecord|None:
-        row=self._connection.execute("SELECT d.disposition_id,d.evidence_id,d.evaluation_id,d.disposition,d.supersedes,d.created_at FROM m4c_dispositions d JOIN m4c_disposition_heads h ON h.disposition_id=d.disposition_id WHERE h.evidence_id=?",(evidence_id,)).fetchone(); return self._disposition_from_row(row) if row else None
+    def current_disposition(self,evidence_id:str,*,connection:sqlite3.Connection|None=None)->DispositionRecord|None:
+        source=connection or self._connection
+        row=source.execute("SELECT d.disposition_id,d.evidence_id,d.evaluation_id,d.disposition,d.supersedes,d.created_at FROM m4c_dispositions d JOIN m4c_disposition_heads h ON h.disposition_id=d.disposition_id WHERE h.evidence_id=?",(evidence_id,)).fetchone(); return self._disposition_from_row(row) if row else None
 
-    def _candidate_applicable(self,record:EvidenceRecord)->tuple[bool,str]:
-        if record.primary_subject_kind!="CANDIDATE" or self.candidate_store is None: return True,"not_candidate_bound"
+    def _candidate_applicable(self,record:EvidenceRecord,*,connection:sqlite3.Connection|None=None)->tuple[bool,str]:
+        if record.primary_subject_kind!="CANDIDATE": return True,"not_candidate_bound"
+        if self.candidate_store is None: return False,"candidate_authority_unavailable"
         candidate_id=str(record.primary_subject_identity.get("candidate_id",""))
         try:
-            # A sealed Candidate is only applicable while its retained
-            # workspace still proves the exact planned bytes.  Revalidate
-            # before exposing a current PASS so query/recovery cannot trust a
-            # stale durable disposition after post-seal mutation.
-            current=self.candidate_store.verify_current_applicability(candidate_id)
+            current=self.candidate_store.verify_current_applicability(candidate_id,connection=connection)
         except Exception:
             return False,"candidate_stale_or_invalidated"
         if current is None or current.state!=CANDIDATE_SEALED or current.manifest_digest!=record.candidate_view_id: return False,"candidate_stale_or_invalidated"
         return True,"candidate_sealed_exact"
+
+    def authorize_current(
+        self,
+        evidence_id:str,
+        *,
+        candidate_view_id:str|None,
+        evaluation_id:str|None,
+        disposition_id:str|None,
+        connection:sqlite3.Connection|None=None,
+    )->dict[str,Any]:
+        """Return one exact positive authorization snapshot for Publication.
+
+        When ``connection`` is the Publication writer connection, every Control
+        DB component is read from that transaction snapshot. Candidate payload
+        authority is immutable CAS/Git-bundle content bound by its manifest.
+        """
+
+        source=connection or self._connection
+        record=self.get(evidence_id,connection=source)
+        if record is None: _fail("evidence_missing","Publication evidence binding does not exist")
+        if candidate_view_id is not None and record.candidate_view_id!=candidate_view_id:
+            _fail("evidence_binding_mismatch","Publication Evidence is bound to a different Candidate view")
+        applicable,reason=self._candidate_applicable(record,connection=source)
+        if not applicable:
+            _fail("evidence_not_applicable","Publication Evidence Candidate is not currently applicable",details={"reason":reason})
+        self.raw_observation(evidence_id)
+        current=self.current_disposition(evidence_id,connection=source)
+        if current is None or current.disposition not in {"PASS","FAIL"}:
+            _fail("evidence_not_applicable","Publication Evidence has no positively applicable current disposition")
+        row=source.execute("SELECT evaluation_id,evidence_id,evaluator_id,evaluator_version,evaluator_code_digest,config_digest,result,applicability,detail_json,created_at FROM m4c_evaluations WHERE evaluation_id=?",(current.evaluation_id,)).fetchone()
+        if row is None: _fail("evaluation_missing","current Evidence evaluation does not exist")
+        evaluation=self._evaluation_from_row(row)
+        if evaluation.applicability!="APPLICABLE" or evaluation.result not in {"PASS","FAIL"} or evaluation.result!=current.disposition:
+            _fail("evidence_not_applicable","current Evidence evaluation lacks positive applicability")
+        if evaluation_id is not None and evaluation.evaluation_id!=evaluation_id:
+            _fail("evaluation_binding_mismatch","Publication evaluation is not current")
+        if disposition_id is not None and current.disposition_id!=disposition_id:
+            _fail("disposition_binding_mismatch","Publication disposition is not current")
+        snapshot={"schema":"bdb-vnext-m4c-applicability-authorization-v1","evidence_id":record.evidence_id,"raw_digest":record.raw_digest,"candidate_view_id":record.candidate_view_id,"evaluation_id":evaluation.evaluation_id,"disposition_id":current.disposition_id,"disposition":current.disposition}
+        snapshot["authorization_digest"]=semantic_digest(snapshot)
+        return snapshot
 
     def query(self,evidence_id:str)->dict[str,Any]:
         record=self.get(evidence_id)
@@ -223,25 +263,36 @@ class EvidenceStore:
         if not applicable and effective=="PASS": effective="INCONCLUSIVE"
         return {"schema":EVIDENCE_SCHEMA,"evidence":record.as_dict(),"current_disposition":current.as_dict() if current else None,"history":[item.as_dict() for item in self.dispositions(evidence_id)],"evaluations":[item.as_dict() for item in self.evaluations(evidence_id)],"applicability":{"applicable":applicable,"reason":reason},"effective_disposition":effective}
 
+    def _normalize_evaluation(self,record:EvidenceRecord,*,requested_result:str,requested_applicability:str,requested_detail:Mapping[str,Any],connection:sqlite3.Connection|None=None)->tuple[str,str,dict[str,Any],bool]:
+        result,applicability,detail=requested_result,requested_applicability,dict(requested_detail)
+        candidate_ok,reason=self._candidate_applicable(record,connection=connection)
+        if result=="PASS" and (applicability!="APPLICABLE" or not candidate_ok or record.completeness!="COMPLETE"):
+            result,applicability="INCONCLUSIVE","INCONCLUSIVE"
+            detail={**detail,"fail_closed_reason":reason if not candidate_ok else "positive_applicability_not_established"}
+        if result=="PASS":
+            try:
+                self.raw_observation(record.evidence_id)
+            except EvidenceError as exc:
+                result,applicability="INCONCLUSIVE","INCONCLUSIVE"
+                detail={**detail,"fail_closed_reason":exc.code}
+        return result,applicability,detail,candidate_ok
+
     def evaluate(self,*,evidence_id:str,evaluator_id:str,evaluator_version:str,evaluator_code_digest:str,config_digest:str,result:str,applicability:str,detail:Mapping[str,Any],supersedes_evaluation_id:str|None=None,fault:str|None=None)->EvaluationRecord:
         record=self.get(evidence_id)
         if record is None: _fail("evidence_missing","evidence does not exist")
         if result not in EVALUATION_RESULTS or applicability not in APPLICABILITY: _fail("evaluation_contract_invalid","evaluation result/applicability is unsupported")
-        candidate_ok,reason=self._candidate_applicable(record)
-        if result=="PASS" and (applicability!="APPLICABLE" or not candidate_ok or record.completeness!="COMPLETE"):
-            result,applicability="INCONCLUSIVE","INCONCLUSIVE"; detail={**dict(detail),"fail_closed_reason":reason if not candidate_ok else "positive_applicability_not_established"}
-        if result=="PASS":
-            try:
-                self.raw_observation(evidence_id)
-            except EvidenceError as exc:
-                result,applicability="INCONCLUSIVE","INCONCLUSIVE"; detail={**dict(detail),"fail_closed_reason":exc.code}
-        identity={"schema":EVALUATION_SCHEMA,"evidence_id":evidence_id,"evaluator_id":evaluator_id,"evaluator_version":evaluator_version,"evaluator_code_digest":evaluator_code_digest,"config_digest":config_digest,"result":result,"applicability":applicability,"detail":dict(detail)}; evaluation_id=semantic_digest(identity); created_at=_now()
+        requested_result,result_applicability,requested_detail=result,applicability,dict(detail)
+        # Preflight is diagnostic/early-fail evidence only. It is deliberately
+        # not used as authority for the durable evaluation below.
+        self._normalize_evaluation(record,requested_result=requested_result,requested_applicability=result_applicability,requested_detail=requested_detail)
         if fault=="before_evaluation_commit": _fail("evaluation_commit_interrupted","evaluation interrupted before durable commit")
         self._connection.execute("BEGIN IMMEDIATE")
         try:
-            # Re-read the evaluator identity and disposition head while the
-            # writer lock is held.  This makes supersession a deterministic
-            # compare-and-swap instead of a pre-transaction race.
+            locked_record=self.get(evidence_id,connection=self._connection)
+            if locked_record is None: _fail("evidence_missing","evidence does not exist")
+            result,applicability,detail,candidate_ok=self._normalize_evaluation(locked_record,requested_result=requested_result,requested_applicability=result_applicability,requested_detail=requested_detail,connection=self._connection)
+            identity={"schema":EVALUATION_SCHEMA,"evidence_id":evidence_id,"evaluator_id":evaluator_id,"evaluator_version":evaluator_version,"evaluator_code_digest":evaluator_code_digest,"config_digest":config_digest,"result":result,"applicability":applicability,"detail":dict(detail)}
+            evaluation_id=semantic_digest(identity); created_at=_now()
             existing=self._connection.execute("SELECT evaluation_id,evidence_id,evaluator_id,evaluator_version,evaluator_code_digest,config_digest,result,applicability,detail_json,created_at FROM m4c_evaluations WHERE evidence_id=? AND evaluator_id=? AND evaluator_version=? AND evaluator_code_digest=? AND config_digest=?",(evidence_id,evaluator_id,evaluator_version,evaluator_code_digest,config_digest)).fetchone()
             if existing:
                 existing_record=self._evaluation_from_row(existing)
@@ -249,14 +300,19 @@ class EvidenceStore:
                     _fail("evaluation_identity_conflict", "evaluator identity is already bound to a different result")
                 self._connection.rollback()
                 return existing_record
-            previous=self.current_disposition(evidence_id)
+            previous=self.current_disposition(evidence_id,connection=self._connection)
             supersedes=supersedes_evaluation_id or (previous.evaluation_id if previous else None)
             if supersedes_evaluation_id is not None and (previous is None or supersedes_evaluation_id != previous.evaluation_id):
                 _fail("supersession_target_invalid", "new evaluation must supersede the current disposition head")
             disposition=result if applicability=="APPLICABLE" and result in {"PASS","FAIL"} and candidate_ok else "INCONCLUSIVE" if result=="PASS" else result
             disposition_id=semantic_digest({"schema":DISPOSITION_SCHEMA,"evidence_id":evidence_id,"evaluation_id":evaluation_id,"disposition":disposition,"supersedes":supersedes})
-            self._connection.execute("INSERT INTO m4c_evaluations VALUES (?,?,?,?,?,?,?,?,?,?)",(evaluation_id,evidence_id,evaluator_id,evaluator_version,evaluator_code_digest,config_digest,result,applicability,_json(dict(detail)),created_at)); self._connection.execute("INSERT INTO m4c_dispositions VALUES (?,?,?,?,?,?)",(disposition_id,evidence_id,evaluation_id,disposition,supersedes,created_at)); self._connection.execute("INSERT INTO m4c_disposition_heads VALUES (?,?) ON CONFLICT(evidence_id) DO UPDATE SET disposition_id=excluded.disposition_id",(evidence_id,disposition_id)); self._connection.commit()
-        except Exception: self._connection.rollback(); raise
+            self._connection.execute("INSERT INTO m4c_evaluations VALUES (?,?,?,?,?,?,?,?,?,?)",(evaluation_id,evidence_id,evaluator_id,evaluator_version,evaluator_code_digest,config_digest,result,applicability,_json(dict(detail)),created_at))
+            self._connection.execute("INSERT INTO m4c_dispositions VALUES (?,?,?,?,?,?)",(disposition_id,evidence_id,evaluation_id,disposition,supersedes,created_at))
+            self._connection.execute("INSERT INTO m4c_disposition_heads VALUES (?,?) ON CONFLICT(evidence_id) DO UPDATE SET disposition_id=excluded.disposition_id",(evidence_id,disposition_id))
+            self._connection.commit()
+        except Exception:
+            if self._connection.in_transaction: self._connection.rollback()
+            raise
         if fault=="after_evaluation_commit": raise EvidenceError("evaluation_response_lost","evaluation committed before response",details={"evaluation_id":evaluation_id})
         return self._evaluation_from_row(self._connection.execute("SELECT evaluation_id,evidence_id,evaluator_id,evaluator_version,evaluator_code_digest,config_digest,result,applicability,detail_json,created_at FROM m4c_evaluations WHERE evaluation_id=?",(evaluation_id,)).fetchone())
 

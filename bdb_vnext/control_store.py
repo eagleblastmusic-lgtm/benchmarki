@@ -22,7 +22,8 @@ CONTROL_IDENTITY_SCHEMA = "bdb-vnext-control-identity-v1"
 CONTROL_MIGRATION_ID = "n1-unified-control-v1"
 CONTROL_METADATA_TABLE = "vnext_control_metadata"
 CONTROL_LAYOUT_TABLE = "vnext_control_layout"
-CONTROL_DB_USER_VERSION = 2
+CONTROL_DB_USER_VERSION = 3
+CONTROL_PREVIOUS_USER_VERSION = 2
 CONTROL_DATABASE_RELATIVE_PATH = Path("control") / "control.db"
 CONTROL_BUSY_TIMEOUT_MS = 250
 
@@ -143,18 +144,51 @@ def configure_connection(connection: sqlite3.Connection, *, busy_timeout_ms: int
 
 
 def ensure_identity(connection: sqlite3.Connection) -> dict[str, str]:
-    """Create/validate only the fixed cross-domain identity table."""
+    """Initialize a new DB or validate a sealed current DB before mutation.
+
+    ``user_version=0`` is the only initialization/migration state in which the
+    domain stores may create their owned tables. A sealed v2/v3 database is
+    validated *before* any ``CREATE IF NOT EXISTS`` statement can hide missing
+    canonical state. The v2 -> v3 migration changes only this opening contract:
+    the prior layout is proven intact before the version is advanced.
+    """
 
     expected = expected_identity()
     try:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if version not in {0, CONTROL_DB_USER_VERSION}:
+        if version not in {0, CONTROL_PREVIOUS_USER_VERSION, CONTROL_DB_USER_VERSION}:
             _fail("control_user_version_mismatch", "Control DB user_version is not supported")
-        if version == 0:
-            connection.execute(f"PRAGMA user_version={CONTROL_DB_USER_VERSION}")
-            connection.commit()
     except sqlite3.DatabaseError as exc:
         raise ControlStoreError("control_user_version_read_failed", "Control DB user_version could not be verified") from exc
+
+    if version in {CONTROL_PREVIOUS_USER_VERSION, CONTROL_DB_USER_VERSION}:
+        # Intentionally read-only and before any store-owned CREATE statement.
+        validate_current_layout_identity(connection)
+        try:
+            rows = {
+                str(row[0]): str(row[1])
+                for row in connection.execute(
+                    f"SELECT key,value FROM {CONTROL_METADATA_TABLE} ORDER BY key"
+                ).fetchall()
+            }
+        except sqlite3.DatabaseError as exc:
+            raise ControlStoreError("control_identity_read_failed", "Control DB identity could not be read") from exc
+        if rows != expected:
+            _fail("control_identity_mismatch", "Control DB identity differs from the canonical vNext generation")
+        if version == CONTROL_PREVIOUS_USER_VERSION:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                validate_current_layout_identity(connection)
+                connection.execute(f"PRAGMA user_version={CONTROL_DB_USER_VERSION}")
+                connection.commit()
+            except Exception:
+                if connection.in_transaction:
+                    connection.rollback()
+                raise
+        return expected
+
+    # version 0 remains visibly unsealed while all typed stores install their
+    # schemas. ensure_layout_identity is the single finalization point.
     try:
         connection.execute(
             f"CREATE TABLE IF NOT EXISTS {CONTROL_METADATA_TABLE} ("
@@ -218,10 +252,55 @@ def _layout_digest(connection: sqlite3.Connection) -> str:
     return semantic_digest({"schema": CONTROL_IDENTITY_SCHEMA, "objects": [list(row) for row in rows]})
 
 
-def ensure_layout_identity(connection: sqlite3.Connection) -> str:
-    """Fail closed on unsupported SQLite layout drift after all stores initialize."""
+def validate_current_layout_identity(connection: sqlite3.Connection) -> str:
+    """Read-only validation for an already sealed current-version database."""
 
     try:
+        metadata = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (CONTROL_METADATA_TABLE,),
+        ).fetchone()
+        layout = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (CONTROL_LAYOUT_TABLE,),
+        ).fetchone()
+        if metadata is None:
+            _fail("control_identity_missing", "Control DB identity table is missing")
+        if layout is None:
+            _fail("control_layout_missing", "Control DB layout identity table is missing")
+        for table, required in _REQUIRED_COLUMNS.items():
+            row = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if row is None:
+                _fail("control_layout_missing", f"Control DB table is missing: {table}")
+            columns = {str(item[1]) for item in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+            if not set(required) <= columns:
+                _fail("control_layout_mismatch", f"Control DB table columns differ: {table}")
+        digest = _layout_digest(connection)
+        existing = connection.execute(
+            f"SELECT digest FROM {CONTROL_LAYOUT_TABLE} WHERE layout_id=1"
+        ).fetchone()
+        if existing is None or str(existing[0]) != digest:
+            _fail("control_layout_mismatch", "Control DB structural fingerprint differs")
+        return digest
+    except sqlite3.DatabaseError as exc:
+        if isinstance(exc, ControlStoreError):
+            raise
+        raise ControlStoreError("control_layout_read_failed", "Control DB layout could not be verified") from exc
+
+
+def ensure_layout_identity(connection: sqlite3.Connection) -> str:
+    """Seal a version-0 initialization or validate an existing sealed layout."""
+
+    try:
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        if version in {CONTROL_PREVIOUS_USER_VERSION, CONTROL_DB_USER_VERSION}:
+            ensure_identity(connection)
+            return validate_current_layout_identity(connection)
+        if version != 0:
+            _fail("control_user_version_mismatch", "Control DB user_version is not supported")
         connection.execute(
             f"CREATE TABLE IF NOT EXISTS {CONTROL_LAYOUT_TABLE} "
             "(layout_id INTEGER PRIMARY KEY CHECK(layout_id=1), digest TEXT NOT NULL)"
@@ -236,10 +315,20 @@ def ensure_layout_identity(connection: sqlite3.Connection) -> str:
         digest = _layout_digest(connection)
         existing = connection.execute(f"SELECT digest FROM {CONTROL_LAYOUT_TABLE} WHERE layout_id=1").fetchone()
         if existing is None:
-            connection.execute(f"INSERT INTO {CONTROL_LAYOUT_TABLE}(layout_id,digest) VALUES (1,?)", (digest,))
-            connection.commit()
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(f"INSERT INTO {CONTROL_LAYOUT_TABLE}(layout_id,digest) VALUES (1,?)", (digest,))
+                connection.execute(f"PRAGMA user_version={CONTROL_DB_USER_VERSION}")
+                connection.commit()
+            except Exception:
+                if connection.in_transaction:
+                    connection.rollback()
+                raise
         elif str(existing[0]) != digest:
             _fail("control_layout_mismatch", "Control DB structural fingerprint differs")
+        else:
+            connection.execute(f"PRAGMA user_version={CONTROL_DB_USER_VERSION}")
+            connection.commit()
         return digest
     except sqlite3.DatabaseError as exc:
         if isinstance(exc, ControlStoreError):
@@ -354,6 +443,7 @@ __all__ = [
     "CONTROL_METADATA_TABLE",
     "CONTROL_LAYOUT_TABLE",
     "CONTROL_DB_USER_VERSION",
+    "CONTROL_PREVIOUS_USER_VERSION",
     "CONTROL_MIGRATION_ID",
     "CONTROL_SCHEMA_CHECKSUM",
     "CONTROL_PRE_N4_SCHEMA_CHECKSUM",
@@ -366,6 +456,7 @@ __all__ = [
     "configure_connection",
     "ensure_identity",
     "ensure_layout_identity",
+    "validate_current_layout_identity",
     "expected_identity",
     "read_identity",
     "validate_backup_identity",
