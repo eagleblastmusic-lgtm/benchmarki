@@ -24,8 +24,11 @@ from bdb_shared.evidence import canonical_json_bytes
 from bdb_vnext.control_store import (
     CONTROL_BUSY_TIMEOUT_MS,
     assert_database_path,
+    begin_control_write,
+    commit_control_write,
     configure_connection as configure_control_connection,
     ensure_identity,
+    rollback_control_write,
 )
 from bdb_vnext.repo_view import CommittedRepoView
 
@@ -677,7 +680,7 @@ class DurableBindingStore:
         raw = self.content_store.resolve(fragment.content_ref)
         fragment.verify_payload(raw)
         document = fragment.to_json_bytes()
-        self._connection.execute("BEGIN IMMEDIATE")
+        begin_control_write(self._connection)
         try:
             row = self._connection.execute(
                 "SELECT binding_json FROM m2b_accepted_bindings WHERE fragment_id = ?",
@@ -686,13 +689,13 @@ class DurableBindingStore:
             if row is not None:
                 if bytes(row[0]) != document:
                     _fail("conflicting_binding", "fragment identity already has different accepted metadata")
-                self._connection.commit()
+                commit_control_write(self._connection)
                 return AcceptedBinding(fragment, raw, "converged")
             self._connection.execute(
                 "INSERT INTO m2b_accepted_bindings(fragment_id, binding_json) VALUES (?, ?)",
                 (fragment.fragment_id, document),
             )
-            self._connection.commit()
+            commit_control_write(self._connection)
         except Exception:
             self._connection.rollback()
             raise

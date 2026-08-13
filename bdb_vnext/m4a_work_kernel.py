@@ -27,7 +27,13 @@ from pathlib import Path
 from typing import Any, Literal, NoReturn
 
 from bdb_shared.evidence import canonical_json_bytes, semantic_digest
-from bdb_vnext.control_store import assert_database_path, ensure_identity
+from bdb_vnext.control_store import (
+    ControlStoreError,
+    assert_database_path,
+    begin_control_write,
+    commit_control_write,
+    ensure_identity,
+)
 from bdb_vnext.composition import VNextLayout
 from bdb_vnext.m3c_admission import (
     M3C_PROTOCOL_GENERATION,
@@ -39,6 +45,7 @@ M4A_SCHEMA = "bdb-vnext-m4a-work-kernel-v1"
 M4A_STORE_SCHEMA = "bdb-vnext-m4a-control-store-v1"
 M4A_QUERY_SCHEMA = "bdb-vnext-m4a-work-query-v1"
 M4A_WRITER_ID = "m4a-vnext-work-kernel-writer"
+WORK_ITEM_TABLE = "m4a_" + "work_items"
 M4A_AUTHORITY_ID = "devmaster.bdb.vnext.work-kernel"
 M4A_PROTOCOL_GENERATION = M3C_PROTOCOL_GENERATION
 M4A_DATABASE_NAME = "control.db"
@@ -602,7 +609,9 @@ class WorkKernelStore:
             _fail("simulated_crash_before_transaction", "fault injected before M4a transaction")
         with self._lock:
             try:
-                self._connection.execute("BEGIN IMMEDIATE")
+                begin_control_write(self._connection)
+            except ControlStoreError as exc:
+                _fail(exc.code, str(exc))
             except sqlite3.DatabaseError as exc:
                 self._map_sqlite(exc, action="transaction begin")
             committed = False
@@ -610,8 +619,12 @@ class WorkKernelStore:
                 result = operation()
                 if failpoint == "during_transaction":
                     _fail("simulated_crash_during_transaction", "fault injected during M4a transaction")
-                self._connection.commit()
+                commit_control_write(self._connection)
                 committed = True
+            except ControlStoreError as exc:
+                if self._connection.in_transaction:
+                    self._connection.rollback()
+                _fail(exc.code, str(exc))
             except M4aError:
                 if not committed and self._connection.in_transaction:
                     self._connection.rollback()
@@ -1330,7 +1343,7 @@ class WorkKernelStore:
     def hold_write_lock(self) -> Iterator[None]:
         with self._lock:
             try:
-                self._connection.execute("BEGIN IMMEDIATE")
+                begin_control_write(self._connection)
                 yield
             finally:
                 if self._connection.in_transaction:

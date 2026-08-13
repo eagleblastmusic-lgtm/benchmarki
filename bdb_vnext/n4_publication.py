@@ -20,8 +20,17 @@ from typing import Any, Mapping, NoReturn
 from bdb_shared.evidence import canonical_json_bytes, semantic_digest
 from bdb_vnext.candidate import CANDIDATE_SEALED, CandidateRepoView
 from bdb_vnext.content_store import ContentRef, ImmutableContentStore, make_content_ref
-from bdb_vnext.control_store import assert_database_path, configure_connection, ensure_identity
+from bdb_vnext.control_store import (
+    ControlStoreError,
+    assert_database_path,
+    begin_control_write,
+    commit_control_write,
+    configure_connection,
+    ensure_identity,
+    rollback_control_write,
+)
 from bdb_vnext.repo_view import CommittedRepoView
+from bdb_vnext.m4a_work_kernel import WORK_ITEM_TABLE
 
 
 N4_PUBLICATION_SCHEMA = "bdb-vnext-publication-v1"
@@ -301,6 +310,18 @@ class PublicationStore:
             """
         )
 
+    def _begin_write(self) -> None:
+        try:
+            begin_control_write(self._connection)
+        except ControlStoreError as exc:
+            _fail(exc.code, str(exc))
+
+    def _commit_write(self) -> None:
+        try:
+            commit_control_write(self._connection)
+        except ControlStoreError as exc:
+            _fail(exc.code, str(exc))
+
     def _pub_from_row(self, row: tuple[Any, ...]) -> PublicationRecord:
         return PublicationRecord(
             str(row[0]), str(row[1]), str(row[2]), str(row[3]), str(row[4]),
@@ -353,13 +374,21 @@ class PublicationStore:
 
     def _validate_lineage(self, *, task_id: str, work_id: str, intent_revision_id: str, candidate_id: str | None, candidate_view_id: str | None, evidence_id: str | None, evaluation_id: str | None, disposition_id: str | None, connection: sqlite3.Connection | None = None) -> None:
         source = connection or self._connection
-        task = self.task_authority.task(_text(task_id, "task_id"))
-        if task is None:
+        task_id = _text(task_id, "task_id")
+        work_id = _text(work_id, "work_id")
+        task_row = source.execute(
+            "SELECT task_id,intent_revision_id FROM m3a_tasks WHERE task_id=?",
+            (task_id,),
+        ).fetchone()
+        if task_row is None:
             _fail("task_missing", "Publication requires an accepted canonical Task")
-        work = self.work_kernel.query(_text(work_id, "work_id"))
-        if work is None or work.work.task_id != task_id:
+        work_row = source.execute(
+            f"SELECT task_id FROM {WORK_ITEM_TABLE} WHERE work_id=?",
+            (work_id,),
+        ).fetchone()
+        if work_row is None or str(work_row[0]) != task_id:
             _fail("work_binding_mismatch", "Publication WorkItem is not bound to the canonical Task")
-        if task.intent_revision_id != _text(intent_revision_id, "intent_revision_id"):
+        if str(task_row[1]) != _text(intent_revision_id, "intent_revision_id"):
             _fail("intent_revision_mismatch", "Publication intent revision differs from canonical Task")
         if (candidate_id is None) != (candidate_view_id is None):
             _fail("candidate_binding_incomplete", "Candidate identity requires both candidate_id and candidate_view_id")
@@ -372,10 +401,43 @@ class PublicationStore:
                 _fail("candidate_not_applicable", "Publication Candidate is not currently applicable", details={"cause": getattr(exc, "code", type(exc).__name__)})
             if record.state != CANDIDATE_SEALED or record.manifest_digest != candidate_view_id:
                 _fail("candidate_binding_mismatch", "Publication Candidate binding is not the exact sealed view")
+            # A manifest digest proves the Candidate bytes, but not by itself
+            # the causal Task/Work lineage.  Keep this check inside the same
+            # locked Publication transaction as the authorization snapshot.
+            if record.task_id != task_id or record.work_id != work_id:
+                _fail(
+                    "candidate_lineage_mismatch",
+                    "Publication Candidate belongs to a different canonical Task or WorkItem",
+                )
+            view_document = record.candidate_view_id
+            if (
+                not isinstance(view_document, Mapping)
+                or view_document.get("task_id") != task_id
+                or view_document.get("work_id") != work_id
+                or view_document.get("candidate_id") != candidate_id
+            ):
+                _fail(
+                    "candidate_lineage_mismatch",
+                    "Candidate RepoView causal lineage differs from the Publication Task/WorkItem",
+                )
         if evidence_id is not None:
             try:
+                evidence_record = self.evidence_store.get(_text(evidence_id, "evidence_id"), connection=source)
+                if evidence_record is None:
+                    _fail("evidence_missing", "Publication Evidence binding does not exist")
+                if candidate_id is not None:
+                    subject = evidence_record.primary_subject_identity
+                    if (
+                        evidence_record.primary_subject_kind != "CANDIDATE"
+                        or subject.get("candidate_id") != candidate_id
+                        or subject.get("view_id", subject.get("manifest_digest")) != candidate_view_id
+                    ):
+                        _fail(
+                            "candidate_lineage_mismatch",
+                            "Publication Evidence subject is not the exact Candidate lineage",
+                        )
                 self.evidence_store.authorize_current(
-                    _text(evidence_id, "evidence_id"),
+                    evidence_record.evidence_id,
                     candidate_view_id=candidate_view_id,
                     evaluation_id=evaluation_id,
                     disposition_id=disposition_id,
@@ -387,6 +449,8 @@ class PublicationStore:
                     "evidence_missing", "evidence_binding_mismatch",
                     "evaluation_binding_mismatch", "disposition_binding_mismatch",
                 }:
+                    _fail(code, str(exc))
+                if code == "candidate_lineage_mismatch":
                     _fail(code, str(exc))
                 _fail(
                     "evidence_not_applicable",
@@ -454,7 +518,7 @@ class PublicationStore:
         created_at = _now()
         binding_identity = {"schema": N4_CONSUMER_SCHEMA, "publication_id": publication_id, "consumer_id": consumer_id, "consumer_kind": consumer_kind, "conversation_id": conversation_id, "profile_id": profile_id, "generation": generation, "intent_revision_id": intent_revision_id}
         binding_id = semantic_digest(binding_identity)
-        self._connection.execute("BEGIN IMMEDIATE")
+        self._begin_write()
         try:
             # Resolve request/publication replays only after acquiring the
             # writer lock. This turns concurrent same/same into deterministic
@@ -504,7 +568,7 @@ class PublicationStore:
             self._connection.execute("INSERT INTO n4_consumer_cursors VALUES (?,?,?,?,?) ON CONFLICT(consumer_id,generation) DO NOTHING", (consumer_id, generation, sequence - 1, None, created_at))
             if fault == "before_commit":
                 _fail("publication_commit_interrupted", "publication interrupted before durable commit")
-            self._connection.commit()
+            self._commit_write()
         except sqlite3.IntegrityError as exc:
             if self._connection.in_transaction:
                 self._connection.rollback()
@@ -544,11 +608,11 @@ class PublicationStore:
         identity = {"schema": N4_CONSUMER_SCHEMA, "publication_id": publication_id, "consumer_id": cid, "consumer_kind": kind, "conversation_id": conv, "profile_id": profile, "generation": gen, "intent_revision_id": publication.intent_revision_id}
         binding_id = semantic_digest(identity)
         now = _now()
-        self._connection.execute("BEGIN IMMEDIATE")
+        self._begin_write()
         try:
             self._connection.execute("INSERT INTO n4_consumer_bindings VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (binding_id, publication_id, cid, kind, conv, profile, gen, publication.intent_revision_id, publication.sequence - 1, None, UNKNOWN, None, None, now))
             self._connection.execute("INSERT INTO n4_consumer_cursors VALUES (?,?,?,?,?) ON CONFLICT(consumer_id,generation) DO NOTHING", (cid, gen, publication.sequence - 1, None, now))
-            self._connection.commit()
+            self._commit_write()
         except sqlite3.IntegrityError:
             if self._connection.in_transaction:
                 self._connection.rollback()
@@ -608,11 +672,11 @@ class PublicationStore:
         if first_pending is None or int(first_pending[0]) != pub.sequence:
             _fail("cursor_gap", "consumer acknowledgement would skip an unknown publication gap", details={"cursor_sequence": int(current[0]), "publication_sequence": pub.sequence})
         now = _now()
-        self._connection.execute("BEGIN IMMEDIATE")
+        self._begin_write()
         try:
             self._connection.execute("UPDATE n4_consumer_cursors SET sequence=?,publication_id=?,updated_at=? WHERE consumer_id=? AND generation=?", (pub.sequence, pub.publication_id, now, cid, gen))
             self._connection.execute("UPDATE n4_consumer_bindings SET cursor_sequence=?,cursor_publication_id=?,updated_at=? WHERE binding_id=?", (pub.sequence, pub.publication_id, now, binding.binding_id))
-            self._connection.commit()
+            self._commit_write()
         except Exception:
             if self._connection.in_transaction:
                 self._connection.rollback()
@@ -693,11 +757,11 @@ class PublicationStore:
         if binding.witness_id is not None and binding.witness_id != witness_id:
             _fail("presentation_witness_conflict", "one consumer binding cannot be rebound to a different DOM witness")
         now = _now()
-        self._connection.execute("BEGIN IMMEDIATE")
+        self._begin_write()
         try:
             self._connection.execute("INSERT INTO n4_presentation_witnesses VALUES (?,?,?,?,?,?,?,?,?)", (witness_id, binding.binding_id, publication_id, binding.consumer_id, binding.conversation_id, result_digest, marker, _json(ref.as_dict()), now))
             self._connection.execute("UPDATE n4_consumer_bindings SET presentation=?,presentation_reason=?,witness_id=?,updated_at=? WHERE binding_id=?", (PRESENTED, None, witness_id, now, binding.binding_id))
-            self._connection.commit()
+            self._commit_write()
         except sqlite3.IntegrityError:
             if self._connection.in_transaction:
                 self._connection.rollback()
@@ -715,7 +779,7 @@ class PublicationStore:
         consumer_id = _text(consumer_id, "consumer_id")
         generation = generation or self.generation
         reason = _text(reason, "reason")
-        self._connection.execute("BEGIN IMMEDIATE")
+        self._begin_write()
         try:
             # Presentation is monotonic for one binding. Re-read only after the
             # writer lock so a concurrent UNKNOWN cannot overwrite PRESENTED.
@@ -726,7 +790,7 @@ class PublicationStore:
                 self._connection.rollback()
                 return binding
             self._connection.execute("UPDATE n4_consumer_bindings SET presentation=?,presentation_reason=?,updated_at=? WHERE binding_id=?", (UNKNOWN, reason, _now(), binding.binding_id))
-            self._connection.commit()
+            self._commit_write()
         except Exception:
             if self._connection.in_transaction:
                 self._connection.rollback()

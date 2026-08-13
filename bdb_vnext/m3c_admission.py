@@ -31,6 +31,7 @@ from bdb_vnext.m3a_submission import (
     ShadowSubmissionStore,
     ShadowTask,
 )
+from bdb_vnext.control_store import ControlStoreError, commit_control_write
 from bdb_vnext.m3b_browser_admission import (
     AdmissionEnvelope,
     BrowserAdmissionClient,
@@ -451,10 +452,10 @@ class CanonicalVNextAdmissionAuthority:
                         "UPDATE m3c_kill_switch SET admission_enabled=? WHERE id=1",
                         (int(enabled),),
                     )
-                    self._store.control_connection.commit()
+                    commit_control_write(self._store.control_connection)
                     self._write_kill_switch_projection(enabled)
-            except M3aError as exc:
-                _fail(exc.code, str(exc), details=exc.details)
+            except (M3aError, ControlStoreError) as exc:
+                _fail(exc.code, str(exc), details=getattr(exc, "details", None))
 
     def disable_intake(self) -> None:
         self.set_intake_enabled(False)

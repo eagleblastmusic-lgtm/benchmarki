@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Iterator, Literal, NoReturn
 
 from bdb_shared.evidence import canonical_json_bytes, semantic_digest
-from bdb_vnext.control_store import assert_database_path, ensure_identity
+from bdb_vnext.control_store import ControlStoreError, assert_database_path, begin_control_write, commit_control_write, ensure_identity
 
 
 M3A_SCHEMA = "bdb-vnext-m3a-submission-v1"
@@ -461,13 +461,13 @@ class ShadowSubmissionStore:
         intent_bytes = _canonical_bytes(request.intent, field="intent")
         with self._connection_lock:
             try:
-                self._connection.execute("BEGIN IMMEDIATE")
+                begin_control_write(self._connection)
                 if admission_guard is not None:
                     admission_guard()
                 existing = self._existing(request.submission_key)
                 if existing is not None:
                     receipt = self._check_existing(request, existing)
-                    self._connection.commit()
+                    commit_control_write(self._connection)
                     return receipt
                 task = self._connection.execute(
                     "SELECT task_id,intent_revision_id,intent_revision,intent_digest FROM m3a_tasks WHERE task_id = ?",
@@ -526,10 +526,14 @@ class ShadowSubmissionStore:
                     intent_revision_id,
                     "published",
                 )
-                self._connection.commit()
+                commit_control_write(self._connection)
                 if failpoint == "after_commit":
                     _fail("simulated_response_loss_after_commit", "fault injected after durable commit")
                 return receipt
+            except ControlStoreError as exc:
+                if self._connection.in_transaction:
+                    self._connection.rollback()
+                _fail(exc.code, str(exc))
             except M3aError:
                 if self._connection.in_transaction:
                     self._connection.rollback()
@@ -561,20 +565,20 @@ class ShadowSubmissionStore:
         digest = request.validated_digest()
         with self._connection_lock:
             try:
-                self._connection.execute("BEGIN IMMEDIATE")
+                begin_control_write(self._connection)
                 existing = self._existing(request.submission_key)
                 if existing is not None:
                     if str(existing[1]) != digest:
                         _fail("submission_conflict", "tombstone key is already bound to another digest")
                     if str(existing[2]) == "TOMBSTONED":
-                        self._connection.commit()
+                        commit_control_write(self._connection)
                         return self._receipt_from_row(existing, outcome="replay")
                     _fail("tombstone_conflict", "an accepted submission cannot be rewritten as a tombstone")
                 self._connection.execute(
                     "INSERT INTO m3a_submissions(submission_key,request_digest,canonical_request,status,disposition,task_id,intent_revision_id,tombstone_reason,created_order) VALUES (?,?,?,?,?,?,?,?,?)",
                     (request.submission_key, digest, canonical, "TOMBSTONED", "REJECTED", None, None, reason, _next_order(self._connection)),
                 )
-                self._connection.commit()
+                commit_control_write(self._connection)
                 return AdmissionReceipt(request.submission_key, digest, "TOMBSTONED", "REJECTED", None, None, "published", reason)
             except M3aError:
                 if self._connection.in_transaction:
@@ -626,7 +630,9 @@ class ShadowSubmissionStore:
 
         with self._connection_lock:
             try:
-                self._connection.execute("BEGIN IMMEDIATE")
+                begin_control_write(self._connection)
+            except ControlStoreError as exc:
+                _fail(exc.code, str(exc))
             except sqlite3.OperationalError as exc:
                 text = str(exc).lower()
                 if "locked" in text or "busy" in text:

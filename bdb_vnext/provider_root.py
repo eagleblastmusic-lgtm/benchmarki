@@ -801,7 +801,7 @@ class VNextCompositionRoot:
         from bdb_vnext.n4_publication import CanonicalOperatorQuery, PublicationStore
         from bdb_vnext.m3c_admission import _open_vnext_admission_composition
         from bdb_vnext.m4a_work_kernel import WorkKernelStore
-        from bdb_vnext.control_store import ensure_layout_identity
+        from bdb_vnext.control_store import ensure_layout_identity, prepare_control_store
 
         bindings = None
         admission = None
@@ -810,6 +810,9 @@ class VNextCompositionRoot:
         publication = None
         work_kernel = None
         try:
+            # Establish the explicit fresh-vs-existing Control DB lifecycle
+            # before any typed store is allowed to create/read its tables.
+            prepare_control_store(self._runtime_root)
             bindings = DurableBindingStore(self._runtime_root)
             admission = _open_vnext_admission_composition(
                 self._runtime_root,

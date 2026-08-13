@@ -332,6 +332,34 @@ def test_integrated_task_candidate_evidence_publication_query_flow(tmp_path: Pat
             assert evidence_query["effective_disposition"] == "PASS"
             current = plane.evidence.current_disposition(evaluation.evidence_id)
             assert current is not None
+            other_receipt, other_work = _task(plane, "n4:integrated:foreign-request")
+            with pytest.raises(N4Error) as foreign_task:
+                plane.publication.publish(
+                    request_id="n4:integrated:foreign-task-publication",
+                    task_id=other_receipt.task_id,
+                    work_id=other_work.work_id,
+                    intent_revision_id=other_receipt.intent_revision_id,
+                    result_payload={"candidate_view_id": candidate.view_id},
+                    consumer_id="n4-browser", consumer_kind="BROWSER", conversation_id="n4-conversation",
+                    candidate_id=candidate.candidate_id, candidate_view_id=candidate.view_id,
+                    evidence_id=evaluation.evidence_id, evaluation_id=evaluation.evaluation_id,
+                    disposition_id=current.disposition_id,
+                )
+            assert foreign_task.value.code == "candidate_lineage_mismatch"
+            foreign_work = plane.work_kernel.create_work_item("n4:integrated:foreign-work", receipt.task_id)
+            with pytest.raises(N4Error) as foreign_work_failure:
+                plane.publication.publish(
+                    request_id="n4:integrated:foreign-work-publication",
+                    task_id=receipt.task_id,
+                    work_id=foreign_work.work_id,
+                    intent_revision_id=receipt.intent_revision_id,
+                    result_payload={"candidate_view_id": candidate.view_id},
+                    consumer_id="n4-browser", consumer_kind="BROWSER", conversation_id="n4-conversation",
+                    candidate_id=candidate.candidate_id, candidate_view_id=candidate.view_id,
+                    evidence_id=evaluation.evidence_id, evaluation_id=evaluation.evaluation_id,
+                    disposition_id=current.disposition_id,
+                )
+            assert foreign_work_failure.value.code == "candidate_lineage_mismatch"
             publication = plane.publication.publish(
                 request_id="n4:integrated:publication",
                 task_id=receipt.task_id,

@@ -181,7 +181,15 @@ class CheckerEnvironment:
     def child_environment(self) -> dict[str, str]:
         """Return a deliberately small child environment with no user site."""
 
-        allowed = {"PATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "COMSPEC"}
+        # Keep only process facts needed to reproduce the interpreter/platform
+        # identity.  Windows ``platform.machine()`` consults the processor
+        # environment; omitting it made the hermetic child report a different
+        # machine fingerprint than its parent and fail closed spuriously.
+        allowed = {
+            "PATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "COMSPEC",
+            "PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITEW6432", "PROCESSOR_IDENTIFIER",
+            "PROCESSOR_LEVEL", "PROCESSOR_REVISION", "NUMBER_OF_PROCESSORS",
+        }
         environment = {key: value for key, value in os.environ.items() if key in allowed}
         environment.update(
             {

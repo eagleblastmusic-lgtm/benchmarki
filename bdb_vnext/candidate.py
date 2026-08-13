@@ -26,7 +26,14 @@ from bdb_vnext.content_store import (
     ImmutableContentStore,
     make_content_ref,
 )
-from bdb_vnext.control_store import assert_database_path, configure_connection, ensure_identity
+from bdb_vnext.control_store import (
+    assert_database_path,
+    begin_control_write,
+    commit_control_write,
+    configure_connection,
+    ensure_identity,
+    rollback_control_write,
+)
 from bdb_vnext.repo_view import CommittedRepoView, RepoTreeEntry, RepositoryResource
 
 
@@ -446,11 +453,11 @@ class CandidateStore:
             CREATE INDEX IF NOT EXISTS m4b_candidate_paths_by_candidate ON m4b_candidate_paths(candidate_id);
             """
         )
-        self._connection.commit()
+        commit_control_write(self._connection)
         columns = {str(row[1]) for row in self._connection.execute("PRAGMA table_info(m4b_candidate_effects)").fetchall()}
         if "config_digest" not in columns:
             self._connection.execute("ALTER TABLE m4b_candidate_effects ADD COLUMN config_digest TEXT NOT NULL DEFAULT ''")
-            self._connection.commit()
+            commit_control_write(self._connection)
 
     @property
     def config_digest(self) -> str:
@@ -886,7 +893,7 @@ class CandidateStore:
         effect_id = expected_effect_id
         if self.get(candidate_id) is not None:
             _fail("candidate_exists", "candidate_id is already bound")
-        self._connection.execute("BEGIN IMMEDIATE")
+        begin_control_write(self._connection)
         try:
             self._connection.execute(
                 "INSERT INTO m4b_candidate_effects(candidate_id,effect_id,work_id,task_id,state,effect_certainty,base_view_json,workspace_root,workspace_generation,config_digest,lease_id,fence,base_tree_digest,planned_tree_digest,observed_tree_digest,observed_json,candidate_view_json,manifest_digest) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -897,7 +904,7 @@ class CandidateStore:
                     "INSERT INTO m4b_candidate_paths(candidate_id,path,before_digest,after_digest,before_ref_json,after_ref_json,before_mode,after_mode,before_size,after_size,observed) VALUES (?,?,?,?,?,?,?,?,?,?,NULL)",
                     (candidate_id, item.path, item.before_digest, item.after_digest, canonical_json_bytes(item.before_ref.as_dict()), canonical_json_bytes(item.after_ref.as_dict()), item.before_mode, item.after_mode, item.before_size, item.after_size),
                 )
-            self._connection.commit()
+            commit_control_write(self._connection)
         except Exception:
             self._connection.rollback()
             raise
@@ -913,7 +920,7 @@ class CandidateStore:
         if record.state != CANDIDATE_PREPARED:
             _fail("candidate_state_conflict", "Candidate is not PREPARED")
         self._connection.execute("UPDATE m4b_candidate_effects SET state=?,effect_certainty=? WHERE candidate_id=?", (CANDIDATE_POSSIBLE, "POSSIBLE", record.candidate_id))
-        self._connection.commit()
+        commit_control_write(self._connection)
         return self.get(candidate_id)  # type: ignore[return-value]
 
     def adopt_lease(self, candidate_id: str, *, lease_id: str, fence: int) -> CandidateRecord:
@@ -930,7 +937,7 @@ class CandidateStore:
             _fail("work_kernel_unavailable", "Candidate effects require the canonical Work Kernel")
         self.work_kernel.assert_current_lease(record.work_id, lease_id, fence)
         self._connection.execute("UPDATE m4b_candidate_effects SET lease_id=?,fence=? WHERE candidate_id=?", (lease_id, fence, record.candidate_id))
-        self._connection.commit()
+        commit_control_write(self._connection)
         return self.get(candidate_id)  # type: ignore[return-value]
 
     def _observe_one(self, workspace: Path, plan: CandidatePathPlan) -> str:
@@ -981,12 +988,12 @@ class CandidateStore:
         self._connection.execute("UPDATE m4b_candidate_effects SET state=?,effect_certainty=?,observed_json=? WHERE candidate_id=?", (state, certainty, canonical_json_bytes(observations), record.candidate_id))
         for path, value in observations.items():
             self._connection.execute("UPDATE m4b_candidate_paths SET observed=? WHERE candidate_id=? AND path=?", (value, record.candidate_id, path))
-        self._connection.commit()
+        commit_control_write(self._connection)
         return self.get(candidate_id)  # type: ignore[return-value]
 
     def _set_uncertain(self, candidate_id: str, *, certainty: str = "UNKNOWN", state: str = CANDIDATE_UNKNOWN) -> None:
         self._connection.execute("UPDATE m4b_candidate_effects SET state=?,effect_certainty=? WHERE candidate_id=?", (state, certainty, candidate_id))
-        self._connection.commit()
+        commit_control_write(self._connection)
 
     def apply(self, candidate_id: str, *, fail_after_paths: int | None = None, fault: str | None = None) -> CandidateRecord:
         allowed_faults = {None, "before_write", "during_temp_create", "after_temp_write", "during_replace", "locked_file", "permission_denied", "disk_full", "after_write_before_observe"}
@@ -1033,7 +1040,7 @@ class CandidateStore:
                 self._set_uncertain(candidate_id, certainty="POSSIBLE", state=CANDIDATE_POSSIBLE)
                 return self.get(candidate_id)  # type: ignore[return-value]
         self._connection.execute("UPDATE m4b_candidate_effects SET state=?,effect_certainty=? WHERE candidate_id=?", (CANDIDATE_APPLIED, "POSSIBLE", candidate_id))
-        self._connection.commit()
+        commit_control_write(self._connection)
         if fault == "after_write_before_observe":
             raise CandidateError("candidate_apply_interrupted", "all writes completed before observation", details={"effect_certainty": "POSSIBLE"})
         return self.observe(candidate_id)
@@ -1098,7 +1105,7 @@ class CandidateStore:
         planned_digest = self._tree_digest(planned_entries)
         if actual_entries != planned_entries or observed_digest != planned_digest:
             self._connection.execute("UPDATE m4b_candidate_effects SET state=?,effect_certainty=?,observed_tree_digest=? WHERE candidate_id=?", (CANDIDATE_DIVERGED, "UNKNOWN", observed_digest, record.candidate_id))
-            self._connection.commit()
+            commit_control_write(self._connection)
             _fail("candidate_tree_mismatch", "observed Candidate tree is not exactly the planned tree", details={"planned": planned_digest, "observed": observed_digest})
         base_authority = self._archive_base_authority(workspace, base_view)
         identity = {
@@ -1124,7 +1131,7 @@ class CandidateStore:
         if fault == "before_seal_commit":
             raise CandidateError("candidate_seal_interrupted", "seal interrupted before durable manifest commit")
         self._connection.execute("UPDATE m4b_candidate_effects SET state=?,effect_certainty=?,observed_tree_digest=?,candidate_view_json=?,manifest_digest=? WHERE candidate_id=?", (CANDIDATE_SEALED, "CERTAIN", observed_digest, canonical_json_bytes(view_doc), manifest_digest, record.candidate_id))
-        self._connection.commit()
+        commit_control_write(self._connection)
         if fault == "after_seal_commit":
             raise CandidateError("candidate_seal_response_lost", "seal committed before caller received its response", details={"manifest_digest": manifest_digest})
         updated = self.get(candidate_id)
@@ -1164,7 +1171,7 @@ class CandidateStore:
             # rather than silently rewriting the sealed record.
             self._assert_owner(record)
             self._connection.execute("UPDATE m4b_candidate_effects SET state=?,effect_certainty=? WHERE candidate_id=?", (CANDIDATE_INVALIDATED, "UNKNOWN", record.candidate_id))
-            self._connection.commit()
+            commit_control_write(self._connection)
             return self.get(candidate_id)  # type: ignore[return-value]
         return record
 

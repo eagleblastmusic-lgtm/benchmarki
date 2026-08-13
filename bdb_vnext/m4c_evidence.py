@@ -15,7 +15,15 @@ from typing import Any, Mapping
 from bdb_shared.evidence import canonical_json_bytes, semantic_digest
 from bdb_vnext.candidate import CandidateRepoView, CandidateError, CANDIDATE_SEALED
 from bdb_vnext.content_store import ContentRef, ImmutableContentStore, make_content_ref
-from bdb_vnext.control_store import assert_database_path, configure_connection, ensure_identity
+from bdb_vnext.control_store import (
+    ControlStoreError,
+    assert_database_path,
+    begin_control_write,
+    commit_control_write,
+    configure_connection,
+    ensure_identity,
+    rollback_control_write,
+)
 from bdb_vnext.m4c_environment import CheckerEnvironment
 
 EVIDENCE_SCHEMA = "bdb-vnext-m4c-evidence-v1"
@@ -120,6 +128,18 @@ class EvidenceStore:
         CREATE INDEX IF NOT EXISTS m4c_evidence_by_subject ON m4c_evidence_records(primary_subject_kind,candidate_view_id);
         """)
 
+    def _begin_write(self) -> None:
+        try:
+            begin_control_write(self._connection)
+        except ControlStoreError as exc:
+            _fail(exc.code, str(exc))
+
+    def _commit_write(self) -> None:
+        try:
+            commit_control_write(self._connection)
+        except ControlStoreError as exc:
+            _fail(exc.code, str(exc))
+
     def _record_from_row(self, row: tuple[Any, ...]) -> EvidenceRecord:
         return EvidenceRecord(str(row[0]),str(row[1]),str(row[2]),json.loads(bytes(row[3]).decode()),str(row[4]) if row[4] else None,ContentRef.from_mapping(json.loads(bytes(row[5]).decode())),str(row[6]),str(row[7]),str(row[8]),str(row[9]),json.loads(bytes(row[10]).decode()),str(row[11]),str(row[12]),str(row[13]),str(row[14]),str(row[15]),str(row[16]))
 
@@ -128,44 +148,128 @@ class EvidenceStore:
         row = source.execute("SELECT evidence_id,request_id,primary_subject_kind,primary_subject_identity_json,candidate_view_id,raw_ref_json,raw_digest,checker_id,checker_version,checker_code_digest,environment_json,observation_started_at,observation_finished_at,completeness,applicability,status,created_at FROM m4c_evidence_records WHERE evidence_id=?",(evidence_id,)).fetchone()
         return self._record_from_row(row) if row else None
 
-    def _existing_request(self, request_id: str) -> EvidenceRecord | None:
-        row = self._connection.execute("SELECT evidence_id,request_id,primary_subject_kind,primary_subject_identity_json,candidate_view_id,raw_ref_json,raw_digest,checker_id,checker_version,checker_code_digest,environment_json,observation_started_at,observation_finished_at,completeness,applicability,status,created_at FROM m4c_evidence_records WHERE request_id=?",(request_id,)).fetchone()
+    def _existing_request(self, request_id: str, *, connection: sqlite3.Connection | None = None) -> EvidenceRecord | None:
+        source = connection or self._connection
+        row = source.execute("SELECT evidence_id,request_id,primary_subject_kind,primary_subject_identity_json,candidate_view_id,raw_ref_json,raw_digest,checker_id,checker_version,checker_code_digest,environment_json,observation_started_at,observation_finished_at,completeness,applicability,status,created_at FROM m4c_evidence_records WHERE request_id=?",(request_id,)).fetchone()
         return self._record_from_row(row) if row else None
 
+    @staticmethod
+    def _replay_identity(
+        *,
+        request_id: str,
+        primary_subject_kind: str,
+        primary_subject_identity: Mapping[str, Any],
+        candidate_view_id: str | None,
+        raw_digest: str,
+        checker_id: str,
+        checker_version: str,
+        checker_code_digest: str,
+        environment: Mapping[str, Any],
+        observation_started_at: str,
+        observation_finished_at: str,
+        completeness: str,
+        applicability: str,
+        status: str,
+    ) -> dict[str, Any]:
+        """Canonical request equivalence; excludes DB-generated fields."""
+
+        return {
+            "schema": EVIDENCE_SCHEMA,
+            "request_id": request_id,
+            "primary_subject_kind": primary_subject_kind,
+            "primary_subject_identity": dict(primary_subject_identity),
+            "candidate_view_id": candidate_view_id,
+            "raw_digest": raw_digest,
+            "checker_id": checker_id,
+            "checker_version": checker_version,
+            "checker_code_digest": checker_code_digest,
+            "environment": dict(environment),
+            "observation_started_at": observation_started_at,
+            "observation_finished_at": observation_finished_at,
+            "completeness": completeness,
+            "applicability": applicability,
+            "status": status,
+        }
+
+    @classmethod
+    def _record_replay_identity(cls, record: EvidenceRecord) -> dict[str, Any]:
+        return cls._replay_identity(
+            request_id=record.request_id,
+            primary_subject_kind=record.primary_subject_kind,
+            primary_subject_identity=record.primary_subject_identity,
+            candidate_view_id=record.candidate_view_id,
+            raw_digest=record.raw_digest,
+            checker_id=record.checker_id,
+            checker_version=record.checker_version,
+            checker_code_digest=record.checker_code_digest,
+            environment=record.environment,
+            observation_started_at=record.observation_started_at,
+            observation_finished_at=record.observation_finished_at,
+            completeness=record.completeness,
+            applicability=record.applicability,
+            status=record.status,
+        )
+
+    @classmethod
+    def _assert_replay_equivalent(cls, existing: EvidenceRecord, requested: Mapping[str, Any]) -> EvidenceRecord:
+        if cls._record_replay_identity(existing) != dict(requested):
+            _fail("evidence_request_conflict", "request_id is already bound to different evidence inputs")
+        return existing
+
     def record_observation(self, *, request_id: str, primary_subject_kind: str, primary_subject_identity: Mapping[str, Any], candidate_view_id: str | None, raw_observation: Mapping[str, Any], checker_id: str, checker_version: str, checker_code_digest: str, environment: Mapping[str, Any], observation_started_at: str, observation_finished_at: str, completeness: str, applicability: str, status: str) -> EvidenceRecord:
-        request_id = _text(request_id,"request_id"); existing = self._existing_request(request_id)
-        if existing:
-            same_request = (
-                existing.primary_subject_kind == primary_subject_kind
-                and dict(existing.primary_subject_identity) == dict(primary_subject_identity)
-                and existing.candidate_view_id == candidate_view_id
-                and existing.checker_id == checker_id
-                and existing.checker_version == checker_version
-                and existing.checker_code_digest == checker_code_digest
-                and dict(existing.environment) == dict(environment)
-                and existing.completeness == completeness
-                and existing.applicability == applicability
-                and existing.status == status
-            )
-            if not same_request:
-                _fail("evidence_request_conflict", "request_id is already bound to different evidence inputs")
-            return existing
+        request_id = _text(request_id,"request_id")
+        primary_subject_kind = _text(primary_subject_kind, "primary_subject_kind")
+        checker_id = _text(checker_id, "checker_id")
+        checker_version = _text(checker_version, "checker_version")
+        checker_code_digest = _text(checker_code_digest, "checker_code_digest")
+        observation_started_at = _text(observation_started_at, "observation_started_at")
+        observation_finished_at = _text(observation_finished_at, "observation_finished_at")
+        completeness = _text(completeness, "completeness")
+        applicability = _text(applicability, "applicability")
+        status = _text(status, "status")
         if primary_subject_kind == "CANDIDATE":
             subject_view_id = primary_subject_identity.get("view_id") or primary_subject_identity.get("manifest_digest")
             if not isinstance(subject_view_id, str) or candidate_view_id != subject_view_id:
                 _fail("subject_binding_mismatch", "Candidate evidence must bind the exact Candidate view identity")
-        raw = _json(dict(raw_observation)); ref = make_content_ref("application/json",RAW_SCHEMA,raw); self.content_store.publish(ref,raw)
-        identity = {"schema":EVIDENCE_SCHEMA,"request_id":request_id,"primary_subject_kind":_text(primary_subject_kind,"primary_subject_kind"),"primary_subject_identity":dict(primary_subject_identity),"candidate_view_id":candidate_view_id,"raw_digest":ref.raw_digest,"checker_id":_text(checker_id,"checker_id"),"checker_version":_text(checker_version,"checker_version"),"checker_code_digest":_text(checker_code_digest,"checker_code_digest"),"environment":dict(environment),"observation_started_at":_text(observation_started_at,"observation_started_at"),"observation_finished_at":_text(observation_finished_at,"observation_finished_at"),"completeness":_text(completeness,"completeness"),"applicability":_text(applicability,"applicability"),"status":_text(status,"status")}
-        evidence_id = semantic_digest(identity); created_at = _now()
-        self._connection.execute("BEGIN IMMEDIATE")
+        raw = _json(dict(raw_observation))
+        ref = make_content_ref("application/json", RAW_SCHEMA, raw)
+        replay_identity = self._replay_identity(
+            request_id=request_id,
+            primary_subject_kind=primary_subject_kind,
+            primary_subject_identity=primary_subject_identity,
+            candidate_view_id=candidate_view_id,
+            raw_digest=ref.raw_digest,
+            checker_id=checker_id,
+            checker_version=checker_version,
+            checker_code_digest=checker_code_digest,
+            environment=environment,
+            observation_started_at=observation_started_at,
+            observation_finished_at=observation_finished_at,
+            completeness=completeness,
+            applicability=applicability,
+            status=status,
+        )
+        existing = self._existing_request(request_id)
+        if existing:
+            return self._assert_replay_equivalent(existing, replay_identity)
+        self.content_store.publish(ref,raw)
+        evidence_id = semantic_digest(replay_identity); created_at = _now()
+        self._begin_write()
         try:
-            self._connection.execute("INSERT INTO m4c_evidence_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(evidence_id,request_id,primary_subject_kind,_json(dict(primary_subject_identity)),candidate_view_id,_json(ref.as_dict()),ref.raw_digest,checker_id,checker_version,checker_code_digest,_json(dict(environment)),observation_started_at,observation_finished_at,completeness,applicability,status,created_at)); self._connection.commit()
+            self._connection.execute("INSERT INTO m4c_evidence_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(evidence_id,request_id,primary_subject_kind,_json(dict(primary_subject_identity)),candidate_view_id,_json(ref.as_dict()),ref.raw_digest,checker_id,checker_version,checker_code_digest,_json(dict(environment)),observation_started_at,observation_finished_at,completeness,applicability,status,created_at)); self._commit_write()
         except sqlite3.IntegrityError:
-            self._connection.rollback(); existing=self._existing_request(request_id)
-            if existing: return existing
+            rollback_control_write(self._connection)
+            existing=self._existing_request(request_id)
+            if existing:
+                return self._assert_replay_equivalent(existing, replay_identity)
             raise EvidenceError("evidence_identity_conflict","evidence request identity conflicted")
+        except sqlite3.OperationalError as exc:
+            rollback_control_write(self._connection)
+            if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                _fail("database_busy", "Evidence Control DB is busy")
+            raise EvidenceError("evidence_write_failed", "evidence request could not be stored") from exc
         except Exception:
-            self._connection.rollback(); raise
+            rollback_control_write(self._connection); raise
         return self.get(evidence_id)  # type: ignore[return-value]
 
     def raw_observation(self, evidence_id: str) -> bytes:
@@ -286,7 +390,7 @@ class EvidenceStore:
         # not used as authority for the durable evaluation below.
         self._normalize_evaluation(record,requested_result=requested_result,requested_applicability=result_applicability,requested_detail=requested_detail)
         if fault=="before_evaluation_commit": _fail("evaluation_commit_interrupted","evaluation interrupted before durable commit")
-        self._connection.execute("BEGIN IMMEDIATE")
+        self._begin_write()
         try:
             locked_record=self.get(evidence_id,connection=self._connection)
             if locked_record is None: _fail("evidence_missing","evidence does not exist")
@@ -309,7 +413,7 @@ class EvidenceStore:
             self._connection.execute("INSERT INTO m4c_evaluations VALUES (?,?,?,?,?,?,?,?,?,?)",(evaluation_id,evidence_id,evaluator_id,evaluator_version,evaluator_code_digest,config_digest,result,applicability,_json(dict(detail)),created_at))
             self._connection.execute("INSERT INTO m4c_dispositions VALUES (?,?,?,?,?,?)",(disposition_id,evidence_id,evaluation_id,disposition,supersedes,created_at))
             self._connection.execute("INSERT INTO m4c_disposition_heads VALUES (?,?) ON CONFLICT(evidence_id) DO UPDATE SET disposition_id=excluded.disposition_id",(evidence_id,disposition_id))
-            self._connection.commit()
+            self._commit_write()
         except Exception:
             if self._connection.in_transaction: self._connection.rollback()
             raise
@@ -346,7 +450,9 @@ class MinimumCandidateChecker:
 
     def check(self,candidate:CandidateRepoView,*,request_id:str,evaluator_id:str="m4c-exact-candidate-evaluator",evaluator_version:str="1",config_digest:str="sha256:"+"0"*64,fault:str|None=None)->EvaluationRecord:
         if not isinstance(candidate,CandidateRepoView): _fail("unsupported_subject","minimum checker accepts only Candidate RepoView")
-        started=_now(); subject={"candidate_id":candidate.candidate_id,"view_id":candidate.view_id,"manifest_digest":candidate.manifest_digest,"candidate_tree_digest":candidate.candidate_tree_digest,"base_view_id":candidate.base_view_id,"repository_id":candidate.repository_id}; probe=self._probe(fault=fault); raw={"schema":RAW_SCHEMA,"checker_id":CHECKER_ID,"checker_version":CHECKER_VERSION,"subject":subject,"environment_probe":probe}; applicability="APPLICABLE" if probe.get("status")=="READY" else "INCONCLUSIVE"; completeness="COMPLETE" if applicability=="APPLICABLE" else "INCOMPLETE"; status="CHECKED" if applicability=="APPLICABLE" else "UNAVAILABLE"
+        existing_request = self.evidence._existing_request(request_id)
+        started = existing_request.observation_started_at if existing_request is not None else _now()
+        subject={"candidate_id":candidate.candidate_id,"view_id":candidate.view_id,"manifest_digest":candidate.manifest_digest,"candidate_tree_digest":candidate.candidate_tree_digest,"base_view_id":candidate.base_view_id,"repository_id":candidate.repository_id}; probe=self._probe(fault=fault); raw={"schema":RAW_SCHEMA,"checker_id":CHECKER_ID,"checker_version":CHECKER_VERSION,"subject":subject,"environment_probe":probe}; applicability="APPLICABLE" if probe.get("status")=="READY" else "INCONCLUSIVE"; completeness="COMPLETE" if applicability=="APPLICABLE" else "INCOMPLETE"; status="CHECKED" if applicability=="APPLICABLE" else "UNAVAILABLE"
         if applicability=="APPLICABLE":
             try:
                 # Verify the mutable Candidate workspace once before and once
@@ -371,7 +477,8 @@ class MinimumCandidateChecker:
                 candidate._store.verify_sealed(candidate.candidate_id,base_view=candidate._base_view)
                 raw["observation"]={"status":"EXACT_CANDIDATE_READABLE","entries":entries,"candidate_tree_digest":candidate.candidate_tree_digest}
             except (CandidateError,EvidenceError) as exc: applicability,completeness,status="INCONCLUSIVE","INCOMPLETE","UNAVAILABLE"; raw["observation"]={"status":"INCONCLUSIVE","reason":getattr(exc,"code",type(exc).__name__)}
-        observation=self.evidence.record_observation(request_id=request_id,primary_subject_kind="CANDIDATE",primary_subject_identity=subject,candidate_view_id=candidate.view_id,raw_observation=raw,checker_id=CHECKER_ID,checker_version=CHECKER_VERSION,checker_code_digest=self.code_digest,environment=self.environment.as_dict(),observation_started_at=started,observation_finished_at=_now(),completeness=completeness,applicability=applicability,status=status)
+        finished = existing_request.observation_finished_at if existing_request is not None else _now()
+        observation=self.evidence.record_observation(request_id=request_id,primary_subject_kind="CANDIDATE",primary_subject_identity=subject,candidate_view_id=candidate.view_id,raw_observation=raw,checker_id=CHECKER_ID,checker_version=CHECKER_VERSION,checker_code_digest=self.code_digest,environment=self.environment.as_dict(),observation_started_at=started,observation_finished_at=finished,completeness=completeness,applicability=applicability,status=status)
         if fault=="raw_only": _fail("evaluation_not_committed","raw observation committed without evaluation",details={"evidence_id":observation.evidence_id})
         result="PASS" if applicability=="APPLICABLE" and status=="CHECKED" else "INCONCLUSIVE"; detail={"checker_status":status,"raw_digest":observation.raw_digest,"subject_match":True}; return self.evidence.evaluate(evidence_id=observation.evidence_id,evaluator_id=evaluator_id,evaluator_version=evaluator_version,evaluator_code_digest=self.code_digest,config_digest=config_digest,result=result,applicability=applicability,detail=detail,fault="after_evaluation_commit" if fault=="lost_response" else None)
 

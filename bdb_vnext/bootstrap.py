@@ -86,6 +86,18 @@ DECLARED_VNEXT_BACKUP_SUBJECTS = (
     BackupSubject("content", "directory", "content"),
     BackupSubject("config", "file", "config/bdb-vnext.json"),
 )
+CONTROL_BACKUP_SUBJECTS = (
+    *DECLARED_VNEXT_BACKUP_SUBJECTS[:2],
+    # The external seal is an independent fresh-vs-existing authority.  It is
+    # present in control-identity (v2) backups; v1 remains backward compatible
+    # with the historical four-subject contract.
+    BackupSubject("control_seal", "file", "control/control.db.seal.json", required=True),
+    *DECLARED_VNEXT_BACKUP_SUBJECTS[2:],
+)
+
+
+def _backup_subjects(*, include_control_identity: bool) -> tuple[BackupSubject, ...]:
+    return CONTROL_BACKUP_SUBJECTS if include_control_identity else DECLARED_VNEXT_BACKUP_SUBJECTS
 
 
 @dataclass(frozen=True)
@@ -572,12 +584,14 @@ def _snapshot_subject(
 
 def _snapshot_declared(
     root: Path,
+    *,
+    include_control_identity: bool = False,
 ) -> tuple[list[dict[str, Any]], tuple[tuple[str, tuple[Any, ...]], ...]]:
     documents: list[dict[str, Any]] = []
     signatures: list[tuple[str, tuple[Any, ...]]] = []
     file_count = 0
     total_bytes = 0
-    for subject in DECLARED_VNEXT_BACKUP_SUBJECTS:
+    for subject in _backup_subjects(include_control_identity=include_control_identity):
         document, signature = _snapshot_subject(root, subject)
         documents.append(document)
         signatures.append((subject.name, signature))
@@ -719,10 +733,11 @@ def _validate_backup_document(document: Mapping[str, Any]) -> None:
     if document["source_quiesced"] is not True:
         _fail("invalid_backup_manifest", "backup does not attest a quiesced source")
     subjects = document["subjects"]
-    if not isinstance(subjects, list) or len(subjects) != len(DECLARED_VNEXT_BACKUP_SUBJECTS):
+    declarations = _backup_subjects(include_control_identity=document["schema"] == CONTROL_BACKUP_SCHEMA)
+    if not isinstance(subjects, list) or len(subjects) != len(declarations):
         _fail("invalid_backup_manifest", "backup subject set is incomplete")
     seen_files: set[str] = set()
-    for actual, expected in zip(subjects, DECLARED_VNEXT_BACKUP_SUBJECTS, strict=True):
+    for actual, expected in zip(subjects, declarations, strict=True):
         subject = _mapping(actual, field=f"subject[{expected.name}]")
         _exact_keys(
             subject,
@@ -784,7 +799,9 @@ def _verify_backup_contents(root: Path, *, require_directory_name: bool) -> Back
     _validate_backup_document(document)
     if require_directory_name and root.name != document["backup_id"]:
         _fail("backup_identity_mismatch", "backup directory name differs from backup_id")
-    observed_subjects, _ = _snapshot_declared(root)
+    observed_subjects, _ = _snapshot_declared(
+        root, include_control_identity=document["schema"] == CONTROL_BACKUP_SCHEMA
+    )
     if observed_subjects != document["subjects"]:
         _fail("backup_integrity_failure", "backup bytes differ from the coordinated manifest")
     observed_pair = _sqlite_pair_document(root, observed_subjects)
@@ -847,7 +864,12 @@ def create_coordinated_backup(
         _fail("invalid_backup_id", "backup_id is invalid")
     schema_version = _valid_schema_version(required_control_schema, field="required_control_schema")
 
-    subjects, first_signature = _snapshot_declared(source)
+    if include_control_identity and not (source / "control" / "control.db").is_file():
+        _fail("control_identity_unavailable", "unified Control DB is required for a v2 backup")
+    if include_control_identity and not (source / "control" / "control.db.seal.json").is_file():
+        _fail("control_seal_missing", "control-identity backup requires the external Control DB seal")
+    declarations = _backup_subjects(include_control_identity=include_control_identity)
+    subjects, first_signature = _snapshot_declared(source, include_control_identity=include_control_identity)
     sqlite_pair = _sqlite_pair_document(source, subjects)
     control_identity: dict[str, Any] | None = None
     if include_control_identity:
@@ -859,7 +881,7 @@ def create_coordinated_backup(
             try:
                 control_identity = backup_identity(
                     connection,
-                    config_path=_subject_path(source, DECLARED_VNEXT_BACKUP_SUBJECTS[3]),
+                    config_path=_subject_path(source, next(item for item in declarations if item.name == "config")),
                 )
             finally:
                 connection.close()
@@ -876,7 +898,7 @@ def create_coordinated_backup(
     try:
         for subject in subjects:
             if subject["state"] == "present" and subject["kind"] == "directory":
-                _subject_path(staging, next(item for item in DECLARED_VNEXT_BACKUP_SUBJECTS if item.name == subject["name"])).mkdir(parents=True)
+                _subject_path(staging, next(item for item in declarations if item.name == subject["name"])).mkdir(parents=True)
             for record in subject["files"]:
                 relative = PurePosixPath(record["path"])
                 _copy_verified(
@@ -887,7 +909,9 @@ def create_coordinated_backup(
                     copy_file=copy_file,
                     failure_code="backup_copy_failed",
                 )
-        second_subjects, second_signature = _snapshot_declared(source)
+        second_subjects, second_signature = _snapshot_declared(
+            source, include_control_identity=include_control_identity
+        )
         if first_signature != second_signature or subjects != second_subjects:
             _fail("moving_backup_source", "declared vNext resources changed during coordinated backup")
         payload: dict[str, Any] = {
@@ -926,7 +950,9 @@ def create_coordinated_backup(
 
 
 def _verify_restored(root: Path, manifest: Mapping[str, Any]) -> str:
-    observed_subjects, _ = _snapshot_declared(root)
+    observed_subjects, _ = _snapshot_declared(
+        root, include_control_identity=manifest["schema"] == CONTROL_BACKUP_SCHEMA
+    )
     if observed_subjects != manifest["subjects"]:
         _fail("restore_integrity_failure", "restored bytes differ from the exact backup manifest")
     if _sqlite_pair_document(root, observed_subjects) != manifest["sqlite_pair"]:
@@ -989,9 +1015,8 @@ def restore_backup(
     staging = target.parent / f".{target.name}.restore-partial-{uuid.uuid4().hex}"
     staging.mkdir()
     try:
-        for subject_doc, subject in zip(
-            backup.document["subjects"], DECLARED_VNEXT_BACKUP_SUBJECTS, strict=True
-        ):
+        declarations = _backup_subjects(include_control_identity=backup.document["schema"] == CONTROL_BACKUP_SCHEMA)
+        for subject_doc, subject in zip(backup.document["subjects"], declarations, strict=True):
             if subject_doc["state"] == "present" and subject.kind == "directory":
                 _subject_path(staging, subject).mkdir(parents=True)
             for record in subject_doc["files"]:
