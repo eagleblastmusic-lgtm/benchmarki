@@ -1794,7 +1794,7 @@ async function inspectEngineeringScenario(conversation) {
   let prepared = engineeringState && engineeringState.conversation_id === conversation ? engineeringState : await restoreEngineeringState(conversation);
   if (!prepared) {
     const submissionKey = await engineeringSubmissionKey(conversation, prompt.text);
-    const promptDigest = await digest(prompt.text);
+    const promptDigest = "sha256:" + await digest(prompt.text);
     const response = await send("engineering_prepare", {submission_key: submissionKey, prompt: prompt.text, conversation_id: conversation, profile_id: null});
     const observed = nativeResult(response, "P1 engineering preparation failed");
     if (!observed.result) { write(observed.error); return; }

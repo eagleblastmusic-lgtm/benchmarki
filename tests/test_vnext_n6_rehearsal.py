@@ -744,6 +744,12 @@ if (response.ok || !String(response.error).includes('invalid')) throw new Error(
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def test_generated_content_uses_canonical_prompt_digest_for_p1_engineering() -> None:
+    script = _js_content()
+
+    assert script.count('const promptDigest = "sha256:" + await digest(prompt.text);') == 1
+
+
 def test_engineering_prepare_reuses_matching_active_run_on_refresh(tmp_path: Path, monkeypatch) -> None:
     repo = Path(__file__).parents[1].absolute()
     package_root = tmp_path / "package"
