@@ -210,6 +210,70 @@ def _validate_seal(document: Mapping[str, Any], *, state: str, user_version: int
     return instance_id
 
 
+def _preflight_existing_control_store(database_path: Path, seal_document: Mapping[str, Any]) -> None:
+    """Validate an existing sealed DB through a read-only SQLite handle.
+
+    Opening an existing store must not first switch journaling, create WAL
+    sidecars, or otherwise repair the file before its identity and layout are
+    known to be canonical.  v2 is intentionally validated here and migrated
+    only by the normal writable opener after this read-only gate succeeds.
+    """
+
+    # ``immutable`` avoids SQLite creating ``-shm`` while we validate a
+    # checkpointed database.  If an existing WAL pair is already present, use
+    # the read-only WAL-aware handle instead; no new sidecar is introduced by
+    # that path and the current committed view remains visible.
+    wal_present = database_path.with_name(database_path.name + "-wal").exists()
+    shm_present = database_path.with_name(database_path.name + "-shm").exists()
+    query = "mode=ro" if wal_present or shm_present else "mode=ro&immutable=1"
+    try:
+        connection = sqlite3.connect(
+            f"{database_path.as_uri()}?{query}",
+            uri=True,
+            timeout=CONTROL_BUSY_TIMEOUT_MS / 1000,
+            isolation_level=None,
+        )
+    except sqlite3.OperationalError as exc:
+        if is_sqlite_busy(exc):
+            _busy("vNext Control DB is busy during read-only preflight")
+        raise ControlStoreError("control_open_failed", "existing Control DB could not be opened read-only") from exc
+    try:
+        try:
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        except sqlite3.DatabaseError as exc:
+            raise ControlStoreError("control_user_version_read_failed", "Control DB user_version could not be verified") from exc
+        if version not in {CONTROL_PREVIOUS_USER_VERSION, CONTROL_DB_USER_VERSION}:
+            _fail("control_user_version_mismatch", "existing Control DB user_version is not a supported sealed version")
+        layout_digest = validate_current_layout_identity(connection)
+        seal_version = seal_document.get("user_version")
+        if seal_version not in {CONTROL_PREVIOUS_USER_VERSION, CONTROL_DB_USER_VERSION}:
+            _fail("control_seal_mismatch", "existing Control DB seal has an unsupported version")
+        # A supported v2 database may carry the current external seal while
+        # its version bump is still pending; ensure_identity performs that
+        # validated migration after this read-only gate.
+        _validate_seal(seal_document, state="SEALED", user_version=int(seal_version), layout_digest=layout_digest)
+        try:
+            rows = {
+                str(row[0]): str(row[1])
+                for row in connection.execute(
+                    f"SELECT key,value FROM {CONTROL_METADATA_TABLE} ORDER BY key"
+                ).fetchall()
+            }
+        except sqlite3.DatabaseError as exc:
+            raise ControlStoreError("control_identity_read_failed", "Control DB identity could not be read") from exc
+        if rows != expected_identity():
+            _fail("control_identity_mismatch", "Control DB identity differs from the canonical vNext generation")
+    except sqlite3.OperationalError as exc:
+        if is_sqlite_busy(exc):
+            _busy("vNext Control DB is busy during read-only preflight")
+        raise ControlStoreError("control_open_failed", "existing Control DB could not be validated read-only") from exc
+    finally:
+        try:
+            connection.close()
+        except sqlite3.DatabaseError:
+            pass
+
+
 def prepare_control_store(root: str | Path) -> Path:
     """Open the canonical server DB through an explicit lifecycle boundary.
 
@@ -223,6 +287,20 @@ def prepare_control_store(root: str | Path) -> Path:
     database_path.parent.mkdir(parents=True, exist_ok=True)
     seal = seal_path_for_database(database_path)
     existed = database_path.exists()
+    # Reject an impossible existing/fresh pairing before sqlite3.connect can
+    # create or rewrite anything.  In particular, a seal-only recovery root
+    # must remain seal-only, and an existing DB without its independent seal
+    # must not be touched by WAL/synchronous setup before failing closed.
+    existing_seal = _read_seal(seal)
+    if existed:
+        if existing_seal is None:
+            _fail("control_seal_missing", "existing Control DB has no external seal")
+        if existing_seal.get("state") != "SEALED":
+            _fail("control_initialization_incomplete", "existing Control DB has an incomplete initialization seal")
+    elif existing_seal is not None:
+        _fail("control_seal_mismatch", "fresh Control DB cannot reuse an existing external seal")
+    if existed:
+        _preflight_existing_control_store(database_path, existing_seal)  # type: ignore[arg-type]
     connection = sqlite3.connect(str(database_path), timeout=CONTROL_BUSY_TIMEOUT_MS / 1000, isolation_level=None)
     try:
         configure_connection(connection)
@@ -652,8 +730,13 @@ def ensure_layout_identity(connection: sqlite3.Connection) -> str:
         elif str(existing[0]) != digest:
             _fail("control_layout_mismatch", "Control DB structural fingerprint differs")
         else:
-            connection.execute(f"PRAGMA user_version={CONTROL_DB_USER_VERSION}")
-            commit_control_write(connection)
+            begin_control_write(connection)
+            try:
+                connection.execute(f"PRAGMA user_version={CONTROL_DB_USER_VERSION}")
+                commit_control_write(connection)
+            except Exception:
+                rollback_control_write(connection)
+                raise
         return finalize_control_store(connection)
     except sqlite3.DatabaseError as exc:
         if isinstance(exc, ControlStoreError):

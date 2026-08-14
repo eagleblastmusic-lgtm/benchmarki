@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -67,6 +68,33 @@ def test_control_db_seal_rejects_downgrade_missing_seal_and_missing_db(tmp_path:
         root3.open_control_plane()
     assert missing_db.value.code == "control_seal_mismatch"
     assert seal3.exists()
+    assert not database3.exists()
+
+    root4 = _root(tmp_path / "missing-seal-db")
+    with root4.open_control_plane() as plane:
+        database4 = plane.work_kernel.database_path
+    before = database4.read_bytes()
+    seal4 = seal_path_for_database(database4)
+    seal4.unlink()
+    with pytest.raises(ControlStoreError) as db_only:
+        root4.open_control_plane()
+    assert db_only.value.code == "control_seal_missing"
+    assert database4.read_bytes() == before
+
+    root5 = _root(tmp_path / "altered-seal")
+    with root5.open_control_plane() as plane:
+        database5 = plane.work_kernel.database_path
+    seal5 = seal_path_for_database(database5)
+    original_files = {item.name for item in database5.parent.iterdir()}
+    document5 = json.loads(seal5.read_text(encoding="utf-8"))
+    document5["store_id"] = "foreign-control-store"
+    seal5.write_text(json.dumps(document5), encoding="utf-8")
+    before5 = database5.read_bytes()
+    with pytest.raises(ControlStoreError) as altered:
+        root5.open_control_plane()
+    assert altered.value.code in {"control_seal_integrity_failure", "control_seal_mismatch"}
+    assert database5.read_bytes() == before5
+    assert {item.name for item in database5.parent.iterdir()} == original_files | {seal5.name}
 
 
 def test_evidence_replay_binds_raw_and_timing_inputs(tmp_path: Path) -> None:
@@ -142,6 +170,26 @@ def test_shared_busy_floor_is_typed_and_leaves_no_evidence_row(tmp_path: Path) -
             applicability="APPLICABLE",
             status="CAPTURED",
         ).request_id == "p0:busy"
+
+
+def test_evidence_gap_writer_uses_the_shared_busy_floor(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    with EvidenceStore(runtime) as evidence:
+        blocker = sqlite3.connect(evidence.database_path, timeout=0.01, isolation_level=None)
+        try:
+            blocker.execute("BEGIN IMMEDIATE")
+            with pytest.raises(EvidenceError) as busy:
+                evidence.record_gap(
+                    primary_subject_kind="P0",
+                    primary_subject_identity={"id": "busy"},
+                    reason="unavailable",
+                    details={"source": "test"},
+                )
+            assert busy.value.code == "database_busy"
+            assert evidence._connection.execute("SELECT COUNT(*) FROM m4c_evidence_gaps").fetchone()[0] == 0
+        finally:
+            blocker.rollback()
+            blocker.close()
 
 
 def test_work_and_publication_busy_floor_are_typed(tmp_path: Path) -> None:

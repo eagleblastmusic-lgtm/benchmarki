@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
@@ -152,6 +153,27 @@ def test_restart_query_and_source_worktree_are_exactly_preserved(tmp_path: Path)
         assert _git(subject, "rev-parse", "HEAD") == source_head
         assert _git(subject, "status", "--short", "--branch") == source_status
         assert _git(subject, "symbolic-ref", "--short", "HEAD") == "master" or _git(subject, "symbolic-ref", "--short", "HEAD") == "main"
+        _remove_candidate_worktree(subject, workspace)
+
+
+def test_candidate_state_mutation_uses_typed_busy_floor(tmp_path: Path) -> None:
+    with _stack(tmp_path) as (subject, view, _kernel, store, work_id, task_id, lease):
+        workspace = store.create_workspace(candidate_id="candidate:busy", base_view=view)
+        prepared = store.prepare(
+            candidate_id="candidate:busy", work_id=work_id, task_id=task_id,
+            lease_id=lease.lease_id, fence=lease.fence, base_view=view,
+            workspace_root=workspace, replacements={"one.txt": b"busy\n"},
+        )
+        blocker = sqlite3.connect(store.database_path, timeout=0.01, isolation_level=None)
+        try:
+            blocker.execute("BEGIN IMMEDIATE")
+            with pytest.raises(CandidateError) as busy:
+                store.mark_possible(prepared.candidate_id)
+            assert busy.value.code == "database_busy"
+            assert store.get(prepared.candidate_id).state == CANDIDATE_PREPARED  # type: ignore[union-attr]
+        finally:
+            blocker.rollback()
+            blocker.close()
         _remove_candidate_worktree(subject, workspace)
 
 

@@ -421,9 +421,26 @@ class EvidenceStore:
         return self._evaluation_from_row(self._connection.execute("SELECT evaluation_id,evidence_id,evaluator_id,evaluator_version,evaluator_code_digest,config_digest,result,applicability,detail_json,created_at FROM m4c_evaluations WHERE evaluation_id=?",(evaluation_id,)).fetchone())
 
     def record_gap(self,*,primary_subject_kind:str,primary_subject_identity:Mapping[str,Any],reason:str,details:Mapping[str,Any])->EvidenceGap:
-        identity={"schema":GAP_SCHEMA,"primary_subject_kind":_text(primary_subject_kind,"primary_subject_kind"),"primary_subject_identity":dict(primary_subject_identity),"reason":_text(reason,"reason"),"details":dict(details)}; gap_id=semantic_digest(identity); existing=self._connection.execute("SELECT gap_id,primary_subject_kind,primary_subject_identity_json,reason,details_json,created_at FROM m4c_evidence_gaps WHERE gap_id=?",(gap_id,)).fetchone()
-        if existing: return EvidenceGap(str(existing[0]),str(existing[1]),json.loads(bytes(existing[2]).decode()),str(existing[3]),json.loads(bytes(existing[4]).decode()),str(existing[5]))
-        created_at=_now(); self._connection.execute("INSERT INTO m4c_evidence_gaps VALUES (?,?,?,?,?,?)",(gap_id,primary_subject_kind,_json(dict(primary_subject_identity)),reason,_json(dict(details)),created_at)); return EvidenceGap(gap_id,primary_subject_kind,dict(primary_subject_identity),reason,dict(details),created_at)
+        primary_subject_kind = _text(primary_subject_kind, "primary_subject_kind")
+        reason = _text(reason, "reason")
+        primary_subject_identity = dict(primary_subject_identity)
+        details = dict(details)
+        identity={"schema":GAP_SCHEMA,"primary_subject_kind":primary_subject_kind,"primary_subject_identity":primary_subject_identity,"reason":reason,"details":details}
+        gap_id=semantic_digest(identity)
+        self._begin_write()
+        try:
+            existing=self._connection.execute("SELECT gap_id,primary_subject_kind,primary_subject_identity_json,reason,details_json,created_at FROM m4c_evidence_gaps WHERE gap_id=?",(gap_id,)).fetchone()
+            if existing:
+                self._commit_write()
+                return EvidenceGap(str(existing[0]),str(existing[1]),json.loads(bytes(existing[2]).decode()),str(existing[3]),json.loads(bytes(existing[4]).decode()),str(existing[5]))
+            created_at=_now()
+            self._connection.execute("INSERT INTO m4c_evidence_gaps VALUES (?,?,?,?,?,?)",(gap_id,primary_subject_kind,_json(primary_subject_identity),reason,_json(details),created_at))
+            self._commit_write()
+            return EvidenceGap(gap_id,primary_subject_kind,primary_subject_identity,reason,details,created_at)
+        except Exception:
+            if self._connection.in_transaction:
+                rollback_control_write(self._connection)
+            raise
 
     def close(self)->None: self._connection.close()
     def __enter__(self)->"EvidenceStore": return self

@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -23,7 +24,7 @@ from typing import Any, Literal, Mapping, Sequence
 
 from bdb_shared.evidence import canonical_json_bytes, semantic_digest
 from bdb_vnext.candidate import CandidateError, CandidateRecord, CandidateRepoView, CandidateStore, _blob_oid
-from bdb_vnext.control_store import begin_control_write, commit_control_write
+from bdb_vnext.control_store import ControlStoreError, begin_control_write, commit_control_write, rollback_control_write
 from bdb_vnext.content_store import make_content_ref
 from bdb_vnext.m4c_evidence import EvidenceRecord, EvidenceStore, EvaluationRecord
 from bdb_vnext.n4_publication import PublicationRecord, PublicationStore
@@ -429,6 +430,30 @@ class EditorPort:
         )
         commit_control_write(self.connection)
 
+    def _write(self, operation: Any) -> Any:
+        """Keep P1 durable edit facts on the same typed Control DB floor."""
+
+        try:
+            begin_control_write(self.connection)
+        except ControlStoreError as exc:
+            _fail(exc.code, str(exc))
+        try:
+            result = operation()
+            commit_control_write(self.connection)
+            return result
+        except ControlStoreError as exc:
+            rollback_control_write(self.connection)
+            _fail(exc.code, str(exc))
+        except EngineeringLoopError:
+            rollback_control_write(self.connection)
+            raise
+        except sqlite3.IntegrityError as exc:
+            rollback_control_write(self.connection)
+            _fail("engineering_storage_conflict", "engineering state conflicted with canonical Control DB state")
+        except sqlite3.DatabaseError as exc:
+            rollback_control_write(self.connection)
+            _fail("engineering_storage_failed", "engineering state could not be committed")
+
     @staticmethod
     def _batch_id(batch: EditBatch) -> str:
         return semantic_digest({"schema": EDIT_BATCH_SCHEMA, "artifact_digest": batch.artifact_digest, "candidate_id": batch.candidate_id, "run_id": batch.run_id})
@@ -598,11 +623,9 @@ class EditorPort:
         if existing is not None:
             if str(existing[0]) != batch.artifact_digest or str(existing[1]) != batch.candidate_id:
                 _fail("edit_batch_conflict", "batch identity is already bound to different artifact bytes")
-            self.connection.execute("UPDATE p1_edit_batches SET status=?,effect_certainty=?,updated_at=? WHERE batch_id=?", (status, effect_certainty, now, batch_id))
-            commit_control_write(self.connection)
+            self._write(lambda: self.connection.execute("UPDATE p1_edit_batches SET status=?,effect_certainty=?,updated_at=? WHERE batch_id=?", (status, effect_certainty, now, batch_id)))
             return batch_id
-        self.connection.execute("INSERT INTO p1_edit_batches VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (batch_id, batch.candidate_id, batch.task_id, batch.work_id, batch.run_id, batch.base_view_id, batch.expected_tree_digest, batch.artifact_digest, operations_json, batch.workspace_generation, status, effect_certainty, now, now))
-        commit_control_write(self.connection)
+        self._write(lambda: self.connection.execute("INSERT INTO p1_edit_batches VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (batch_id, batch.candidate_id, batch.task_id, batch.work_id, batch.run_id, batch.base_view_id, batch.expected_tree_digest, batch.artifact_digest, operations_json, batch.workspace_generation, status, effect_certainty, now, now)))
         return batch_id
 
     def prepare_batch(self, batch: EditBatch, *, base_view: CommittedRepoView, workspace: str | Path, desired_files: Mapping[str, bytes | None] | None = None) -> CandidateRecord:
@@ -718,8 +741,7 @@ class EditorPort:
         validation_id = semantic_digest(identity)
         existing = self.connection.execute("SELECT validation_id FROM p1_validation_runs WHERE validation_id=?", (validation_id,)).fetchone()
         if existing is None:
-            self.connection.execute("INSERT INTO p1_validation_runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (validation_id, batch_id, candidate_id, command.checker_id, command.checker_version, canonical_json_bytes({"argv": list(command.argv), "cwd": command.cwd, "timeout_seconds": command.timeout_seconds}), result.environment_fingerprint, result.status, result.returncode, canonical_json_bytes(stdout_ref), canonical_json_bytes(stderr_ref), _digest(result.stdout), _digest(result.stderr), evidence_id, result.started_at, result.finished_at, result.error_code))
-            commit_control_write(self.connection)
+            self._write(lambda: self.connection.execute("INSERT INTO p1_validation_runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (validation_id, batch_id, candidate_id, command.checker_id, command.checker_version, canonical_json_bytes({"argv": list(command.argv), "cwd": command.cwd, "timeout_seconds": command.timeout_seconds}), result.environment_fingerprint, result.status, result.returncode, canonical_json_bytes(stdout_ref), canonical_json_bytes(stderr_ref), _digest(result.stdout), _digest(result.stderr), evidence_id, result.started_at, result.finished_at, result.error_code)))
         return validation_id
 
     def record_validation(self, *, batch: EditBatch, result: ValidationResult, candidate_view: CandidateRepoView | None = None) -> ValidationRunRecord:
