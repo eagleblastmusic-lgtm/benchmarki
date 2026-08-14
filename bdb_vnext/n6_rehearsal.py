@@ -1404,6 +1404,16 @@ function canonicalConversationId(href = location.href) {
   } catch (_) {}
   return null;
 }
+function renderedAssistantText(node) {
+  const clone = node.cloneNode(true);
+  for (const pre of clone.querySelectorAll("pre")) {
+    const code = pre.querySelector("[data-language]");
+    const language = code?.getAttribute("data-language") || "";
+    const content = canonicalPrompt(code?.innerText || pre.innerText || pre.textContent || "");
+    pre.replaceWith(document.createTextNode("```" + language + "\n" + content + "\n```"));
+  }
+  return canonicalPrompt(clone.innerText || clone.textContent || "");
+}
 function assistantObservation(expectedPrompt) {
   const turns = [...document.querySelectorAll("[data-message-author-role]")];
   let promptIndex = -1;
@@ -1416,7 +1426,7 @@ function assistantObservation(expectedPrompt) {
   if (following.length !== 1 || following[0].dataset.messageAuthorRole !== "assistant") throw new Error("N6 assistant answer is stale, ambiguous, or not the exact response to the frozen prompt");
   const node = following[0];
   if (node.closest("[data-bdb-n6-panel]")) throw new Error("N6 extension UI cannot witness its own presentation");
-  const text = canonicalPrompt(node.innerText || node.textContent || "");
+  const text = renderedAssistantText(node);
   return text ? {node, text} : null;
 }
 function streamInProgress() {

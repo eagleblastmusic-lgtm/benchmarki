@@ -525,7 +525,7 @@ const source = generated.split('\\n').filter((line) =>
   !line.startsWith('window.addEventListener(\"popstate\"') &&
   !line.startsWith('setInterval(') &&
   !line.startsWith('void synchronizeConversation();')
-).join('\\n') + '\\nwindow.__p1Test = {{ latestEngineeringPrompt, strictEngineeringArtifact }};';
+).join('\\n') + '\\nwindow.__p1Test = {{ latestEngineeringPrompt, strictEngineeringArtifact, renderedAssistantText }};';
 
 function node(role, text) {{
   return {{
@@ -541,7 +541,7 @@ function functionsFor(turns) {{
     console,
     URL,
     location: {{ href: 'https://chatgpt.com/c/p1-test-12345678' }},
-    document: {{ querySelectorAll: (selector) => selector === '[data-message-author-role]' ? turns : [] }},
+    document: {{ querySelectorAll: (selector) => selector === '[data-message-author-role]' ? turns : [], createTextNode: (text) => ({{ textContent: text }}) }},
     window: {{ addEventListener: () => {{}} }},
     MutationObserver: class {{ observe() {{}} }},
     chrome: {{}},
@@ -574,6 +574,20 @@ function mustReject(value, label) {{
 mustReject('```json\\n{{"schema":"bdb-vnext-edit-v1",\\n```', 'malformed JSON fence');
 mustReject('```json\\n{{"schema":"bdb-vnext-edit-v1"}}\\n```\\n```json\\n{{"schema":"bdb-vnext-edit-v1"}}\\n```', 'two JSON fences');
 mustReject('```json\\n{{"schema":"other"}}\\n```', 'non-BDB JSON fence');
+
+const pre = {{
+  replacement: null,
+  innerText: 'JSON{{"schema":"bdb-vnext-edit-v1"}}',
+  querySelector: (selector) => selector === '[data-language]' ? {{ getAttribute: () => 'json', innerText: '{{"schema":"bdb-vnext-edit-v1"}}' }} : null,
+  replaceWith(value) {{ this.replacement = value; }},
+}};
+const renderedClone = {{
+  querySelectorAll: () => [pre],
+  get innerText() {{ return pre.replacement?.textContent || pre.innerText; }},
+  get textContent() {{ return this.innerText; }},
+}};
+const rendered = artifactFunctions.renderedAssistantText({{ cloneNode: () => renderedClone }});
+if (rendered !== '```json\\n{{"schema":"bdb-vnext-edit-v1"}}\\n```') throw new Error('rendered ChatGPT code block was not reconstructed as one fenced artifact: ' + rendered);
 """
     result = subprocess.run(["node", "--input-type=module"], input=harness, capture_output=True, text=True, timeout=30, check=False)
     assert result.returncode == 0, result.stderr or result.stdout
