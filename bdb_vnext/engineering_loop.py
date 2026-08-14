@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
 from bdb_shared.evidence import canonical_json_bytes, semantic_digest
-from bdb_vnext.candidate import CandidateError, CandidateRecord, CandidateRepoView, CandidateStore, _blob_oid
+from bdb_vnext.candidate import CandidateError, CandidateRecord, CandidateRepoView, CandidateStore, _blob_oid, apply_exact_replacements
 from bdb_vnext.control_store import ControlStoreError, begin_control_write, commit_control_write, rollback_control_write
 from bdb_vnext.content_store import make_content_ref
 from bdb_vnext.m4c_evidence import EvidenceRecord, EvidenceStore, EvaluationRecord
@@ -39,6 +39,7 @@ EDIT_OPERATIONS: tuple[str, ...] = ("CREATE", "MODIFY", "DELETE", "RENAME")
 MAX_EDIT_OPERATIONS = 32
 MAX_EDIT_BYTES = 8 * 1024 * 1024
 MAX_ARTIFACT_BYTES = 256 * 1024
+MAX_REPLACEMENTS = 32
 MAX_VALIDATION_TIMEOUT = 300.0
 MAX_VALIDATION_OUTPUT = 1 * 1024 * 1024
 
@@ -97,6 +98,74 @@ def _decode_b64(value: object) -> bytes:
     return raw
 
 
+def _decode_text(value: object, field_name: str) -> bytes:
+    if not isinstance(value, str) or "\x00" in value:
+        _fail("invalid_replacement", f"{field_name} must be a UTF-8 text fragment")
+    try:
+        raw = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise EngineeringLoopError("invalid_replacement", f"{field_name} is not valid UTF-8") from exc
+    if len(raw) > MAX_EDIT_BYTES:
+        _fail("replacement_budget_exceeded", f"{field_name} is too large")
+    return raw
+
+
+@dataclass(frozen=True)
+class EditReplacement:
+    """One exact old-byte → new-byte replacement inside an existing file."""
+
+    old: bytes
+    new: bytes
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.old, bytes) or not self.old or not isinstance(self.new, bytes):
+            _fail("invalid_replacement", "replacement requires non-empty old and byte new values")
+        if len(self.old) > MAX_EDIT_BYTES or len(self.new) > MAX_EDIT_BYTES:
+            _fail("replacement_budget_exceeded", "replacement bytes exceed the bounded budget")
+
+    def as_dict(self) -> dict[str, str]:
+        """Canonical wire representation; text input is normalized to bytes."""
+
+        return {"old_b64": _b64(self.old), "new_b64": _b64(self.new)}
+
+    def candidate_mapping(self) -> dict[str, bytes]:
+        return {"old": self.old, "new": self.new}
+
+
+def _parse_replacements(raw: object) -> tuple[EditReplacement, ...]:
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)) or not raw or len(raw) > MAX_REPLACEMENTS:
+        _fail("invalid_replacement", "replacements must be a bounded non-empty sequence")
+    parsed: list[EditReplacement] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, Mapping):
+            _fail("invalid_replacement", "replacement must be a mapping", details={"index": index})
+        allowed = {"old_b64", "new_b64", "old_text", "new_text"}
+        if set(item) - allowed:
+            _fail("invalid_replacement", "replacement contains unknown fields", details={"index": index})
+        has_b64 = "old_b64" in item or "new_b64" in item
+        has_text = "old_text" in item or "new_text" in item
+        if has_b64 == has_text or (has_b64 and set(item) != {"old_b64", "new_b64"}) or (has_text and set(item) != {"old_text", "new_text"}):
+            _fail("invalid_replacement", "replacement must contain exactly one old/new byte or text pair", details={"index": index})
+        if has_b64:
+            old = _decode_b64(item["old_b64"])
+            new = _decode_b64(item["new_b64"])
+        else:
+            old = _decode_text(item["old_text"], "old_text")
+            new = _decode_text(item["new_text"], "new_text")
+        parsed.append(EditReplacement(old, new))
+    return tuple(parsed)
+
+
+def _digest_format(value: object) -> str:
+    if not isinstance(value, str) or len(value) != 71 or not value.startswith("sha256:"):
+        _fail("replacement_preimage_required", "preimage_digest must be a sha256 digest")
+    try:
+        int(value[7:], 16)
+    except ValueError as exc:
+        raise EngineeringLoopError("replacement_preimage_required", "preimage_digest must be a sha256 digest") from exc
+    return value
+
+
 @dataclass(frozen=True)
 class EditOperation:
     operation: Literal["CREATE", "MODIFY", "DELETE", "RENAME"]
@@ -104,6 +173,8 @@ class EditOperation:
     content: bytes | None = None
     source_path: str | None = None
     mode: int = 0o644
+    replacements: tuple[EditReplacement, ...] = ()
+    preimage_digest: str | None = None
 
     def __post_init__(self) -> None:
         if self.operation not in EDIT_OPERATIONS:
@@ -116,16 +187,26 @@ class EditOperation:
             _fail("invalid_edit_mode", "mode must be 644 or 755")
         object.__setattr__(self, "mode", self.mode & 0o777)
         if self.operation == "RENAME":
-            if self.source_path is None or self.source_path == self.path or self.content is not None:
+            if self.source_path is None or self.source_path == self.path or self.content is not None or self.replacements or self.preimage_digest is not None:
                 _fail("invalid_rename", "RENAME requires source_path and no content")
         elif self.source_path is not None:
             _fail("unexpected_source_path", "source_path is valid only for RENAME")
-        elif self.operation in {"CREATE", "MODIFY"} and not isinstance(self.content, bytes):
-            _fail("invalid_edit_bytes", f"{self.operation} requires content bytes")
-        elif self.operation == "DELETE" and self.content is not None:
+        elif self.operation == "CREATE":
+            if not isinstance(self.content, bytes) or self.replacements or self.preimage_digest is not None:
+                _fail("invalid_edit_bytes", "CREATE requires content bytes")
+        elif self.operation == "MODIFY":
+            has_content = isinstance(self.content, bytes)
+            has_replacements = bool(self.replacements)
+            if has_content == has_replacements:
+                _fail("invalid_edit_bytes", "MODIFY requires either content bytes or exact replacements")
+            if has_replacements:
+                _digest_format(self.preimage_digest)
+        elif self.operation == "DELETE" and (self.content is not None or self.replacements or self.preimage_digest is not None):
             _fail("invalid_edit_bytes", "DELETE cannot include content")
         if isinstance(self.content, bytes) and len(self.content) > MAX_EDIT_BYTES:
             _fail("invalid_edit_bytes", "edit content is too large")
+        if sum(len(item.old) + len(item.new) for item in self.replacements) > MAX_EDIT_BYTES:
+            _fail("replacement_budget_exceeded", "replacement bytes exceed the bounded budget")
 
     def as_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {"operation": self.operation, "path": self.path, "mode": self.mode}
@@ -133,10 +214,22 @@ class EditOperation:
             result["source_path"] = self.source_path
         if self.content is not None:
             result["content_b64"] = _b64(self.content)
+        if self.preimage_digest is not None:
+            result["preimage_digest"] = self.preimage_digest
+        if self.replacements:
+            result["replacements"] = [item.as_dict() for item in self.replacements]
         return result
 
     def candidate_mapping(self) -> dict[str, Any]:
-        return {"operation": self.operation, "path": self.path, "source_path": self.source_path, "content": self.content, "mode": self.mode}
+        return {
+            "operation": self.operation,
+            "path": self.path,
+            "source_path": self.source_path,
+            "content": self.content,
+            "mode": self.mode,
+            "replacements": [item.candidate_mapping() for item in self.replacements] if self.replacements else None,
+            "preimage_digest": self.preimage_digest,
+        }
 
 
 @dataclass(frozen=True)
@@ -190,13 +283,18 @@ class EditBatch:
         for raw in operations_raw:
             if not isinstance(raw, Mapping):
                 _fail("invalid_edit_operation", "edit operation must be a mapping")
+            operation_allowed = {"operation", "path", "source_path", "content_b64", "mode", "preimage_digest", "replacements"}
+            if set(raw) - operation_allowed:
+                _fail("edit_schema_mismatch", "edit operation contains unknown fields")
             operation = str(raw.get("operation", "")).upper()
             content = _decode_b64(raw["content_b64"]) if "content_b64" in raw else None
+            replacements = _parse_replacements(raw["replacements"]) if "replacements" in raw else ()
+            preimage_digest = _digest_format(raw["preimage_digest"]) if "preimage_digest" in raw else None
             try:
                 mode = int(raw.get("mode", 0o644))
             except (TypeError, ValueError) as exc:
                 raise EngineeringLoopError("invalid_edit_mode", "mode must be an integer") from exc
-            item = EditOperation(operation=operation, path=raw.get("path"), source_path=raw.get("source_path"), content=content, mode=mode)
+            item = EditOperation(operation=operation, path=raw.get("path"), source_path=raw.get("source_path"), content=content, mode=mode, replacements=replacements, preimage_digest=preimage_digest)
             for path in (item.path, item.source_path):
                 if path is None:
                     continue
@@ -204,7 +302,7 @@ class EditBatch:
                 if key in folded:
                     _fail("case_collision", "edit paths collide on a case-insensitive filesystem")
                 folded.add(key)
-            total_bytes += len(content or b"")
+            total_bytes += len(content or b"") + sum(len(replacement.old) + len(replacement.new) for replacement in replacements)
             operations.append(item)
         if total_bytes > MAX_EDIT_BYTES:
             _fail("edit_budget_exceeded", "total edit bytes exceed the bounded budget")
@@ -524,13 +622,18 @@ class EditorPort:
             for raw_operation in operations:
                 if not isinstance(raw_operation, Mapping):
                     _fail("engineering_recovery_plan_invalid", "canonical edit operation is not a mapping", details={"batch_id": str(row[0])})
+                operation_allowed = {"operation", "path", "source_path", "content_b64", "mode", "preimage_digest", "replacements"}
+                if set(raw_operation) - operation_allowed:
+                    _fail("engineering_recovery_plan_invalid", "canonical edit operation contains unknown fields", details={"batch_id": str(row[0])})
                 operation_name = str(raw_operation.get("operation", "")).upper()
                 content = _decode_b64(raw_operation["content_b64"]) if "content_b64" in raw_operation else None
+                replacements = _parse_replacements(raw_operation["replacements"]) if "replacements" in raw_operation else ()
+                preimage_digest = _digest_format(raw_operation["preimage_digest"]) if "preimage_digest" in raw_operation else None
                 try:
                     mode = int(raw_operation.get("mode", 0o644))
                 except (TypeError, ValueError) as exc:
                     raise EngineeringLoopError("engineering_recovery_plan_invalid", "canonical edit mode is invalid", details={"batch_id": str(row[0])}) from exc
-                operation = EditOperation(operation=operation_name, path=raw_operation.get("path"), source_path=raw_operation.get("source_path"), content=content, mode=mode)
+                operation = EditOperation(operation=operation_name, path=raw_operation.get("path"), source_path=raw_operation.get("source_path"), content=content, mode=mode, replacements=replacements, preimage_digest=preimage_digest)
                 for operation_path in (operation.path, operation.source_path):
                     if operation_path is None:
                         continue
@@ -538,16 +641,23 @@ class EditorPort:
                     if folded in seen_paths:
                         _fail("engineering_recovery_plan_invalid", "canonical edit batch contains a case-colliding path", details={"batch_id": str(row[0]), "path": operation_path})
                     seen_paths.add(folded)
-                total_bytes += len(content or b"")
+                total_bytes += len(content or b"") + sum(len(replacement.old) + len(replacement.new) for replacement in replacements)
                 parsed_operations.append(operation)
             if total_bytes > MAX_EDIT_BYTES:
                 _fail("engineering_recovery_plan_invalid", "canonical edit batch exceeds its byte budget", details={"batch_id": str(row[0])})
             for operation in parsed_operations:
                 path = operation.path
                 if operation.operation == "MODIFY":
-                    if path not in working or operation.content is None:
+                    if path not in working:
                         _fail("engineering_recovery_plan_invalid", "MODIFY does not address an existing file", details={"batch_id": str(row[0]), "path": path})
-                    working[path] = operation.content
+                    if operation.content is not None:
+                        working[path] = operation.content
+                    else:
+                        working[path] = apply_exact_replacements(
+                            working[path],
+                            [item.candidate_mapping() for item in operation.replacements],
+                            operation.preimage_digest,
+                        )
                     working_modes[path] = "100755" if operation.mode & 0o111 else "100644"
                 elif operation.operation == "CREATE":
                     if path in working or operation.content is None:
@@ -795,7 +905,20 @@ class EngineeringLoop:
             _fail("repo_view_mismatch", "engineering loop cannot change exact base RepoView")
         for operation in batch.operations:
             if operation.operation == "MODIFY":
-                self._desired[operation.path] = operation.content
+                if operation.content is not None:
+                    self._desired[operation.path] = operation.content
+                else:
+                    if operation.path in self._desired:
+                        before = self._desired[operation.path]
+                    else:
+                        before = base_view.read_bytes(operation.path)
+                    if before is None:
+                        _fail("replacement_preimage_mismatch", "exact replacement target is not an existing file")
+                    self._desired[operation.path] = apply_exact_replacements(
+                        before,
+                        [item.candidate_mapping() for item in operation.replacements],
+                        operation.preimage_digest,
+                    )
             elif operation.operation == "CREATE":
                 self._desired[operation.path] = operation.content
             elif operation.operation == "DELETE":

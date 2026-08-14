@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -9,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from bdb_shared.evidence import semantic_digest
-from bdb_vnext.candidate import CandidateStore
+from bdb_vnext.candidate import CandidateError, CandidateStore
 from bdb_vnext.engineering_loop import (
     EditBatch,
     EditorPort,
@@ -32,13 +33,17 @@ def _git(repo: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def _subject(tmp_path: Path) -> Path:
+def _subject(tmp_path: Path, *, crlf: bool = False) -> Path:
     repo = tmp_path / "subject"
     repo.mkdir()
     _git(repo, "init", "-q")
     _git(repo, "config", "user.email", "p1@example.invalid")
     _git(repo, "config", "user.name", "P1 Test")
-    (repo / "target.txt").write_text("TODO\n", encoding="utf-8")
+    if crlf:
+        _git(repo, "config", "core.autocrlf", "false")
+        (repo / "target.txt").write_bytes(b"header\r\nfirst=TODO\r\nkeep=42\r\nsecond=TODO\r\ntrailer\r\n")
+    else:
+        (repo / "target.txt").write_text("TODO\n", encoding="utf-8")
     (repo / "checker.py").write_text(
         "from pathlib import Path\n"
         "raise SystemExit(0 if Path('target.txt').read_text(encoding='utf-8') == 'PASS\\n' else 1)\n",
@@ -50,10 +55,10 @@ def _subject(tmp_path: Path) -> Path:
 
 
 @contextmanager
-def _stack(tmp_path: Path):
+def _stack(tmp_path: Path, *, crlf: bool = False):
     runtime = tmp_path / "runtime"
     legacy = tmp_path / "legacy"
-    subject = _subject(tmp_path)
+    subject = _subject(tmp_path, crlf=crlf)
     admission = open_vnext_admission_composition(runtime, legacy_root=legacy)
     receipt = admission.authority.admit(
         ShadowSubmissionRequest(
@@ -295,6 +300,99 @@ def test_edit_artifact_and_validation_boundaries_fail_closed(tmp_path: Path) -> 
     with pytest.raises(EngineeringLoopError) as caught:
         runner.run(command, tmp_path)
     assert caught.value.code == "validation_command_not_allowed"
+
+
+def test_exact_replacements_preserve_unrelated_crlf_bytes(tmp_path: Path) -> None:
+    with _stack(tmp_path, crlf=True) as (subject, view, receipt, _kernel, store, evidence, _publication, work_id, lease):
+        candidate_id = "candidate:p1:exact-replacements"
+        workspace = store.create_workspace(candidate_id=candidate_id, base_view=view)
+        before = view.read_bytes("target.txt")
+        tree = store._tree_digest(store._base_entries(view))
+        preimage = "sha256:" + hashlib.sha256(before).hexdigest()
+        batch = _artifact(
+            view.view_id,
+            tree,
+            candidate_id=candidate_id,
+            task_id=receipt.task_id,
+            work_id=work_id,
+            run_id="run:p1",
+            lease_id=lease.lease_id,
+            fence=lease.fence,
+            generation=store.generation,
+            operations=[
+                {
+                    "operation": "MODIFY",
+                    "path": "target.txt",
+                    "preimage_digest": preimage,
+                    "replacements": [
+                        {"old_text": "first=TODO\r\n", "new_text": "first=PASS\r\n"},
+                        {"old_text": "second=TODO\r\n", "new_text": "second=PASS\r\n"},
+                    ],
+                }
+            ],
+        )
+        editor = EditorPort(store, evidence_store=evidence)
+        prepared = editor.prepare_batch(batch, base_view=view, workspace=workspace)
+        assert prepared.state == "PREPARED"
+        observed = editor.apply_batch(batch)
+        assert observed.state == "OBSERVED"
+        assert (workspace / "target.txt").read_bytes() == b"header\r\nfirst=PASS\r\nkeep=42\r\nsecond=PASS\r\ntrailer\r\n"
+        assert (workspace / "target.txt").read_bytes().count(b"\r\n") == before.count(b"\r\n")
+
+
+def test_exact_replacements_fail_closed_on_stale_or_ambiguous_preimage(tmp_path: Path) -> None:
+    with _stack(tmp_path, crlf=True) as (_subject, view, receipt, _kernel, store, evidence, _publication, work_id, lease):
+        editor = EditorPort(store, evidence_store=evidence)
+        tree = store._tree_digest(store._base_entries(view))
+        stale_workspace = store.create_workspace(candidate_id="candidate:p1:stale-replacement", base_view=view)
+        stale = _artifact(
+            view.view_id,
+            tree,
+            candidate_id="candidate:p1:stale-replacement",
+            task_id=receipt.task_id,
+            work_id=work_id,
+            run_id="run:p1",
+            lease_id=lease.lease_id,
+            fence=lease.fence,
+            generation=store.generation,
+            operations=[
+                {
+                    "operation": "MODIFY",
+                    "path": "target.txt",
+                    "preimage_digest": "sha256:" + "0" * 64,
+                    "replacements": [{"old_text": "first=TODO\r\n", "new_text": "first=PASS\r\n"}],
+                }
+            ],
+        )
+        with pytest.raises(CandidateError) as stale_error:
+            editor.prepare_batch(stale, base_view=view, workspace=stale_workspace)
+        assert stale_error.value.code == "replacement_preimage_mismatch"
+        assert (stale_workspace / "target.txt").read_bytes() == view.read_bytes("target.txt")
+
+        ambiguous_workspace = store.create_workspace(candidate_id="candidate:p1:ambiguous-replacement", base_view=view)
+        ambiguous = _artifact(
+            view.view_id,
+            tree,
+            candidate_id="candidate:p1:ambiguous-replacement",
+            task_id=receipt.task_id,
+            work_id=work_id,
+            run_id="run:p1",
+            lease_id=lease.lease_id,
+            fence=lease.fence,
+            generation=store.generation,
+            operations=[
+                {
+                    "operation": "MODIFY",
+                    "path": "target.txt",
+                    "preimage_digest": "sha256:" + hashlib.sha256(view.read_bytes("target.txt")).hexdigest(),
+                    "replacements": [{"old_text": "TODO", "new_text": "PASS"}],
+                }
+            ],
+        )
+        with pytest.raises(CandidateError) as ambiguous_error:
+            editor.prepare_batch(ambiguous, base_view=view, workspace=ambiguous_workspace)
+        assert ambiguous_error.value.code == "replacement_match_count"
+        assert (ambiguous_workspace / "target.txt").read_bytes() == view.read_bytes("target.txt")
 
 
 def test_stale_tree_and_identity_are_rejected_without_mutation(tmp_path: Path) -> None:

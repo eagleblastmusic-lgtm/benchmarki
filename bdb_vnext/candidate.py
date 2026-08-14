@@ -80,6 +80,75 @@ def _digest(raw: bytes) -> str:
     return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
+def apply_exact_replacements(
+    before: bytes,
+    replacements: Sequence[Mapping[str, Any]],
+    preimage_digest: object,
+) -> bytes:
+    """Build an exact postimage from non-overlapping byte replacements.
+
+    The complete preimage is bound before any replacement is considered.  Each
+    old byte string must occur exactly once (including overlapping matches),
+    and all spans must be disjoint.  This keeps the operation deterministic and
+    prevents a later replacement from matching bytes introduced by an earlier
+    one.
+    """
+
+    if not isinstance(preimage_digest, str) or preimage_digest != _digest(before):
+        _fail("replacement_preimage_mismatch", "exact replacement preimage does not match the current file")
+    if not isinstance(replacements, Sequence) or isinstance(replacements, (str, bytes)) or not replacements:
+        _fail("replacement_invalid", "exact replacement set must be non-empty")
+    if len(replacements) > MAX_PATHS:
+        _fail("replacement_budget_exceeded", "exact replacement set is too large")
+
+    spans: list[tuple[int, int, bytes]] = []
+    total_bytes = 0
+    for index, raw in enumerate(replacements):
+        if not isinstance(raw, Mapping):
+            _fail("replacement_invalid", "exact replacement must be a mapping", details={"index": index})
+        old = raw.get("old")
+        new = raw.get("new")
+        if not isinstance(old, bytes) or not old or not isinstance(new, bytes):
+            _fail("replacement_invalid", "exact replacement requires non-empty old and byte new values", details={"index": index})
+        if len(old) > MAX_FILE_BYTES or len(new) > MAX_FILE_BYTES:
+            _fail("replacement_budget_exceeded", "exact replacement bytes exceed the file budget", details={"index": index})
+        positions: list[int] = []
+        cursor = 0
+        while True:
+            match = before.find(old, cursor)
+            if match < 0:
+                break
+            positions.append(match)
+            cursor = match + 1
+        if len(positions) != 1:
+            _fail(
+                "replacement_match_count",
+                "each exact replacement must match exactly once",
+                details={"index": index, "matches": len(positions)},
+            )
+        start = positions[0]
+        spans.append((start, start + len(old), new))
+        total_bytes += len(old) + len(new)
+        if total_bytes > MAX_FILE_BYTES:
+            _fail("replacement_budget_exceeded", "exact replacement bytes exceed the file budget")
+
+    spans.sort(key=lambda item: item[0])
+    for previous, current in zip(spans, spans[1:]):
+        if current[0] < previous[1]:
+            _fail("replacement_overlap", "exact replacement spans overlap")
+
+    result = bytearray()
+    cursor = 0
+    for start, end, new in spans:
+        result.extend(before[cursor:start])
+        result.extend(new)
+        cursor = end
+    result.extend(before[cursor:])
+    if len(result) > MAX_FILE_BYTES:
+        _fail("replacement_result_too_large", "exact replacement postimage exceeds the file budget")
+    return bytes(result)
+
+
 def _id(value: object, *, field: str) -> str:
     if not isinstance(value, str) or not value or len(value) > 192 or "\x00" in value:
         _fail("invalid_identifier", f"{field} must be a bounded non-empty identifier")
@@ -160,6 +229,18 @@ def _path_exists(path: Path) -> bool:
     """Return existence without following a dangling symlink."""
 
     return os.path.lexists(str(path))
+
+
+def _effect_value(value: object) -> object:
+    """Convert bounded operation metadata into canonical JSON-safe values."""
+
+    if isinstance(value, bytes):
+        return value.hex()
+    if isinstance(value, Mapping):
+        return {str(key): _effect_value(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_effect_value(item) for item in value]
+    return value
 
 
 def _absence_ref() -> ContentRef:
@@ -1034,11 +1115,13 @@ class CandidateStore:
                 _fail("invalid_edit_bytes", "edit content must be bytes")
             if isinstance(content, bytes) and len(content) > MAX_FILE_BYTES:
                 _fail("invalid_edit_bytes", "edit content is too large")
+            replacements = raw.get("replacements")
+            preimage_digest = raw.get("preimage_digest")
             source_path = raw.get("source_path")
             if source_path is not None:
                 source_path = _path(source_path)
             if operation == "RENAME":
-                if source_path is None or source_path == path or content is not None:
+                if source_path is None or source_path == path or content is not None or replacements is not None or preimage_digest is not None:
                     _fail("invalid_rename", "RENAME requires a distinct source_path and no content")
                 if source_path.casefold() == path.casefold():
                     _fail("case_collision", "RENAME cannot change only the case of a Windows path")
@@ -1053,12 +1136,19 @@ class CandidateStore:
             else:
                 if source_path is not None:
                     _fail("unexpected_source_path", "source_path is valid only for RENAME")
-                if operation in {"CREATE", "MODIFY"} and not isinstance(content, bytes):
-                    _fail("invalid_edit_bytes", f"{operation} requires content bytes")
-                if operation == "DELETE" and content is not None:
+                if operation == "CREATE" and (not isinstance(content, bytes) or replacements is not None or preimage_digest is not None):
+                    _fail("invalid_edit_bytes", "CREATE requires content bytes")
+                if operation == "MODIFY":
+                    has_content = isinstance(content, bytes)
+                    has_replacements = replacements is not None
+                    if has_content == has_replacements:
+                        _fail("invalid_edit_bytes", "MODIFY requires either content bytes or exact replacements")
+                    if has_replacements and not isinstance(preimage_digest, str):
+                        _fail("replacement_preimage_required", "exact replacements require a preimage digest")
+                if operation == "DELETE" and (content is not None or replacements is not None or preimage_digest is not None):
                     _fail("invalid_edit_bytes", "DELETE cannot include content")
-                normalized.append({"operation": operation, "path": path, "mode": mode, "content": content})
-                expanded.append({"operation": operation, "path": path, "mode": mode, "content": content})
+                normalized.append({"operation": operation, "path": path, "mode": mode, "content": content, "replacements": replacements, "preimage_digest": preimage_digest})
+                expanded.append({"operation": operation, "path": path, "mode": mode, "content": content, "replacements": replacements, "preimage_digest": preimage_digest})
 
         final_entries = dict(base_entries)
         folded: dict[str, str] = {path.casefold(): path for path in final_entries}
@@ -1113,9 +1203,16 @@ class CandidateStore:
                 target = _safe_child(workspace, path)
                 before = _read_exact(target)
                 before_mode = _file_mode(target)
-                after = item.get("content")
-                if not isinstance(after, bytes):
-                    _fail("invalid_edit_bytes", "MODIFY requires content bytes")
+                replacements = item.get("replacements")
+                preimage_digest = item.get("preimage_digest")
+                if replacements is not None:
+                    after = apply_exact_replacements(before, replacements, preimage_digest)
+                else:
+                    after = item.get("content")
+                    if not isinstance(after, bytes):
+                        _fail("invalid_edit_bytes", "MODIFY requires content bytes")
+                    if preimage_digest is not None and preimage_digest != _digest(before):
+                        _fail("replacement_preimage_mismatch", "exact replacement preimage does not match the current file")
                 before_ref = make_content_ref("application/octet-stream", "m4b-candidate-before-v1", before)
                 after_ref = make_content_ref("application/octet-stream", "m4b-candidate-after-v1", after)
                 self.content_store.publish(before_ref, before)
@@ -1141,7 +1238,7 @@ class CandidateStore:
             "workspace_generation": self.generation,
             "config_digest": self.config_digest,
             "paths": [item.as_dict() for item in plans],
-            "operations": [{key: (value.hex() if isinstance(value, bytes) else value) for key, value in item.items()} for item in normalized],
+            "operations": [{key: _effect_value(value) for key, value in item.items()} for item in normalized],
         }
         expected_effect_id = semantic_digest(effect_material)
         if effect_id is not None and effect_id != expected_effect_id:
