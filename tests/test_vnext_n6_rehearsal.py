@@ -530,7 +530,7 @@ const source = generated.split('\\n').filter((line) =>
   !line.startsWith('window.addEventListener(\"popstate\"') &&
   !line.startsWith('setInterval(') &&
   !line.startsWith('void synchronizeConversation();')
-).join('\\n') + '\\nwindow.__p1Test = {{ latestEngineeringPrompt, strictEngineeringArtifact, renderedAssistantText }};';
+).join('\\n') + '\\nwindow.__p1Test = {{ latestEngineeringPrompt, engineeringObservation, strictEngineeringArtifact, renderedAssistantText }};';
 
 function node(role, text) {{
   return {{
@@ -593,6 +593,29 @@ const renderedClone = {{
 }};
 const rendered = artifactFunctions.renderedAssistantText({{ cloneNode: () => renderedClone }});
 if (rendered !== '```json\\n{{"schema":"bdb-vnext-edit-v1"}}\\n```') throw new Error('rendered ChatGPT code block was not reconstructed as one fenced artifact: ' + rendered);
+
+const engineeringUser = node('user', newlinePrompt);
+const engineeringPre = {{
+  replacement: null,
+  innerText: 'JSON{{"schema":"bdb-vnext-edit-v1"}}',
+  querySelector: (selector) => selector === '[data-language]' ? {{ getAttribute: () => 'json', innerText: '{{"schema":"bdb-vnext-edit-v1"}}' }} : null,
+  replaceWith(value) {{ this.replacement = value; }},
+}};
+const engineeringAssistant = {{
+  dataset: {{ messageAuthorRole: 'assistant' }},
+  innerText: 'JSON{{"schema":"bdb-vnext-edit-v1"}}',
+  textContent: 'JSON{{"schema":"bdb-vnext-edit-v1"}}',
+  closest: () => null,
+  cloneNode: () => ({{
+    querySelectorAll: () => [engineeringPre],
+    get innerText() {{ return engineeringPre.replacement?.textContent || engineeringPre.innerText; }},
+    get textContent() {{ return this.innerText; }},
+  }}),
+}};
+const engineeringFunctions = functionsFor([engineeringUser, engineeringAssistant]);
+const engineeringPrompt = engineeringFunctions.latestEngineeringPrompt();
+const engineeringObserved = engineeringFunctions.engineeringObservation(engineeringPrompt);
+if (engineeringObserved.raw_answer !== '```json\\n{{"schema":"bdb-vnext-edit-v1"}}\\n```') throw new Error('engineering observation did not reconstruct rendered ChatGPT JSON code block: ' + engineeringObserved.raw_answer);
 """
     result = subprocess.run(["node", "--input-type=module"], input=harness, capture_output=True, text=True, timeout=30, check=False)
     assert result.returncode == 0, result.stderr or result.stdout

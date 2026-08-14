@@ -1507,7 +1507,7 @@ function latestEngineeringPrompt() {
 function engineeringObservation(prompt) {
   const next = prompt.turns[prompt.index + 1];
   if (!next || next.dataset.messageAuthorRole !== "assistant" || next.closest("[data-bdb-n6-panel]")) throw new Error("BDB engineering assistant answer is stale or ambiguous");
-  const text = canonicalPrompt(next.innerText || next.textContent || "");
+  const text = renderedAssistantText(next);
   return text ? {raw_answer: text} : null;
 }
 async function stableEngineeringObservation(prompt) {
