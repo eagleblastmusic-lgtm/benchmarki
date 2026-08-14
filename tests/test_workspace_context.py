@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -96,6 +97,27 @@ def test_snapshot_reports_only_allowed_dirty_path_names(tmp_path: Path) -> None:
     serialized = json.dumps(snapshot, ensure_ascii=False)
     assert "new private value" not in serialized
     assert "private/secret.txt" not in serialized
+
+
+def test_dirty_crlf_checkout_context_uses_committed_lf_blob_bytes(tmp_path: Path) -> None:
+    root = repository(tmp_path)
+    path = root / "src" / "app.py"
+    committed = path.read_bytes()
+    physical = committed.replace(b"\n", b"\r\n")
+    assert physical != committed
+    path.write_bytes(physical)
+    config = context_config(tmp_path, root, ("src/app.py",))
+
+    snapshot = WorkspaceContextBuilder(config).build()
+    app = next(item for item in snapshot["snapshot_files"] if item["path"] == "src/app.py")
+
+    assert snapshot["source_clean"] is False
+    assert snapshot["controlled_clean"] is False
+    assert snapshot["source_changes"] == ["src/app.py"]
+    assert snapshot["snapshot_source"] == "git_blobs"
+    assert app["content"] == committed.decode("utf-8")
+    assert app["bytes"] == len(committed)
+    assert app["sha256"] == "sha256:" + hashlib.sha256(committed).hexdigest()
 
 
 def test_snapshot_distinguishes_unrelated_dirty_paths_from_controlled_scope(

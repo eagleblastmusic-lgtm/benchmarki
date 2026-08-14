@@ -108,11 +108,12 @@ class WorkspaceContextBuilder:
                     self._stable_cache.move_to_end(cache_key)
                     stable = deepcopy(cached)
         if stable is None:
-            stable = (
-                self._build_git_snapshot(head)
-                if not allowed_changes
-                else self._build_stable_snapshot()
-            )
+            # Model-facing source context is always reconstructed from the
+            # committed Git tree. A mutable checkout may be CRLF-normalized
+            # (or otherwise dirty) even when its canonical blob is LF; using
+            # those physical bytes would produce a preimage digest that the
+            # exact RepoView/Candidate path must correctly reject.
+            stable = self._build_git_snapshot(head)
             if not allowed_changes:
                 with self._cache_lock:
                     self._stable_cache[cache_key] = deepcopy(stable)
