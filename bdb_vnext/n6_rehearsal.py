@@ -1331,7 +1331,7 @@ class N6RehearsalService:
                 _fail("engineering_disposition_missing", "final engineering evidence has no current disposition")
             publication = plane.publication.publish(
                 request_id=_stable_id("p1-publication", submission_key),
-                task_id=found["task_id"], work_id=ids["work_id"], intent_revision_id=P1_ENGINEERING_INTENT_REVISION,
+                task_id=found["task_id"], work_id=ids["work_id"], intent_revision_id=found["intent_revision_id"],
                 result_payload={"schema": "bdb-vnext-p1-engineering-publication-v1", "candidate_view_id": candidate_view.view_id, "evidence_id": evidence.evidence_id, "evaluation_id": evaluation.evaluation_id, "disposition_id": disposition.disposition_id, "status": "PASS"},
                 consumer_id=_stable_id("p1-browser", _task_conversation(found)), consumer_kind="BROWSER", conversation_id=_task_conversation(found), profile_id=None, candidate_id=candidate_id, candidate_view_id=candidate_view.view_id, evidence_id=evidence.evidence_id, evaluation_id=evaluation.evaluation_id, disposition_id=disposition.disposition_id, generation="bdb-vnext-g1",
             )

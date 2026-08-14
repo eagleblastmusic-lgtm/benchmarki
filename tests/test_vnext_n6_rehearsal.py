@@ -1184,3 +1184,65 @@ def test_engineering_prepare_rejects_foreign_run_and_lease(tmp_path: Path, monke
     with pytest.raises(N6RehearsalError) as foreign_lease_error:
         service._engineering_prepare(**payload)
     assert foreign_lease_error.value.code == "engineering_run_conflict"
+
+
+def test_engineering_finalize_uses_canonical_task_intent_revision_id(tmp_path: Path, monkeypatch) -> None:
+    """Publication must receive the Task's exact revision identity, not its label."""
+
+    service, execution, _target = _p1_service_for_recovery_tests(tmp_path, monkeypatch)
+    payload = {
+        "submission_key": "p1-browser:finalize-intent-revision",
+        "prompt": "BDB-P1-CALC-BROWSER-E2E\nfinalize intent revision",
+        "conversation_id": "chatgpt-conversation:finalize-intent-revision",
+        "profile_id": None,
+    }
+    prepared = _p1_event(service, execution, "engineering_prepare", payload, "p1:finalize:prepare")["result"]
+    assert service.engineering_view is not None
+    html = service.engineering_view.read_bytes("index.html") + (
+        b'\n<!-- #display aria-label="Backspace" data-operation="equals" '
+        b'data-operation="divide" -->\n'
+    )
+    javascript = service.engineering_view.read_bytes("app.js") + b'\n// keydown; division by zero\n'
+    artifact = EditBatch.from_mapping({
+        "schema": "bdb-vnext-edit-v1",
+        "base_view_id": prepared["base_repo_view"]["view_id"],
+        "expected_tree_digest": prepared["current_tree_digest"],
+        "task_id": prepared["task_id"],
+        "work_id": prepared["work_id"],
+        "run_id": prepared["run_id"],
+        "lease_id": prepared["lease_id"],
+        "fence": prepared["fence"],
+        "candidate_id": prepared["candidate_id"],
+        "workspace_generation": prepared["workspace_generation"],
+        "operations": [
+            {"operation": "MODIFY", "path": "index.html", "content_b64": base64.b64encode(html).decode("ascii")},
+            {"operation": "MODIFY", "path": "app.js", "content_b64": base64.b64encode(javascript).decode("ascii")},
+        ],
+        "budget": {"max_operations": 3, "max_bytes": 32768},
+    })
+    raw_answer = "```json\n" + json.dumps(artifact.as_dict(), sort_keys=True) + "\n```"
+    event_payload = {
+        "submission_key": payload["submission_key"],
+        "conversation_id": payload["conversation_id"],
+        "prompt_digest": _sha(payload["prompt"].encode("utf-8")),
+        "raw_answer": raw_answer,
+        "raw_answer_digest": _sha(raw_answer.encode("utf-8")),
+        "artifact": artifact.as_dict(),
+    }
+    validated = _p1_event(service, execution, "engineering_artifact", event_payload, "p1:finalize:artifact")
+    assert validated["result"]["validation_status"] == "PASS"
+
+    sealed = _p1_event(
+        service,
+        execution,
+        "engineering_finalize",
+        {"submission_key": payload["submission_key"], "candidate_id": prepared["candidate_id"]},
+        "p1:finalize:seal",
+    )
+    assert sealed["status"] == "ENGINEERING_SEALED"
+    assert sealed["result"]["status"] == "SEALED"
+    with service._open() as plane:
+        task = plane.admission.authority.task(prepared["task_id"])
+        assert task is not None
+        assert sealed["result"]["publication"]["intent_revision_id"] == task.intent_revision_id
+        assert len(plane.publication.publications_for_task(prepared["task_id"])) == 1
