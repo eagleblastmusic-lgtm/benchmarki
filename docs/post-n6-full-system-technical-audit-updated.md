@@ -154,4 +154,28 @@ The bounded P1 calculator pilot is now closed as a durable proven baseline. This
 - legacy: `operational + isolated + untouched`;
 - no calculator source mutation or BDB runtime change is part of this closure.
 
-The next canonical development step after this frozen P1 baseline is **P0-STAB-1 — Control DB authority / data-integrity closure (Phase 0)**. This entry is a handoff only; P0-STAB-1 is not started here.
+P0-STAB-1 — Control DB authority / data-integrity closure (Phase 0) was subsequently completed at `96ee6d237c4d32d989cf02b6de792c315a31f7ab`. The next canonical development step after this frozen P1 baseline is **Phase 2 — Measured Day-to-day Repository Work**; this document records the P1-CWEL-1 reconciliation below and does not start Phase 2.
+
+## Z. P1-CWEL-1 — Controlled Worktree Engineering Loop closure
+
+Fresh reconciliation basis: branch `bdb-vnext`, HEAD `96ee6d237c4d32d989cf02b6de792c315a31f7ab`, tree `15f08a45e35b6e2724c18d52df5e6016815dc197`, upstream equal, worktree clean. `P1-CWEL-1 = CLOSED`.
+
+The implementation and the accepted calculator pilot already satisfy the Phase 1 acceptance. No runtime behavior, calculator bytes, authority boundary, or production state changed in this closure.
+
+| P1-CWEL-1 requirement | Status | Evidence |
+|---|---|---|
+| Single Browser-facing `EditorPort` through the vNext composition root | CLOSED | `bdb_vnext/engineering_loop.py` (`EditorPort`); `tests/test_vnext_engineering_loop.py::test_editor_port_is_composed_by_the_single_vnext_root` |
+| Strict model artifact / operation adapter (`BDB_EDIT_V1`) | CLOSED | `EditBatch.from_mapping` rejects other schemas/unknown fields and enforces canonical digests, paths, identity, and budgets; the calculator pilot used real model-authored artifacts |
+| CREATE / MODIFY / DELETE / RENAME | CLOSED | `EditOperation` and `test_edit_operations_create_delete_rename_have_exact_tree_proof` |
+| Exact base/tree/workspace/fence preconditions | CLOSED | `EditorPort._validate_batch`, `test_stale_tree_and_identity_are_rejected_without_mutation`, stale-fence and replay regressions |
+| Path, byte, case-collision, and operation-count budgets | CLOSED | bounded `EditBatch` parser/validation constants and negative parser tests |
+| Bounded validation command runner and typed feedback | CLOSED | `ValidationPolicy`/`ValidationRunner` use exact argv/cwd allowlists, timeout/output limits, containment, and typed `ValidationResult.feedback` |
+| Iterative Browser feedback / Resume path | CLOSED | calculator closure records real normal-ChatGPT Browser → BDB_EDIT_V1 → validation feedback → next model edit in one Task/Work lineage |
+| Candidate observation and exact seal | CLOSED | `CandidateStore` seal/tree proof and `EngineeringLoop.finalize`; calculator Candidate is `SEALED`/`CERTAIN` with exact tree/view digests |
+| At least two iterations including failure → repair | CLOSED | `test_iterative_model_edit_validation_candidate_evidence_publication_resume` plus accepted calculator pilot (`P1_CANONICAL_RECOVERY_AND_CALCULATOR_PASS`) |
+| Crash/restart and observe-before-retry recovery | CLOSED | `recover_candidate`, `recover_accumulated_candidate`, `test_recovery_observes_before_any_retry`, and P1 canonical Browser recovery evidence |
+| Stale batch rejection and duplicate replay safety | CLOSED | stale identity/tree tests and `test_exact_artifact_replay_uses_canonical_batch_without_second_apply` |
+| Exact final tree with main checkout/ref unchanged | CLOSED | exact tree proof tests and isolated calculator Candidate; no BDB ref movement or production checkout mutation |
+| Phase-1 containment (no network/ref/push/production/legacy mutation) | CLOSED | frozen calculator closure and current clean basis: production `OFF/OFF/OFF`, legacy untouched |
+
+The roadmap's “unified diff adapter” is satisfied by the frozen `BDB_EDIT_V1` operation artifact adapter; no second patch DSL is introduced. Focused validation for this reconciliation is limited to the engineering-loop regression and `git diff --check`; the prior P0-focused regression evidence remains attached to commit `96ee6d2`. The next canonical development step is **Phase 2 — Measured Day-to-day Repository Work** (fresh Basis Check first), and it is not started here.
