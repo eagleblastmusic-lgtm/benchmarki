@@ -471,7 +471,25 @@ class EditorPort:
         if existing is not None:
             existing_batch = self.connection.execute("SELECT artifact_digest FROM p1_edit_batches WHERE batch_id=?", (self._batch_id(batch),)).fetchone()
             if existing_batch is not None and str(existing_batch[0]) == batch.artifact_digest:
-                return existing
+                status_row = self.connection.execute("SELECT status FROM p1_edit_batches WHERE batch_id=?", (self._batch_id(batch),)).fetchone()
+                status = str(status_row[0]) if status_row is not None else ""
+                # A concurrent/retried Browser delivery can observe the
+                # durable batch row before the Candidate transition is
+                # visible on its connection.  Only a completed batch is a
+                # replay; a PREPARED batch must still reconcile/apply its
+                # exact plan, even if the Candidate row is momentarily
+                # OBSERVED from the preceding iteration.
+                if status in {"OBSERVED", "SEALED"}:
+                    return existing
+                if status != "PREPARED":
+                    _fail("edit_batch_state_conflict", "existing edit batch has an unsupported lifecycle status")
+                if existing.state == "PREPARED":
+                    return existing
+                if desired_files is None:
+                    _fail("desired_state_required", "a prepared repeated edit batch requires the accumulated desired state")
+                record = self.candidate_store.reprepare_desired(candidate_id=batch.candidate_id, base_view=base_view, workspace_root=workspace_path, desired_files=desired_files)
+                self._persist_batch(batch, status="PREPARED", effect_certainty=record.effect_certainty)
+                return record
         if existing is None:
             record = self.candidate_store.prepare_operations(candidate_id=batch.candidate_id, work_id=batch.work_id, task_id=batch.task_id, lease_id=batch.lease_id, fence=batch.fence, base_view=base_view, workspace_root=workspace_path, operations=[item.candidate_mapping() for item in batch.operations])
         else:
@@ -486,8 +504,16 @@ class EditorPort:
     def apply_batch(self, batch: EditBatch) -> CandidateRecord:
         existing = self.candidate_store.get(batch.candidate_id)
         if existing is not None and existing.state in {"OBSERVED", "SEALED"}:
-            self._persist_batch(batch, status=existing.state, effect_certainty=existing.effect_certainty)
-            return existing
+            row = self.connection.execute("SELECT artifact_digest,candidate_id,status FROM p1_edit_batches WHERE batch_id=?", (self._batch_id(batch),)).fetchone()
+            if row is not None and (str(row[0]) != batch.artifact_digest or str(row[1]) != batch.candidate_id):
+                _fail("edit_batch_conflict", "batch identity is already bound to different artifact bytes")
+            # Candidate state alone is insufficient during iterative delivery:
+            # a new batch may already be durably PREPARED while the preceding
+            # OBSERVED snapshot is still visible to this connection.  Only a
+            # completed batch may take the replay/no-op path.
+            if row is None or str(row[2]) in {"OBSERVED", "SEALED"}:
+                self._persist_batch(batch, status=existing.state, effect_certainty=existing.effect_certainty)
+                return existing
         try:
             record = self.candidate_store.apply(batch.candidate_id)
         except CandidateError:

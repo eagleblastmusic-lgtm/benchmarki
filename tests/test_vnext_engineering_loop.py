@@ -262,3 +262,36 @@ def test_exact_artifact_replay_uses_canonical_batch_without_second_apply(tmp_pat
             "validations": int(store._connection.execute("SELECT COUNT(*) FROM p1_validation_runs").fetchone()[0]),
         }
         assert after == before
+
+
+def test_prepared_follow_up_batch_is_applied_when_observed_snapshot_is_stale(tmp_path: Path) -> None:
+    """A repeated Browser delivery must not validate the preceding tree.
+
+    The real pilot exposed a narrow race: a new batch was durably PREPARED
+    while another connection still observed the preceding Candidate as
+    OBSERVED.  Candidate state alone must not turn that new batch into a
+    replay/no-op.
+    """
+    with _stack(tmp_path) as (_subject, view, receipt, _kernel, store, evidence, _publication, work_id, lease):
+        candidate_id = "candidate:p1:prepared-follow-up"
+        workspace = store.create_workspace(candidate_id=candidate_id, base_view=view)
+        base_tree = store._tree_digest(store._base_entries(view))
+        first = _artifact(view.view_id, base_tree, candidate_id=candidate_id, task_id=receipt.task_id, work_id=work_id, run_id="run:p1", lease_id=lease.lease_id, fence=lease.fence, generation=store.generation, operations=[{"operation": "MODIFY", "path": "target.txt", "content_b64": base64.b64encode(b"FAIL\n").decode("ascii")}])
+        editor = EditorPort(store, evidence_store=evidence)
+        assert editor.prepare_batch(first, base_view=view, workspace=workspace).state == "PREPARED"
+        assert editor.apply_batch(first).state == "OBSERVED"
+        current_tree = store._tree_digest(store._workspace_entries(workspace, object_format=view.object_format))
+        follow_up = _artifact(view.view_id, current_tree, candidate_id=candidate_id, task_id=receipt.task_id, work_id=work_id, run_id="run:p1", lease_id=lease.lease_id, fence=lease.fence, generation=store.generation, operations=[{"operation": "MODIFY", "path": "target.txt", "content_b64": base64.b64encode(b"PASS\n").decode("ascii")}])
+        prepared = editor.prepare_batch(follow_up, base_view=view, workspace=workspace, desired_files={"target.txt": b"PASS\n"})
+        assert prepared.state == "PREPARED"
+        store._connection.execute("UPDATE m4b_candidate_effects SET state='OBSERVED',effect_certainty='CERTAIN' WHERE candidate_id=?", (candidate_id,))
+        store._connection.commit()
+        # A retry can now observe the same PREPARED row while another
+        # connection still has the preceding OBSERVED snapshot.  Re-running
+        # preparation must reconcile the exact plan before apply.
+        prepared_again = editor.prepare_batch(follow_up, base_view=view, workspace=workspace, desired_files={"target.txt": b"PASS\n"})
+        assert prepared_again.state == "PREPARED"
+        applied = editor.apply_batch(follow_up)
+        assert applied.state == "OBSERVED"
+        assert (workspace / "target.txt").read_text(encoding="utf-8") == "PASS\n"
+        assert store._connection.execute("SELECT status FROM p1_edit_batches WHERE artifact_digest=?", (follow_up.artifact_digest,)).fetchone()[0] == "OBSERVED"
