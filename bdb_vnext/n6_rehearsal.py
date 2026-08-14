@@ -2213,6 +2213,54 @@ def _build_shim(output: Path, *, python_executable: Path, native_code_root: Path
     return executable if executable.is_file() else None
 
 
+def _native_host_switch_script(*, manifest_path: Path, host_name: str, extension_id: str) -> str:
+    """Generate the fail-closed switch for one predecessor N6 package.
+
+    The normal registration script is intentionally one-shot.  Package
+    rotation with the stable extension ID needs a separate explicit operation
+    that proves the current registry value is the caller's expected predecessor
+    before changing only that dedicated Native Host value.
+    """
+    manifest_literal = str(manifest_path).replace("'", "''")
+    host_literal = host_name.replace("'", "''")
+    extension_literal = extension_id.replace("'", "''")
+    return (
+        "$ErrorActionPreference = 'Stop'\n"
+        "[CmdletBinding()]\n"
+        "param(\n"
+        "    [Parameter(Mandatory = $true)]\n"
+        "    [ValidateNotNullOrEmpty()]\n"
+        "    [string]$ExpectedCurrentManifest\n"
+        ")\n"
+        f"$key = 'HKCU:\\Software\\Google\\Chrome\\NativeMessagingHosts\\{host_literal}'\n"
+        f"$newManifest = '{manifest_literal}'\n"
+        f"$expectedOrigin = 'chrome-extension://{extension_literal}/'\n"
+        "function Resolve-ManifestPath([string]$Value) {\n"
+        "    return [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($Value))\n"
+        "}\n"
+        "if (-not (Test-Path -LiteralPath $key)) { throw 'Expected an existing N6 Native Host registration before switching.' }\n"
+        "$currentManifest = [string](Get-ItemPropertyValue -LiteralPath $key -Name '(default)')\n"
+        "if ([string]::IsNullOrWhiteSpace($currentManifest)) { throw 'Existing Native Host registration has no manifest path.' }\n"
+        "if ((Resolve-ManifestPath $currentManifest) -cne (Resolve-ManifestPath $ExpectedCurrentManifest)) { throw 'Current Native Host registration is not the explicitly expected predecessor.' }\n"
+        "$oldPath = Resolve-ManifestPath $currentManifest\n"
+        "$newPath = Resolve-ManifestPath $newManifest\n"
+        "if (-not (Test-Path -LiteralPath $oldPath -PathType Leaf)) { throw 'Expected predecessor Native Host manifest is missing.' }\n"
+        "if (-not (Test-Path -LiteralPath $newPath -PathType Leaf)) { throw 'Replacement Native Host manifest is missing.' }\n"
+        "$old = Get-Content -Raw -LiteralPath $oldPath | ConvertFrom-Json\n"
+        "$new = Get-Content -Raw -LiteralPath $newPath | ConvertFrom-Json\n"
+        "foreach ($manifest in @($old, $new)) {\n"
+        f"    if ($manifest.name -cne '{host_literal}' -or $manifest.type -cne 'stdio') {{ throw 'Native Host manifest identity/type is invalid.' }}\n"
+        "    if (@($manifest.allowed_origins).Count -ne 1 -or [string]$manifest.allowed_origins[0] -cne $expectedOrigin) { throw 'Native Host manifest extension origin is invalid.' }\n"
+        "    if ([string]::IsNullOrWhiteSpace([string]$manifest.path) -or -not (Test-Path -LiteralPath ([string]$manifest.path) -PathType Leaf)) { throw 'Native Host executable is missing.' }\n"
+        "}\n"
+        "if ($oldPath -ieq $newPath) { throw 'Replacement must be a different Native Host manifest.' }\n"
+        "Set-ItemProperty -LiteralPath $key -Name '(default)' -Value $newPath\n"
+        "$observed = Resolve-ManifestPath ([string](Get-ItemPropertyValue -LiteralPath $key -Name '(default)'))\n"
+        "if ($observed -cne $newPath) { throw 'Native Host registration switch was not committed exactly.' }\n"
+        "Write-Output ('Switched dedicated N6 Native Host registration to: ' + $newPath)\n"
+    )
+
+
 N6_TASKS: tuple[dict[str, str], ...] = (
     {"id": "RUN-01", "class": "small", "bdb": "BDB-N6-REHEARSAL RUN-01\nInspect one exact function and state its owner, inputs, outputs, and one focused test. Do not modify files.", "plain": "Inspect one exact function and state its owner, inputs, outputs, and one focused test. Do not modify files."},
     {"id": "RUN-02", "class": "small", "bdb": "BDB-N6-REHEARSAL RUN-02\nExplain the smallest safe validation command for one named module and what it proves. Do not modify files.", "plain": "Explain the smallest safe validation command for one named module and what it proves. Do not modify files."},
@@ -2304,7 +2352,9 @@ def prepare_package(*, repo_root: str | Path, output: str | Path, runtime_root: 
         "Write-Output ('Registered dedicated N6 Native Host: ' + $key)\n",
         encoding="utf-8",
     )
-    execution_package = {"schema": N6_PACKAGE_SCHEMA, "version": N6_PACKAGE_VERSION, "digest": "pending", "root": str(output_path), "native_code_digest": config["native_code_digest"], "interpreter_identity": external_interpreter, "browser_native_binding": binding, "browser_extension": {"component_id": identity["component_id"], "extension_id": identity["extension_id"], "semantic_digest": identity["semantic_digest"], "manifest": str(browser / "manifest.json")}, "native_host": {"name": N6_NATIVE_HOST_NAME, "manifest": str(native_manifest_path), "path": str(native_path), "registration_script": str(register_script), "executable_ready": shim is not None, "code_root": str(native_code)}, "protocol_generation": N6_PROTOCOL_GENERATION}
+    switch_script = output_path / "switch-native-host.ps1"
+    switch_script.write_text(_native_host_switch_script(manifest_path=native_manifest_path, host_name=N6_NATIVE_HOST_NAME, extension_id=identity["extension_id"]), encoding="utf-8")
+    execution_package = {"schema": N6_PACKAGE_SCHEMA, "version": N6_PACKAGE_VERSION, "digest": "pending", "root": str(output_path), "native_code_digest": config["native_code_digest"], "interpreter_identity": external_interpreter, "browser_native_binding": binding, "browser_extension": {"component_id": identity["component_id"], "extension_id": identity["extension_id"], "semantic_digest": identity["semantic_digest"], "manifest": str(browser / "manifest.json")}, "native_host": {"name": N6_NATIVE_HOST_NAME, "manifest": str(native_manifest_path), "path": str(native_path), "registration_script": str(register_script), "switch_registration_script": str(switch_script), "executable_ready": shim is not None, "code_root": str(native_code)}, "protocol_generation": N6_PROTOCOL_GENERATION}
     if target is not None:
         execution_package["engineering_target"] = target
     execution = {"schema": N6_EXECUTION_SCHEMA, "package": execution_package, "subject": {"repository": "bdb-vnext-n6-subject", "repo_root": str(repo), "branch": "bdb-vnext", "commit": commit, "tree": tree, "view_id": source_view.view_id}, "resources": {"runtime_root": str(runtime), "control_db": str(runtime / "control" / "control.db"), "legacy_runtime_root": str(legacy), "production_activation": False, "rehearsal_infrastructure": "ACTIVE_ONLY_WHEN_EXPLICIT_PACKAGE_LOADED", "legacy_mutation": False}, "prompts": list(N6_TASKS), "manual_gate": "USER_OPERATED_ONLY"}
@@ -2328,7 +2378,8 @@ def write_manual_packet(execution: Mapping[str, Any], path: str | Path) -> Path:
     if package.get("engineering_target"):
         target = _mapping(package["engineering_target"], "engineering_target")
         lines.extend(["## P1 engineering target", "", f"repository: {target['repository_id']}", f"root: {target['repo_root']}", f"branch: {target['branch']}", f"commit: {target['commit']}", f"tree: {target['tree']}", f"RepoView: {target['view_id']}", f"allowed paths: {', '.join(target['allowed_paths'])}", f"checker: {target['checker']['checker_id']} {target['checker']['checker_version']}", ""])
-    lines.extend(["## Setup", "", "1. Do not touch the installed legacy extension or Native Host.", f"2. Before loading or reloading the extension, verify the dedicated `{package['native_host']['name']}` registry default points to `{package['native_host']['manifest']}` and that the manifest allowed origin is `chrome-extension://{package['browser_extension']['extension_id']}/`. The generated registration script may be used only when that dedicated key is absent; it refuses to overwrite an existing key.", f"3. Only after step 2, load or reload the unpacked folder `{Path(str(package['browser_extension']['manifest'])).parent}` in `chrome://extensions` and verify the pinned extension ID. This ordering prevents Chrome from retaining a Native port opened against an earlier manifest.", "4. Confirm `Native executable ready` is true, then open a normal ChatGPT conversation, choose visible model `GPT-5.6 Sol` and reasoning `Wysoki`, and keep those settings for all paired tasks.", "5. Start with a fresh conversation. Paste each BDB prompt below exactly. Wait for the normal answer before using the extension panel.", "6. For the primary vertical, click `Capture latest answer`, then `Witness presentation`. Use `Mark presentation UNKNOWN` when the DOM witness is intentionally absent.", "7. For Resume, open a new ChatGPT conversation and click `Resume in this chat`; the target conversation must remain distinct.", "8. For restart/lost-ACK, refresh ChatGPT after submitting a marked prompt, then wait for the panel to recover by lookup. Never submit the same prompt twice manually.", "", "## Expected observations", "", "PASS = normal ChatGPT answer is visible, the panel reports canonical IDs, and the requested witness/recovery result is explicit.", "FAIL = extension/Native identity mismatch, duplicate Task/Candidate/Publication, wrong conversation delivery, silent fallback, or mutation outside the rehearsal root.", "INCONCLUSIVE = model/settings/timestamps/raw answer or exact identity cannot be verified.", "", "## Primary vertical", "", "RUN-PRIMARY: use `RUN-05` below. Verify Task → WorkItem → Candidate → Evidence → Publication, capture raw answer, witness same conversation, mark UNKNOWN once, then new-chat Resume.", "", "## Paired prompts (run BDB arm with extension enabled; run NO-BDB arm with extension disabled)", ""])
+    switch_script = package["native_host"].get("switch_registration_script")
+    lines.extend(["## Setup", "", "1. Do not touch the installed legacy extension or Native Host.", f"2. Before loading or reloading the extension, verify the dedicated `{package['native_host']['name']}` registry default points to `{package['native_host']['manifest']}` and that the manifest allowed origin is `chrome-extension://{package['browser_extension']['extension_id']}/`. The generated registration script may be used only when that dedicated key is absent; to rotate from an explicitly known predecessor, use `{switch_script}` with `-ExpectedCurrentManifest <exact-old-manifest>`. It fails closed on a missing, unexpected, malformed or incompatible predecessor and changes only this dedicated registry value.", f"3. Only after step 2, load or reload the unpacked folder `{Path(str(package['browser_extension']['manifest'])).parent}` in `chrome://extensions` and verify the pinned extension ID. This ordering prevents Chrome from retaining a Native port opened against an earlier manifest.", "4. Confirm `Native executable ready` is true, then open a normal ChatGPT conversation, choose visible model `GPT-5.6 Sol` and reasoning `Wysoki`, and keep those settings for all paired tasks.", "5. Start with a fresh conversation. Paste each BDB prompt below exactly. Wait for the normal answer before using the extension panel.", "6. For the primary vertical, click `Capture latest answer`, then `Witness presentation`. Use `Mark presentation UNKNOWN` when the DOM witness is intentionally absent.", "7. For Resume, open a new ChatGPT conversation and click `Resume in this chat`; the target conversation must remain distinct.", "8. For restart/lost-ACK, refresh ChatGPT after submitting a marked prompt, then wait for the panel to recover by lookup. Never submit the same prompt twice manually.", "", "## Expected observations", "", "PASS = normal ChatGPT answer is visible, the panel reports canonical IDs, and the requested witness/recovery result is explicit.", "FAIL = extension/Native identity mismatch, duplicate Task/Candidate/Publication, wrong conversation delivery, silent fallback, or mutation outside the rehearsal root.", "INCONCLUSIVE = model/settings/timestamps/raw answer or exact identity cannot be verified.", "", "## Primary vertical", "", "RUN-PRIMARY: use `RUN-05` below. Verify Task → WorkItem → Candidate → Evidence → Publication, capture raw answer, witness same conversation, mark UNKNOWN once, then new-chat Resume.", "", "## Paired prompts (run BDB arm with extension enabled; run NO-BDB arm with extension disabled)", ""])
     for task in execution.get("prompts", []):
         lines.extend([f"### {task['id']} — {task['class']}", "", "BDB arm:", "```text", str(task["bdb"]), "```", "", "NO-BDB arm:", "```text", str(task["plain"]), "```", ""])
     lines.extend(["## Fault actions", "", "- Refresh/reopen ChatGPT only; do not delete runtime files.", "- If the Native Host disconnects, stop and record the visible error; do not retry blindly.", "- To test UNKNOWN, do not click the witness button and click `Mark presentation UNKNOWN`.", "- For new-chat Resume, use a different conversation and confirm the old conversation is not reused.", "", "## Fallback evidence template", "", "```text", "RUN ID:", "START:", "END:", "CHATGPT MODEL/SETTING:", "BROWSER STEP RESULT:", "VISIBLE ERROR:", "REFRESH/RESTART PERFORMED:", "FINAL VISIBLE RESULT:", "NOTES:", "```", "", "N6 remains build-only; no product activation, legacy mutation, Git ref movement or push is authorized."])

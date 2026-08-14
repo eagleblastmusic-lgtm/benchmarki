@@ -107,6 +107,31 @@ def test_prepare_package_isolated_and_status_ready(tmp_path: Path, monkeypatch) 
     assert N6RehearsalService(N6RehearsalConfig.from_json(config_path)).package_digest == execution["package"]["digest"]
 
 
+def test_package_switch_requires_explicit_predecessor_and_validates_both_manifests(tmp_path: Path, monkeypatch) -> None:
+    repo = Path(__file__).resolve().parents[1]
+    package_root = tmp_path / "package"
+    execution = prepare_package(
+        repo_root=repo,
+        output=package_root,
+        runtime_root=tmp_path / "runtime",
+        legacy_runtime_root=tmp_path / "legacy",
+        source_commit="HEAD",
+        python_executable=sys.executable,
+    )
+    switch_path = Path(execution["package"]["native_host"]["switch_registration_script"])
+    switch = switch_path.read_text(encoding="utf-8")
+    assert switch_path.is_file()
+    assert "[string]$ExpectedCurrentManifest" in switch
+    assert "Current Native Host registration is not the explicitly expected predecessor." in switch
+    assert "Expected predecessor Native Host manifest is missing." in switch
+    assert "Replacement Native Host manifest is missing." in switch
+    assert "Native Host manifest extension origin is invalid." in switch
+    assert "Set-ItemProperty -LiteralPath $key -Name '(default)' -Value $newPath" in switch
+    assert switch.index("Current Native Host registration is not the explicitly expected predecessor.") < switch.index("Set-ItemProperty -LiteralPath $key")
+    assert switch.index("$old = Get-Content") < switch.index("Set-ItemProperty -LiteralPath $key")
+    assert execution["package"]["native_host"]["registration_script"] != str(switch_path)
+
+
 def test_native_package_code_does_not_follow_live_checkout(tmp_path: Path, monkeypatch) -> None:
     repo = Path(__file__).parents[1].absolute()
     package_root = tmp_path / "package"
