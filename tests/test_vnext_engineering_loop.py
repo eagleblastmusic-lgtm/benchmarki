@@ -146,6 +146,59 @@ def test_iterative_model_edit_validation_candidate_evidence_publication_resume(t
         assert final.candidate_view.read_bytes("target.txt") == b"PASS\n"
 
 
+def test_follow_up_replan_seal_includes_already_applied_paths(tmp_path: Path) -> None:
+    """A later edit must seal the complete accumulated Candidate tree."""
+    with _stack(tmp_path) as (subject, _view, receipt, _kernel, store, evidence, _publication, work_id, lease):
+        (subject / "second.txt").write_text("BASE\n", encoding="utf-8")
+        _git(subject, "add", ".")
+        _git(subject, "commit", "-qm", "multi-file follow-up fixture")
+        view = RepositoryResource.from_path(subject, repository_id="p1-subject").resolve_committed("HEAD")
+        candidate_id = "candidate:p1:follow-up-seal"
+        workspace = store.create_workspace(candidate_id=candidate_id, base_view=view)
+        editor = EditorPort(store, evidence_store=evidence)
+        base_tree = store._tree_digest(store._base_entries(view))
+
+        first_content = b"FIRST\n"
+        first = _artifact(
+            view.view_id,
+            base_tree,
+            candidate_id=candidate_id,
+            task_id=receipt.task_id,
+            work_id=work_id,
+            run_id="run:p1",
+            lease_id=lease.lease_id,
+            fence=lease.fence,
+            generation=store.generation,
+            operations=[{"operation": "MODIFY", "path": "target.txt", "content_b64": base64.b64encode(first_content).decode("ascii")}],
+        )
+        assert editor.prepare_batch(first, base_view=view, workspace=workspace).state == "PREPARED"
+        assert editor.apply_batch(first).state == "OBSERVED"
+
+        second_content = b"SECOND\n"
+        current_tree = store._tree_digest(store._workspace_entries(workspace, object_format=view.object_format))
+        second = _artifact(
+            view.view_id,
+            current_tree,
+            candidate_id=candidate_id,
+            task_id=receipt.task_id,
+            work_id=work_id,
+            run_id="run:p1",
+            lease_id=lease.lease_id,
+            fence=lease.fence,
+            generation=store.generation,
+            operations=[{"operation": "MODIFY", "path": "second.txt", "content_b64": base64.b64encode(second_content).decode("ascii")}],
+        )
+        desired = {"target.txt": first_content, "second.txt": second_content}
+        assert editor.prepare_batch(second, base_view=view, workspace=workspace, desired_files=desired).state == "PREPARED"
+        assert editor.apply_batch(second).state == "OBSERVED"
+
+        sealed, candidate_view = store.seal(candidate_id, base_view=view)
+        assert sealed.state == "SEALED"
+        assert sealed.planned_tree_digest == sealed.observed_tree_digest
+        assert candidate_view.read_bytes("target.txt") == first_content
+        assert candidate_view.read_bytes("second.txt") == second_content
+
+
 def test_edit_operations_create_delete_rename_have_exact_tree_proof(tmp_path: Path) -> None:
     with _stack(tmp_path) as (subject, view, receipt, kernel, store, evidence, _publication, work_id, lease):
         (subject / "delete.txt").write_text("delete\n", encoding="utf-8")

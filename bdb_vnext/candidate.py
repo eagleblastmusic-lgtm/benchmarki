@@ -772,6 +772,16 @@ class CandidateStore:
             code = getattr(exc, "code", "stale_fence")
             raise CandidateError("stale_fence", "Candidate owner no longer holds the current lease/fence", details={"cause": code}) from exc
 
+    @staticmethod
+    def _is_noop_plan(plan: CandidatePathPlan) -> bool:
+        """Identify an already-applied path retained in an accumulated plan."""
+
+        return (
+            plan.before_digest == plan.after_digest
+            and plan.before_mode == plan.after_mode
+            and plan.before_size == plan.after_size
+        )
+
     def _plan_from_row(self, row: tuple[Any, ...]) -> CandidatePathPlan:
         return CandidatePathPlan(
             str(row[1]), str(row[2]), str(row[3]),
@@ -1213,6 +1223,17 @@ class CandidateStore:
                     planned_entries.pop(path, None)
                 else:
                     planned_entries[path] = (_blob_oid(after, base_view.object_format), "100755" if after_mode & 0o111 else "100644")
+                plans.append(CandidatePathPlan(
+                    path,
+                    _digest(current or b""),
+                    _digest(after or b""),
+                    before_ref,
+                    after_ref,
+                    current_mode,
+                    after_mode,
+                    len(current or b""),
+                    len(after or b""),
+                ))
                 continue
             plan = CandidatePathPlan(path, _digest(current or b""), _digest(after or b""), before_ref, after_ref, current_mode, after_mode, len(current or b""), len(after or b""))
             plans.append(plan)
@@ -1220,7 +1241,7 @@ class CandidateStore:
                 planned_entries.pop(path, None)
             else:
                 planned_entries[path] = (_blob_oid(after, base_view.object_format), "100755" if after_mode & 0o111 else "100644")
-        if not plans:
+        if not plans or all(self._is_noop_plan(item) for item in plans):
             _fail("empty_edit_plan", "replanned Candidate has no net change")
         planned_tree_digest = self._tree_digest(planned_entries)
         effect_material = {
@@ -1322,6 +1343,8 @@ class CandidateStore:
             # path whose BEFORE state was absence, compare the Git mode while
             # retaining exact filesystem mode checks for existing files.
             after_mode_matches = _git_mode(target) == ("100755" if plan.after_mode & 0o111 else "100644")
+        if self._is_noop_plan(plan) and digest == plan.after_digest and after_mode_matches:
+            return "AFTER"
         if digest == plan.before_digest and before_mode_matches:
             return "BEFORE"
         if digest == plan.after_digest and after_mode_matches:
@@ -1374,12 +1397,14 @@ class CandidateStore:
         observations = {item.path: self._observe_one(workspace, item) for item in record.planned_paths}
         if any(value not in {"BEFORE", "AFTER"} for value in observations.values()):
             _fail("apply_requires_before", "apply requires exact BEFORE observations; inspect before retry")
-        if any(value == "AFTER" and not (_is_absence_ref(item.before_ref) and _is_absence_ref(item.after_ref)) for item, value in ((item, observations[item.path]) for item in record.planned_paths)):
+        if any(value == "AFTER" and not self._is_noop_plan(item) and not (_is_absence_ref(item.before_ref) and _is_absence_ref(item.after_ref)) for item, value in ((item, observations[item.path]) for item in record.planned_paths)):
             _fail("apply_requires_before", "apply requires exact BEFORE observations; inspect before retry")
         if fault == "before_write":
             raise CandidateError("candidate_apply_interrupted", "apply stopped before first filesystem write", details={"effect_certainty": "POSSIBLE"})
         for index, plan in enumerate(record.planned_paths, start=1):
             self._assert_owner(self.get(candidate_id))  # type: ignore[arg-type]
+            if self._is_noop_plan(plan):
+                continue
             target = _safe_child(workspace, plan.path)
             _safe_child(workspace, plan.path)
             before_absent = _is_absence_ref(plan.before_ref)
