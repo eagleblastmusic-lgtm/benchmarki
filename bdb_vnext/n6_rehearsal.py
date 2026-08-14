@@ -1326,6 +1326,8 @@ const REQUEST_SCHEMA = "bdb-vnext-n6-native-request-v2";
 const RESPONSE_SCHEMA = "bdb-vnext-n6-native-response-v2";
 const BROWSER_NATIVE_BINDING = __N6_BINDING__;
 const EXTENSION_ID = __N6_EXTENSION__;
+const CODE_READ_TOKEN_RE = /^bdb-n6-code-[0-9a-f-]{36}$/;
+const CODE_READ_MAX_BYTES = 512 * 1024;
 let port = null;
 let validated = false;
 let validation = null;
@@ -1399,7 +1401,40 @@ async function send(event, payload) {
   await ensureValidatedPort();
   return post(event, payload);
 }
+async function readMarkedCodeInMainWorld(sender, token) {
+  if (!sender || !sender.tab || !Number.isInteger(sender.tab.id) || sender.tab.id < 0) throw new Error("N6 code read tab identity is invalid");
+  if (typeof token !== "string" || !CODE_READ_TOKEN_RE.test(token)) throw new Error("N6 code read target token is invalid");
+  const senderUrl = typeof sender.url === "string" ? sender.url : (typeof sender.tab.url === "string" ? sender.tab.url : "");
+  let host = "";
+  try { host = new URL(senderUrl).hostname.toLowerCase(); } catch (_) {}
+  if (host !== "chatgpt.com" && host !== "chat.openai.com") throw new Error("N6 code read page origin is invalid");
+  const executions = await chrome.scripting.executeScript({
+    target: {tabId: sender.tab.id},
+    world: "MAIN",
+    func: (marker) => {
+      const matches = [...document.querySelectorAll("pre[data-bdb-n6-code-read]")].filter((pre) => pre.getAttribute("data-bdb-n6-code-read") === marker);
+      if (matches.length === 0) return {status: "MISSING", target_token: marker};
+      if (matches.length !== 1) return {status: "AMBIGUOUS", target_token: marker};
+      const pre = matches[0];
+      const code = pre.querySelector("[data-language]");
+      const text = code?.cmTile?.view?.state?.doc?.toString?.();
+      if (typeof text !== "string") return {status: "INCOMPLETE", target_token: marker};
+      return {status: "READY", target_token: marker, text, length: text.length, start: pre.getAttribute("data-start"), end: pre.getAttribute("data-end")};
+    },
+    args: [token],
+  });
+  const result = executions && executions.length === 1 ? executions[0].result : null;
+  if (!result || result.target_token !== token) throw new Error("N6 code read result correlation failed");
+  if (result.status !== "READY" || typeof result.text !== "string" || !Number.isInteger(result.length) || result.length !== result.text.length) throw new Error(`N6 complete CodeMirror artifact unavailable: ${result.status || "INVALID"}`);
+  const byteLength = new TextEncoder().encode(result.text).length;
+  if (byteLength <= 0 || byteLength > CODE_READ_MAX_BYTES) throw new Error("N6 complete CodeMirror artifact exceeds the observation bound");
+  return {ok: true, result: {status: "READY", target_token: token, text: result.text, length: result.length, start: result.start, end: result.end}};
+}
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message && message.type === "N6_READ_RENDERED_CODE") {
+    readMarkedCodeInMainWorld(sender, message.token).then(sendResponse, (error) => sendResponse({ok: false, error: String(error)}));
+    return true;
+  }
   if (!message || message.type !== "N6_BROWSER_EVENT") return false;
   send(message.event, message.payload || {}).then((response) => sendResponse({ok: true, response}), (error) => sendResponse({ok: false, error: String(error)}));
   return true;
@@ -1460,6 +1495,57 @@ function renderedAssistantText(node) {
   }
   return canonicalPrompt(clone.innerText || clone.textContent || "");
 }
+function readToken() {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return "bdb-n6-code-" + hex.slice(0, 8) + "-" + hex.slice(8, 12) + "-" + hex.slice(12, 16) + "-" + hex.slice(16, 20) + "-" + hex.slice(20);
+}
+function expectedCodeLength(pre) {
+  if (!pre || typeof pre.getAttribute !== "function") return null;
+  const start = Number(pre.getAttribute("data-start"));
+  const end = Number(pre.getAttribute("data-end"));
+  return Number.isFinite(start) && Number.isFinite(end) && end >= start ? end - start : null;
+}
+async function readMainWorldCodeText(pre, visible) {
+  const token = readToken();
+  pre.setAttribute("data-bdb-n6-code-read", token);
+  try {
+    const response = await chrome.runtime.sendMessage({type: "N6_READ_RENDERED_CODE", token});
+    const result = response && response.ok === true ? response.result : null;
+    if (!result || result.status !== "READY" || result.target_token !== token || typeof result.text !== "string" || result.length !== result.text.length) throw new Error((response && response.error) || "N6 complete CodeMirror artifact unavailable");
+    if (result.length <= visible.length) throw new Error("N6 complete CodeMirror artifact is not longer than the visible fragment");
+    return result.text;
+  } finally {
+    pre.removeAttribute("data-bdb-n6-code-read");
+  }
+}
+async function renderedEngineeringAssistantText(node) {
+  const clone = node.cloneNode(true);
+  const sourcePres = [...node.querySelectorAll("pre")];
+  const clonePres = [...clone.querySelectorAll("pre")];
+  if (sourcePres.length !== clonePres.length) throw new Error("BDB engineering artifact target structure is ambiguous");
+  const fullTexts = await Promise.all(sourcePres.map(async (pre) => {
+    const code = pre.querySelector("[data-language]");
+    if (!code) return "";
+    const visible = canonicalPrompt(code.innerText || pre.innerText || pre.textContent || "");
+    const expected = expectedCodeLength(pre);
+    if (expected !== null && expected > visible.length + 32) return readMainWorldCodeText(pre, visible);
+    return visible;
+  }));
+  for (let index = 0; index < clonePres.length; index += 1) {
+    const pre = clonePres[index];
+    const code = pre.querySelector("[data-language]");
+    const language = code?.getAttribute("data-language") || "";
+    const visible = canonicalPrompt(code?.innerText || pre.innerText || pre.textContent || "");
+    const fullText = fullTexts[index] || "";
+    const content = fullText || visible;
+    pre.replaceWith(document.createTextNode("```" + language + "\n" + content + "\n```"));
+  }
+  return canonicalPrompt(clone.textContent || clone.innerText || "");
+}
 function assistantObservation(expectedPrompt) {
   const turns = [...document.querySelectorAll("[data-message-author-role]")];
   let promptIndex = -1;
@@ -1509,15 +1595,14 @@ function latestEngineeringPrompt() {
 function engineeringObservation(prompt) {
   const next = prompt.turns[prompt.index + 1];
   if (!next || next.dataset.messageAuthorRole !== "assistant" || next.closest("[data-bdb-n6-panel]")) throw new Error("BDB engineering assistant answer is stale or ambiguous");
-  const text = renderedAssistantText(next);
-  return text ? {raw_answer: text} : null;
+  return renderedEngineeringAssistantText(next).then((text) => text ? {raw_answer: text} : null);
 }
 async function stableEngineeringObservation(prompt) {
   if (streamInProgress()) throw new Error("BDB engineering assistant response is still streaming");
-  const first = engineeringObservation(prompt);
+  const first = await engineeringObservation(prompt);
   if (!first) throw new Error("BDB engineering assistant answer is unavailable");
   await new Promise((resolve) => setTimeout(resolve, 750));
-  const second = engineeringObservation(prompt);
+  const second = await engineeringObservation(prompt);
   if (streamInProgress() || !second || first.raw_answer !== second.raw_answer) throw new Error("BDB engineering assistant response is not stable");
   return second;
 }
@@ -1835,7 +1920,7 @@ def prepare_package(*, repo_root: str | Path, output: str | Path, runtime_root: 
     browser = output_path / "browser-extension"
     browser.mkdir(parents=True, exist_ok=True)
     identity = load_browser_identity()
-    manifest = {"manifest_version": 3, "name": "BDB vNext N6 Rehearsal", "version": N6_PACKAGE_VERSION, "description": "Build-only user-operated BDB vNext rehearsal; not product activation.", "key": identity["public_key_spki_der_base64"], "permissions": ["nativeMessaging", "storage"], "host_permissions": ["https://chatgpt.com/*", "https://chat.openai.com/*"], "background": {"service_worker": "background.js"}, "content_scripts": [{"matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"], "js": ["content.js"], "run_at": "document_idle"}]}
+    manifest = {"manifest_version": 3, "name": "BDB vNext N6 Rehearsal", "version": N6_PACKAGE_VERSION, "description": "Build-only user-operated BDB vNext rehearsal; not product activation.", "key": identity["public_key_spki_der_base64"], "permissions": ["nativeMessaging", "storage", "scripting"], "host_permissions": ["https://chatgpt.com/*", "https://chat.openai.com/*"], "background": {"service_worker": "background.js"}, "content_scripts": [{"matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"], "js": ["content.js"], "run_at": "document_idle"}]}
     requested_commit = source_commit or "HEAD"
     commit = subprocess.run(["git", "-C", str(repo), "rev-parse", f"{requested_commit}^{{commit}}"], shell=False, capture_output=True, text=True, check=True).stdout.strip()
     if len(commit) != 40 or any(char not in "0123456789abcdef" for char in commit):

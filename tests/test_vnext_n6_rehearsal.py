@@ -64,6 +64,10 @@ def test_prepare_package_isolated_and_status_ready(tmp_path: Path, monkeypatch) 
 
     config_path = package_root / "native-config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
+    manifest = json.loads((package_root / "browser-extension" / "manifest.json").read_text(encoding="utf-8"))
+    assert set(manifest["permissions"]) == {"nativeMessaging", "storage", "scripting"}
+    assert not {"clipboardRead", "clipboardWrite", "debugger", "webRequest", "webRequestBlocking"}.intersection(manifest["permissions"])
+    assert manifest["host_permissions"] == ["https://chatgpt.com/*", "https://chat.openai.com/*"]
     assert config["schema"] == N6_CONFIG_SCHEMA
     assert N6RehearsalConfig.from_json(config_path).package_digest == execution["package"]["digest"]
     parsed = N6RehearsalConfig.from_json(config_path)
@@ -524,13 +528,14 @@ def test_generated_p1_content_script_escape_runtime_contract() -> None:
     generated = json.dumps(_js_content(), ensure_ascii=False)
     harness = f"""
 const vm = await import('node:vm');
+const {{ webcrypto }} = await import('node:crypto');
 const generated = {generated};
 const source = generated.split('\\n').filter((line) =>
   !line.startsWith('new MutationObserver(') &&
   !line.startsWith('window.addEventListener(\"popstate\"') &&
   !line.startsWith('setInterval(') &&
   !line.startsWith('void synchronizeConversation();')
-).join('\\n') + '\\nwindow.__p1Test = {{ latestEngineeringPrompt, engineeringObservation, strictEngineeringArtifact, renderedAssistantText }};';
+).join('\\n') + '\\nwindow.__p1Test = {{ latestEngineeringPrompt, engineeringObservation, strictEngineeringArtifact, renderedAssistantText, renderedEngineeringAssistantText }};';
 
 function node(role, text) {{
   return {{
@@ -541,15 +546,16 @@ function node(role, text) {{
   }};
 }}
 
-function functionsFor(turns) {{
+function functionsFor(turns, chromeOverride = {{}}) {{
   const context = {{
     console,
     URL,
+    crypto: webcrypto,
     location: {{ href: 'https://chatgpt.com/c/p1-test-12345678' }},
     document: {{ querySelectorAll: (selector) => selector === '[data-message-author-role]' ? turns : [], createTextNode: (text) => ({{ textContent: text }}) }},
     window: {{ addEventListener: () => {{}} }},
     MutationObserver: class {{ observe() {{}} }},
-    chrome: {{}},
+    chrome: chromeOverride,
     setInterval: () => 0,
     clearInterval: () => {{}},
     setTimeout,
@@ -565,7 +571,8 @@ if (!functionsFor([node('user', newlinePrompt)]).latestEngineeringPrompt()) thro
 const literalSeparatorPrompt = 'BDB-P1-CALC-BROWSER-E2E\\\\nsecond line';
 if (functionsFor([node('user', literalSeparatorPrompt)]).latestEngineeringPrompt()) throw new Error('literal \\n separator was accepted');
 
-const artifactFunctions = functionsFor([]);
+const readChrome = {{}};
+const artifactFunctions = functionsFor([], readChrome);
 const validFence = '```json\\n{{\\n  "schema": "bdb-vnext-edit-v1",\\n  "note": "multiline body"\\n}}\\n```';
 const artifact = artifactFunctions.strictEngineeringArtifact(validFence);
 if (artifact.schema !== 'bdb-vnext-edit-v1') throw new Error('valid fenced artifact was not parsed');
@@ -612,10 +619,53 @@ const virtualizedClone = {{
 const virtualized = artifactFunctions.renderedAssistantText({{ cloneNode: () => virtualizedClone }});
 if (virtualized !== '```json\\n{{"schema":"bdb-vnext-edit-v1","complete":true}}\\n```') throw new Error('virtualized CodeMirror document text was not used: ' + virtualized);
 
+const completeArtifact = JSON.stringify({{ schema: 'bdb-vnext-edit-v1', operations: Array.from({{length: 180}}, (_, index) => ({{ op: 'write', path: 'file-' + index + '.txt', content: 'bounded-content-' + index }})) }});
+const visiblePrefix = completeArtifact.slice(0, 120);
+const readCalls = [];
+const sourceCode = {{ innerText: visiblePrefix, textContent: visiblePrefix, getAttribute: (name) => name === 'data-language' ? 'json' : null }};
+const sourcePre = {{
+  innerText: visiblePrefix,
+  querySelector: (selector) => selector === '[data-language]' ? sourceCode : null,
+  getAttribute: (name) => name === 'data-end' ? String(completeArtifact.length) : name === 'data-start' ? '0' : null,
+  setAttribute: (name, value) => {{ readCalls.push(['set', name, value]); sourcePre.marker = value; }},
+  removeAttribute: (name) => {{ readCalls.push(['remove', name]); delete sourcePre.marker; }},
+}};
+const cloneCode = {{ getAttribute: () => 'json', innerText: visiblePrefix }};
+const clonePre = {{
+  innerText: visiblePrefix,
+  querySelector: (selector) => selector === '[data-language]' ? cloneCode : null,
+  replaceWith(value) {{ this.replacement = value; }},
+}};
+const engineeringNode = {{
+  querySelectorAll: () => [sourcePre],
+  cloneNode: () => ({{
+    querySelectorAll: () => [clonePre],
+    get innerText() {{ return clonePre.replacement?.textContent || clonePre.innerText; }},
+    get textContent() {{ return this.innerText; }},
+  }}),
+}};
+readChrome.runtime = {{ sendMessage: async (message) => {{
+  if (message.type !== 'N6_READ_RENDERED_CODE') throw new Error('unexpected message');
+  return {{ok: true, result: {{status: 'READY', target_token: message.token, text: completeArtifact, length: completeArtifact.length}}}};
+}} }};
+const fullEngineering = await artifactFunctions.renderedEngineeringAssistantText(engineeringNode);
+if (fullEngineering !== '```json\\n' + completeArtifact + '\\n```') throw new Error('complete MAIN-world artifact was not used');
+if (readCalls.length !== 2 || readCalls[0][0] !== 'set' || readCalls[1][0] !== 'remove') throw new Error('target marker was not removed deterministically');
+
+const truncatedNode = {{
+  querySelectorAll: () => [{{ ...sourcePre, getAttribute: (name) => name === 'data-end' ? String(completeArtifact.length) : name === 'data-start' ? '0' : null, querySelector: () => sourceCode }}],
+  cloneNode: () => ({{ querySelectorAll: () => [clonePre], get textContent() {{ return visiblePrefix; }} }}),
+}};
+readChrome.runtime.sendMessage = async () => ({{ok: false, error: 'target disappeared'}});
+let rejected = false;
+try {{ await artifactFunctions.renderedEngineeringAssistantText(truncatedNode); }} catch (_) {{ rejected = true; }}
+if (!rejected) throw new Error('truncated artifact was accepted after failed MAIN-world read');
+
 const engineeringUser = node('user', newlinePrompt);
 const engineeringPre = {{
   replacement: null,
   innerText: 'JSON{{"schema":"bdb-vnext-edit-v1"}}',
+  getAttribute: () => null,
   querySelector: (selector) => selector === '[data-language]' ? {{ getAttribute: () => 'json', innerText: '{{"schema":"bdb-vnext-edit-v1"}}' }} : null,
   replaceWith(value) {{ this.replacement = value; }},
 }};
@@ -624,6 +674,7 @@ const engineeringAssistant = {{
   innerText: 'JSON{{"schema":"bdb-vnext-edit-v1"}}',
   textContent: 'JSON{{"schema":"bdb-vnext-edit-v1"}}',
   closest: () => null,
+  querySelectorAll: () => [engineeringPre],
   cloneNode: () => ({{
     querySelectorAll: () => [engineeringPre],
     get innerText() {{ return engineeringPre.replacement?.textContent || engineeringPre.innerText; }},
@@ -632,8 +683,62 @@ const engineeringAssistant = {{
 }};
 const engineeringFunctions = functionsFor([engineeringUser, engineeringAssistant]);
 const engineeringPrompt = engineeringFunctions.latestEngineeringPrompt();
-const engineeringObserved = engineeringFunctions.engineeringObservation(engineeringPrompt);
+const engineeringObserved = await engineeringFunctions.engineeringObservation(engineeringPrompt);
 if (engineeringObserved.raw_answer !== '```json\\n{{"schema":"bdb-vnext-edit-v1"}}\\n```') throw new Error('engineering observation did not reconstruct rendered ChatGPT JSON code block: ' + engineeringObserved.raw_answer);
+"""
+    result = subprocess.run(["node", "--input-type=module"], input=harness, capture_output=True, text=True, timeout=30, check=False)
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_generated_background_main_world_code_read_is_targeted_and_fail_closed() -> None:
+    generated = json.dumps(_js_background("binding-test", "extension-test"), ensure_ascii=False)
+    harness = f"""
+const vm = await import('node:vm');
+const generated = {generated};
+const listeners = [];
+const state = {{ mode: 'valid', token: 'bdb-n6-code-12345678-1234-1234-1234-123456789abc', text: '{{"schema":"bdb-vnext-edit-v1","complete":true}}' }};
+let nativeOpened = false;
+let mainCalls = 0;
+const context = {{
+  console, URL, TextEncoder, crypto,
+  document: {{ querySelectorAll: () => {{
+    if (state.mode === 'missing') return [];
+    const make = () => ({{
+      getAttribute: (name) => name === 'data-bdb-n6-code-read' ? state.token : null,
+      querySelector: () => ({{ cmTile: {{ view: {{ state: {{ doc: {{ toString: () => state.text }} }} }} }} }}),
+    }});
+    return state.mode === 'ambiguous' ? [make(), make()] : [make()];
+  }} }},
+  chrome: {{
+    runtime: {{
+      onMessage: {{ addListener: (listener) => listeners.push(listener) }},
+      connectNative: () => {{ nativeOpened = true; throw new Error('native must not be opened for page read'); }},
+      lastError: null,
+    }},
+    scripting: {{ executeScript: async (options) => {{
+      mainCalls += 1;
+      if (options.world !== 'MAIN' || options.target.tabId !== 7) throw new Error('wrong executeScript target');
+      return [{{ result: options.func(options.args[0]) }}];
+    }} }},
+  }},
+}};
+vm.runInNewContext(generated, context);
+const listener = listeners.find((candidate) => candidate({{type:'N6_READ_RENDERED_CODE'}}, {{}}, () => {{}}) === true);
+if (!listener) throw new Error('MAIN-world listener was not registered');
+function invoke(token) {{
+  return new Promise((resolve) => listener({{type:'N6_READ_RENDERED_CODE', token}}, {{tab: {{id: 7, url: 'https://chatgpt.com/c/test-12345678'}}}}, resolve));
+}}
+let response = await invoke(state.token);
+if (!response.ok || response.result.status !== 'READY' || response.result.text !== state.text) throw new Error('valid targeted read failed: ' + JSON.stringify(response));
+if (mainCalls !== 1 || nativeOpened) throw new Error('valid read opened Native or skipped MAIN execution');
+state.mode = 'ambiguous';
+response = await invoke(state.token);
+if (response.ok || !String(response.error).includes('AMBIGUOUS')) throw new Error('ambiguous target was not rejected: ' + JSON.stringify(response));
+state.mode = 'missing';
+response = await invoke(state.token);
+if (response.ok || !String(response.error).includes('MISSING')) throw new Error('missing target was not rejected: ' + JSON.stringify(response));
+response = await invoke('invalid-token');
+if (response.ok || !String(response.error).includes('invalid')) throw new Error('invalid token was not rejected: ' + JSON.stringify(response));
 """
     result = subprocess.run(["node", "--input-type=module"], input=harness, capture_output=True, text=True, timeout=30, check=False)
     assert result.returncode == 0, result.stderr or result.stdout
