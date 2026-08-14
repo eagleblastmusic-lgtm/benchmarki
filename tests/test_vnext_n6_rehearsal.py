@@ -36,7 +36,7 @@ from bdb_vnext.n6_rehearsal import (
     package_digest,
     write_manual_packet,
 )
-from bdb_vnext.candidate import CANDIDATE_OBSERVED
+from bdb_vnext.candidate import CANDIDATE_OBSERVED, CANDIDATE_SEALED
 from bdb_vnext.engineering_loop import EditBatch
 
 
@@ -841,6 +841,90 @@ def test_engineering_recovery_after_projection_loss_reuses_task_and_rejects_stal
     with service._open() as plane:
         assert plane.admission.authority._store.counts()["tasks"] == 1
         assert plane.work_kernel.counts()["runs"] == 1
+
+
+def test_engineering_recovery_adopts_existing_candidate_before_finalize(tmp_path: Path, monkeypatch) -> None:
+    """A legitimate lease renewal keeps the same unfinished Candidate usable."""
+    clock = {"now": 100.0}
+    monkeypatch.setattr("bdb_vnext.m4a_work_kernel.time.time", lambda: clock["now"])
+    service, execution, _target = _p1_service_for_recovery_tests(tmp_path, monkeypatch)
+    payload = {
+        "submission_key": "p1-browser:candidate-recovery-fence",
+        "prompt": "BDB-P1-CALC-BROWSER-E2E\ncandidate recovery fence",
+        "conversation_id": "chatgpt-conversation:candidate-recovery-fence",
+        "profile_id": None,
+    }
+    prepared = _p1_event(service, execution, "engineering_prepare", payload, "p1:candidate-recovery:prepare")["result"]
+    assert service.engineering_view is not None
+    html = service.engineering_view.read_bytes("index.html") + (
+        b'\n<!-- #display aria-label="Backspace" data-operation="equals" '
+        b'data-operation="divide" -->\n'
+    )
+    javascript = service.engineering_view.read_bytes("app.js") + b"\n// keydown; division by zero\n"
+    artifact = EditBatch.from_mapping({
+        "schema": "bdb-vnext-edit-v1",
+        "base_view_id": prepared["base_repo_view"]["view_id"],
+        "expected_tree_digest": prepared["current_tree_digest"],
+        "task_id": prepared["task_id"],
+        "work_id": prepared["work_id"],
+        "run_id": prepared["run_id"],
+        "lease_id": prepared["lease_id"],
+        "fence": prepared["fence"],
+        "candidate_id": prepared["candidate_id"],
+        "workspace_generation": prepared["workspace_generation"],
+        "operations": [
+            {"operation": "MODIFY", "path": "index.html", "content_b64": base64.b64encode(html).decode("ascii")},
+            {"operation": "MODIFY", "path": "app.js", "content_b64": base64.b64encode(javascript).decode("ascii")},
+        ],
+        "budget": {"max_operations": 3, "max_bytes": 32768},
+    })
+    raw_answer = "```json\n" + json.dumps(artifact.as_dict(), sort_keys=True) + "\n```"
+    event_payload = {
+        "submission_key": payload["submission_key"],
+        "conversation_id": payload["conversation_id"],
+        "prompt_digest": _sha(payload["prompt"].encode("utf-8")),
+        "raw_answer": raw_answer,
+        "raw_answer_digest": _sha(raw_answer.encode("utf-8")),
+        "artifact": artifact.as_dict(),
+    }
+    validated = _p1_event(service, execution, "engineering_artifact", event_payload, "p1:candidate-recovery:artifact")
+    assert validated["result"]["validation_status"] == "PASS"
+    with service._open() as plane:
+        candidate = plane.candidate.get(prepared["candidate_id"])
+        assert candidate is not None and candidate.fence == prepared["fence"]
+
+    clock["now"] = 1000.0
+    first_recovery = _p1_event(
+        service, execution, "engineering_recover",
+        {"conversation_id": payload["conversation_id"], "submission_key": None, "profile_id": None, "artifact_claims": None},
+        "p1:candidate-recovery:first",
+    )
+    assert first_recovery["result"]["recovery_status"] == "RECOVERED"
+    assert first_recovery["result"]["fence"] == prepared["fence"] + 1
+
+    clock["now"] = 2000.0
+    second_recovery = _p1_event(
+        service, execution, "engineering_recover",
+        {"conversation_id": payload["conversation_id"], "submission_key": None, "profile_id": None, "artifact_claims": None},
+        "p1:candidate-recovery:second",
+    )
+    assert second_recovery["result"]["recovery_status"] == "RECOVERED"
+    assert second_recovery["result"]["fence"] == prepared["fence"] + 2
+    with service._open() as plane:
+        candidate = plane.candidate.get(prepared["candidate_id"])
+        assert candidate is not None and candidate.fence == prepared["fence"] + 2
+
+    sealed = _p1_event(
+        service, execution, "engineering_finalize",
+        {"submission_key": payload["submission_key"], "candidate_id": prepared["candidate_id"]},
+        "p1:candidate-recovery:finalize",
+    )
+    assert sealed["status"] == "ENGINEERING_SEALED"
+    assert sealed["result"]["status"] == "SEALED"
+    with service._open() as plane:
+        candidate = plane.candidate.get(prepared["candidate_id"])
+        assert candidate is not None and candidate.state == CANDIDATE_SEALED
+        assert len(plane.publication.publications_for_task(prepared["task_id"])) == 1
 
 
 def test_engineering_recovery_ambiguous_history_fails_closed_without_new_task(tmp_path: Path, monkeypatch) -> None:

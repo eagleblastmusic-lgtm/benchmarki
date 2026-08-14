@@ -965,8 +965,6 @@ class N6RehearsalService:
             else:
                 if work.active_run is None or work.lease is None or work.active_run.run_id != ids["run_id"] or work.lease.lease_id != ids["lease_id"]:
                     _fail("engineering_recovery_conflict", "engineering WorkItem has a foreign active Run/Lease")
-                if claims is not None and claims["fence"] != work.lease.fence:
-                    return self._engineering_context(task["task_id"], str(found["request_digest"]), conversation_id, key, work, candidate, plane.candidate.generation, plane.candidate._tree_digest(plane.candidate._workspace_entries(Path(candidate.workspace_root), object_format=self.engineering_view.object_format)) if candidate is not None else plane.candidate._tree_digest(plane.candidate._base_entries(self.engineering_view)), initial_prompt_digest=self._engineering_validate_intent(_mapping(found["canonical_intent"], "recovery.canonical_intent")), recovery_status="STALE_ARTIFACT", recovery_error="canonical fence has advanced; request a fresh BDB_EDIT_V1 artifact")
                 lease = plane.work_kernel.acquire_lease(ids["work_id"], ids["lease_id"], "p1-browser-engineering", ttl_seconds=900.0)
                 work = plane.work_kernel.query(ids["work_id"])
                 if work is None or work.active_run is None:
@@ -976,6 +974,16 @@ class N6RehearsalService:
                     work = plane.work_kernel.query(ids["work_id"])
             if work is None or work.active_run is None or work.lease is None or work.active_run.run_id != ids["run_id"] or work.lease.lease_id != ids["lease_id"]:
                 _fail("engineering_recovery_conflict", "engineering WorkItem recovery did not establish the expected owner")
+            # Lease renewal changes the canonical Work/Run owner.  Keep an
+            # unfinished Candidate usable under that same owner; the stale
+            # artifact itself remains rejected below by its old fence claim.
+            if candidate is not None and candidate.state not in {CANDIDATE_SEALED, CANDIDATE_INVALIDATED}:
+                if (candidate.lease_id, candidate.fence) != (work.lease.lease_id, work.lease.fence):
+                    candidate = plane.candidate.adopt_lease(
+                        candidate.candidate_id,
+                        lease_id=work.lease.lease_id,
+                        fence=work.lease.fence,
+                    )
             current_tree = plane.candidate._tree_digest(plane.candidate._workspace_entries(Path(candidate.workspace_root), object_format=self.engineering_view.object_format)) if candidate is not None else plane.candidate._tree_digest(plane.candidate._base_entries(self.engineering_view))
             recovery_status = "RECOVERED"
             recovery_error = None
