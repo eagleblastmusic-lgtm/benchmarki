@@ -36,7 +36,7 @@ from bdb_vnext.n6_rehearsal import (
     package_digest,
     write_manual_packet,
 )
-from bdb_vnext.candidate import CANDIDATE_OBSERVED, CANDIDATE_SEALED
+from bdb_vnext.candidate import CANDIDATE_OBSERVED, CANDIDATE_SEALED, _blob_oid
 from bdb_vnext.engineering_loop import EditBatch
 
 
@@ -1219,6 +1219,78 @@ def test_engineering_follow_up_artifact_applies_after_observed_candidate(tmp_pat
         assert second_result["current_tree_digest"] == plane.candidate._tree_digest(
             plane.candidate._workspace_entries(Path(candidate.workspace_root), object_format=base_view.object_format)
         )
+
+
+def test_engineering_follow_up_exact_replacements_accumulate_against_current_candidate(tmp_path: Path, monkeypatch) -> None:
+    service, execution, _target = _p1_service_for_recovery_tests(tmp_path, monkeypatch)
+    payload = {
+        "submission_key": "p1-browser:follow-up-replacements",
+        "prompt": "BDB-P1-CALC-BROWSER-E2E\nfollow-up replacements",
+        "conversation_id": "chatgpt-conversation:follow-up-replacements",
+        "profile_id": None,
+    }
+    prepared = _p1_event(service, execution, "engineering_prepare", payload, "p1:replacement:prepare")["result"]
+    base_view = service.engineering_view
+    assert base_view is not None
+    base_bytes = base_view.read_bytes("styles.css")
+    first_old = b"color-scheme: light"
+    first_new = b"color-scheme: dark"
+    second_old = b"background: #edf2f7"
+    second_new = b"background: #ffffff"
+    assert base_bytes.count(first_old) == 1
+    assert base_bytes.count(second_old) == 1
+    after_first = base_bytes.replace(first_old, first_new, 1)
+    after_second = after_first.replace(second_old, second_new, 1)
+
+    def make_artifact(expected_tree: str, preimage: bytes, old: bytes, new: bytes) -> EditBatch:
+        return EditBatch.from_mapping({
+            "schema": "bdb-vnext-edit-v1",
+            "base_view_id": prepared["base_repo_view"]["view_id"],
+            "expected_tree_digest": expected_tree,
+            "task_id": prepared["task_id"],
+            "work_id": prepared["work_id"],
+            "run_id": prepared["run_id"],
+            "lease_id": prepared["lease_id"],
+            "fence": prepared["fence"],
+            "candidate_id": prepared["candidate_id"],
+            "workspace_generation": prepared["workspace_generation"],
+            "operations": [{
+                "operation": "MODIFY",
+                "path": "styles.css",
+                "preimage_digest": _sha(preimage),
+                "replacements": [{"old_text": old.decode("utf-8"), "new_text": new.decode("utf-8")}],
+            }],
+            "budget": {"max_operations": 3, "max_bytes": 32768},
+        })
+
+    def submit(artifact: EditBatch, request_id: str) -> dict[str, Any]:
+        raw_answer = "```json\n" + json.dumps(artifact.as_dict(), sort_keys=True) + "\n```"
+        return _p1_event(service, execution, "engineering_artifact", {
+            "submission_key": payload["submission_key"],
+            "conversation_id": payload["conversation_id"],
+            "prompt_digest": _sha(payload["prompt"].encode("utf-8")),
+            "raw_answer": raw_answer,
+            "raw_answer_digest": _sha(raw_answer.encode("utf-8")),
+            "artifact": artifact.as_dict(),
+        }, request_id)
+
+    first_result = submit(make_artifact(prepared["current_tree_digest"], base_bytes, first_old, first_new), "p1:replacement:first")["result"]
+    assert first_result["status"] == "VALIDATED"
+    second_result = submit(make_artifact(first_result["current_tree_digest"], after_first, second_old, second_new), "p1:replacement:second")["result"]
+    assert second_result["status"] == "VALIDATED"
+
+    with service._open() as plane:
+        candidate = plane.candidate.get(prepared["candidate_id"])
+        assert candidate is not None and candidate.state == CANDIDATE_OBSERVED
+        actual = Path(candidate.workspace_root, "styles.css").read_bytes()
+        assert actual == after_second
+        base_entries = plane.candidate._base_entries(base_view)
+        expected_entries = dict(base_entries)
+        expected_entries["styles.css"] = (_blob_oid(after_second, base_view.object_format), base_entries["styles.css"][1])
+        expected_tree = plane.candidate._tree_digest(expected_entries)
+        assert second_result["current_tree_digest"] == expected_tree
+        row = plane.candidate._connection.execute("SELECT after_digest FROM m4b_candidate_paths WHERE candidate_id=? AND path=?", (prepared["candidate_id"], "styles.css")).fetchone()
+        assert row is not None and row[0] == _sha(after_second)
 
 
 def test_engineering_prepare_reuses_matching_active_run_on_refresh(tmp_path: Path, monkeypatch) -> None:

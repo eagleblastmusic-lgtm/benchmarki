@@ -42,6 +42,7 @@ from bdb_vnext.engineering_loop import (
     ValidationCommand,
     ValidationPolicy,
     ValidationRunner,
+    apply_exact_replacements,
     parse_edit_artifact,
 )
 from bdb_vnext.composition import (
@@ -1237,7 +1238,19 @@ class N6RehearsalService:
         """
         merged = dict(desired)
         for operation in artifact.operations:
-            if operation.operation in {"CREATE", "MODIFY"}:
+            if operation.operation == "MODIFY":
+                if operation.content is not None:
+                    merged[operation.path] = operation.content
+                else:
+                    before = merged[operation.path] if operation.path in merged else base_view.read_bytes(operation.path)
+                    if before is None:
+                        _fail("replacement_preimage_mismatch", "exact replacement target is not an existing file")
+                    merged[operation.path] = apply_exact_replacements(
+                        before,
+                        [item.candidate_mapping() for item in operation.replacements],
+                        operation.preimage_digest,
+                    )
+            elif operation.operation == "CREATE":
                 merged[operation.path] = operation.content
             elif operation.operation == "DELETE":
                 merged[operation.path] = None
