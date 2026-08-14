@@ -406,7 +406,7 @@ def test_content_script_uses_deterministic_restart_safe_submission_and_resume() 
     assert "N6 reasoning attestation cancelled" in script
     assert "Resume in this chat" in script
     assert "crypto.randomUUID" not in script
-    assert "BDB-P1-CALC-BROWSER-E2E" in script
+    assert "BDB-P1-ENGINEERING" in script
     assert "BDB_EDIT_V1 requires exactly one fenced JSON artifact" in script
     assert 'send("engineering_artifact"' in script
     assert 'send("engineering_prepare"' in script
@@ -568,10 +568,10 @@ function functionsFor(turns, chromeOverride = {{}}) {{
   return context.window.__p1Test;
 }}
 
-const newlinePrompt = 'BDB-P1-CALC-BROWSER-E2E\\nsecond line';
+const newlinePrompt = 'BDB-P1-ENGINEERING\\nsecond line';
 if (!functionsFor([node('user', newlinePrompt)]).latestEngineeringPrompt()) throw new Error('real LF prompt was not recognized');
 
-const literalSeparatorPrompt = 'BDB-P1-CALC-BROWSER-E2E\\\\nsecond line';
+const literalSeparatorPrompt = 'BDB-P1-ENGINEERING\\\\nsecond line';
 if (functionsFor([node('user', literalSeparatorPrompt)]).latestEngineeringPrompt()) throw new Error('literal \\n separator was accepted');
 
 const readChrome = {{}};

@@ -76,10 +76,24 @@ N6_MAX_MESSAGE_BYTES = 1024 * 1024
 N6_MAX_PROMPT_BYTES = 64 * 1024
 N6_MAX_ANSWER_BYTES = 512 * 1024
 P1_ENGINEERING_TARGET_SCHEMA = "bdb-vnext-p1-engineering-target-v1"
-P1_ENGINEERING_PREFIX = "BDB-P1-CALC-BROWSER-E2E"
-P1_ENGINEERING_INTENT_REVISION = "p1-calc-v1"
-P1_ENGINEERING_CHECKER_ID = "bdb-vnext-p1-calculator-checker"
+P1_ENGINEERING_TARGET_SCHEMA_V2 = "bdb-vnext-p1-engineering-target-v2"
+P1_ENGINEERING_IDENTITY_SCHEMA = "bdb-vnext-p1-engineering-identity-v1"
+P1_ENGINEERING_PREFIX = "BDB-P1-ENGINEERING"
+P1_ENGINEERING_INTENT_REVISION = "p1-engineering-v1"
+P1_ENGINEERING_CHECKER_ID = "bdb-vnext-p1-engineering-checker"
 P1_ENGINEERING_CHECKER_VERSION = "1"
+P1_ENGINEERING_EVALUATOR_ID = "bdb-vnext-p1-engineering-evaluator"
+P1_ENGINEERING_EVALUATOR_VERSION = "1"
+
+
+def _default_engineering_identity() -> dict[str, str]:
+    return {
+        "schema": P1_ENGINEERING_IDENTITY_SCHEMA,
+        "prompt_prefix": P1_ENGINEERING_PREFIX,
+        "intent_revision": P1_ENGINEERING_INTENT_REVISION,
+        "evaluator_id": P1_ENGINEERING_EVALUATOR_ID,
+        "evaluator_version": P1_ENGINEERING_EVALUATOR_VERSION,
+    }
 
 
 class N6RehearsalError(RuntimeError):
@@ -353,7 +367,13 @@ def _validated_engineering_target(
     """
 
     allowed = {"schema", "repository_id", "repo_root", "branch", "commit", "tree", "view_id", "allowed_paths", "checker"}
-    if not isinstance(value, Mapping) or set(value) != allowed or value.get("schema") != P1_ENGINEERING_TARGET_SCHEMA:
+    allowed_v2 = allowed | {"engineering_identity"}
+    if not isinstance(value, Mapping) or value.get("schema") not in {P1_ENGINEERING_TARGET_SCHEMA, P1_ENGINEERING_TARGET_SCHEMA_V2}:
+        _fail("engineering_target_invalid", "engineering target fields/schema differ")
+    target_schema = str(value["schema"])
+    if target_schema == P1_ENGINEERING_TARGET_SCHEMA and set(value) != allowed:
+        _fail("engineering_target_invalid", "engineering target fields/schema differ")
+    if target_schema == P1_ENGINEERING_TARGET_SCHEMA_V2 and set(value) != allowed_v2:
         _fail("engineering_target_invalid", "engineering target fields/schema differ")
     root = _safe_abs(value.get("repo_root"), "engineering_target.repo_root")
     if not root.is_dir():
@@ -407,8 +427,8 @@ def _validated_engineering_target(
         _fail("engineering_target_invalid", "engineering target committed RepoView could not be resolved", details={"error": type(exc).__name__})
     if resolved.tree_oid != tree or resolved.view_id != view_id:
         _fail("engineering_target_repo_view_mismatch", "engineering target tree/view identity differs from the resolved commit")
-    return {
-        "schema": P1_ENGINEERING_TARGET_SCHEMA,
+    normalized = {
+        "schema": target_schema,
         "repository_id": repository_id,
         "repo_root": str(root),
         "branch": branch,
@@ -424,6 +444,25 @@ def _validated_engineering_target(
             "timeout_seconds": float(timeout),
         },
     }
+    if target_schema == P1_ENGINEERING_TARGET_SCHEMA_V2:
+        normalized["engineering_identity"] = _validated_engineering_identity(value.get("engineering_identity"))
+    return normalized
+
+
+def _validated_engineering_identity(value: object) -> dict[str, str]:
+    identity = _mapping(value, "engineering_identity")
+    if set(identity) != {"schema", "prompt_prefix", "intent_revision", "evaluator_id", "evaluator_version"} or identity.get("schema") != P1_ENGINEERING_IDENTITY_SCHEMA:
+        _fail("engineering_target_invalid", "engineering identity fields/schema differ")
+    normalized = {
+        "schema": P1_ENGINEERING_IDENTITY_SCHEMA,
+        "prompt_prefix": _text(identity.get("prompt_prefix"), "engineering_identity.prompt_prefix", max_bytes=256),
+        "intent_revision": _text(identity.get("intent_revision"), "engineering_identity.intent_revision", max_bytes=256),
+        "evaluator_id": _text(identity.get("evaluator_id"), "engineering_identity.evaluator_id", max_bytes=256),
+        "evaluator_version": _text(identity.get("evaluator_version"), "engineering_identity.evaluator_version", max_bytes=64),
+    }
+    if "\n" in normalized["prompt_prefix"] or "\r" in normalized["prompt_prefix"]:
+        _fail("engineering_target_invalid", "engineering identity prompt prefix must be single-line")
+    return normalized
 
 
 def _validated_browser_native_binding(value: object) -> dict[str, Any]:
@@ -845,6 +884,12 @@ class N6RehearsalService:
             "run_id": _stable_id("p1-run", submission_key),
         }
 
+    def _engineering_identity(self) -> dict[str, str]:
+        if self.engineering_target is None:
+            _fail("engineering_target_unavailable", "this N6 package has no disposable engineering target")
+        identity = self.engineering_target.get("engineering_identity")
+        return dict(identity) if isinstance(identity, Mapping) else _default_engineering_identity()
+
     @staticmethod
     def _engineering_recovery_claims(value: object) -> dict[str, Any] | None:
         if value is None:
@@ -903,7 +948,7 @@ class N6RehearsalService:
             store = getattr(plane.admission.authority, "_store", None)
             if store is None or not hasattr(store, "find_tasks"):
                 _fail("engineering_recovery_unavailable", "canonical admission store does not expose recovery lookup")
-            matches = list(store.find_tasks(conversation_id=conversation_id, intent_revision=P1_ENGINEERING_INTENT_REVISION))
+            matches = list(store.find_tasks(conversation_id=conversation_id, intent_revision=self._engineering_identity()["intent_revision"]))
             if submission_key is not None:
                 matches = [item for item in matches if item["task"]["submission_key"] == submission_key]
             if claims is not None:
@@ -1032,7 +1077,7 @@ class N6RehearsalService:
         with self._open() as plane:
             request = ShadowSubmissionRequest(
                 submission_key=submission_key,
-                intent_revision=P1_ENGINEERING_INTENT_REVISION,
+                intent_revision=self._engineering_identity()["intent_revision"],
                 intent={
                     "operation": "p1-engineering-edit",
                     "prompt_digest": prompt_digest,
@@ -1134,7 +1179,7 @@ class N6RehearsalService:
         result = {
             "submission_key": submission_key,
             "task_id": task_id,
-            "intent_revision": P1_ENGINEERING_INTENT_REVISION,
+            "intent_revision": self._engineering_identity()["intent_revision"],
             "request_digest": request_digest,
             "conversation_id": conversation_id,
             "work_id": ids["work_id"],
@@ -1242,7 +1287,7 @@ class N6RehearsalService:
             expected_intent_digest = semantic_digest(
                 {
                     "schema": "bdb-vnext-intent-v1",
-                    "intent_revision": P1_ENGINEERING_INTENT_REVISION,
+                    "intent_revision": self._engineering_identity()["intent_revision"],
                     "intent": {
                         "operation": "p1-engineering-edit",
                         "prompt_digest": prompt_digest,
@@ -1343,7 +1388,8 @@ class N6RehearsalService:
                 environment={"fingerprint": str(validation_row[7]), "target": self.engineering_target["repository_id"]},
                 observation_started_at=str(validation_row[8]), observation_finished_at=str(validation_row[9]), completeness="COMPLETE", applicability="APPLICABLE", status="PASS",
             )
-            evaluation = plane.evidence.evaluate(evidence_id=evidence.evidence_id, evaluator_id="bdb-vnext-p1-calculator-evaluator", evaluator_version="1", evaluator_code_digest=command.checker_code_digest, config_digest=semantic_digest(self.engineering_target), result="PASS", applicability="APPLICABLE", detail={"schema": "bdb-vnext-p1-engineering-result-v1", "candidate_view_id": candidate_view.view_id})
+            engineering_identity = self._engineering_identity()
+            evaluation = plane.evidence.evaluate(evidence_id=evidence.evidence_id, evaluator_id=engineering_identity["evaluator_id"], evaluator_version=engineering_identity["evaluator_version"], evaluator_code_digest=command.checker_code_digest, config_digest=semantic_digest(self.engineering_target), result="PASS", applicability="APPLICABLE", detail={"schema": "bdb-vnext-p1-engineering-result-v1", "candidate_view_id": candidate_view.view_id})
             disposition = plane.evidence.current_disposition(evidence.evidence_id)
             if disposition is None:
                 _fail("engineering_disposition_missing", "final engineering evidence has no current disposition")
@@ -1545,7 +1591,7 @@ def run_native_host(config_path: str | Path, *, input_stream: BinaryIO | None = 
         _framing_write(source_out, response)
 
 
-def _js_background(binding_digest: str, extension_id: str) -> str:
+def _js_background(binding_digest: str, extension_id: str, engineering_prefix: str = P1_ENGINEERING_PREFIX) -> str:
     script = r'''"use strict";
 const HOST = "com.bartosz.dev_bridge.vnext";
 const PACKAGE = "bdb-vnext-n6-rehearsal-package-v3";
@@ -1670,10 +1716,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 '''
-    return script.replace("__N6_BINDING__", json.dumps(binding_digest)).replace("__N6_EXTENSION__", json.dumps(extension_id))
+    escaped_prefix = engineering_prefix.replace("\\", "\\\\").replace('"', '\\"')
+    return script.replace("__N6_BINDING__", json.dumps(binding_digest)).replace("__N6_EXTENSION__", json.dumps(extension_id)).replace("__P1_ENGINEERING_PREFIX__", escaped_prefix)
 
 
-def _js_content() -> str:
+def _js_content(engineering_prefix: str = P1_ENGINEERING_PREFIX) -> str:
     scenarios = json.dumps(
         {task["bdb"].replace("\r\n", "\n").strip(): task["id"] for task in N6_TASKS},
         ensure_ascii=False,
@@ -2017,7 +2064,7 @@ async function lookupAndShowResumed(binding, expectedConversation) {
 function showEngineeringResult(result, submissionKey) {
   clearPanel(); ensurePanel();
   const status = result.validation_status || result.status || "READY";
-  write("P1 Calculator engineering\nSubmission " + submissionKey + "\nValidation " + status + (result.feedback ? "\n" + result.feedback.slice(0, 1800) : ""));
+  write("BDB engineering\nSubmission " + submissionKey + "\nValidation " + status + (result.feedback ? "\n" + result.feedback.slice(0, 1800) : ""));
   if (result.ready_to_seal === true) {
     addButton("Seal engineering Candidate", async () => {
       const response = await send("engineering_finalize", {submission_key: submissionKey, candidate_id: result.candidate_id});
@@ -2138,7 +2185,7 @@ window.addEventListener("popstate", () => { void synchronizeConversation(); });
 setInterval(() => { void synchronizeConversation(); }, 1000);
 void synchronizeConversation();
 '''
-    return script.replace("__N6_SCENARIOS__", scenarios).replace("__P1_ENGINEERING_PREFIX__", json.dumps(P1_ENGINEERING_PREFIX))
+    return script.replace("__N6_SCENARIOS__", scenarios).replace("__P1_ENGINEERING_PREFIX__", json.dumps(engineering_prefix))
 
 
 def _cs_shim_source(python_executable: Path, native_code_root: Path, config_path: Path) -> str:
@@ -2198,16 +2245,23 @@ def prepare_package(*, repo_root: str | Path, output: str | Path, runtime_root: 
     py = Path(python_executable or sys.executable).expanduser().absolute()
     external_interpreter = interpreter_identity(py)
     target = None
+    target_identity = _default_engineering_identity()
     if engineering_target is not None:
         raw_target = dict(_mapping(engineering_target, "engineering_target"))
         target_root = _safe_abs(raw_target.get("repo_root"), "engineering_target.repo_root")
         target_commit = str(raw_target.get("commit") or raw_target.get("source_commit") or "HEAD")
-        target_source = RepositoryResource.from_path(target_root, repository_id=str(raw_target.get("repository_id") or "bdb-p1-calculator"))
+        target_source = RepositoryResource.from_path(target_root, repository_id=str(raw_target.get("repository_id") or "bdb-engineering-target"))
         target_view = target_source.resolve_committed(target_commit)
         branch_result = subprocess.run(["git", "-C", str(target_root), "branch", "--show-current"], shell=False, capture_output=True, text=True, check=True, timeout=20)
-        target_checker = dict(raw_target.get("checker") or {"checker_id": P1_ENGINEERING_CHECKER_ID, "checker_version": P1_ENGINEERING_CHECKER_VERSION, "argv": [str(py), "tests/test_calculator.py"], "cwd": ".", "timeout_seconds": 60.0})
-        target_document = {"schema": P1_ENGINEERING_TARGET_SCHEMA, "repository_id": target_source.repository_id, "repo_root": str(target_root), "branch": str(raw_target.get("branch") or branch_result.stdout.strip()), "commit": target_view.commit_oid, "tree": target_view.tree_oid, "view_id": target_view.view_id, "allowed_paths": list(raw_target.get("allowed_paths") or ["index.html", "styles.css", "app.js"]), "checker": target_checker}
+        target_checker = dict(raw_target.get("checker") or {"checker_id": P1_ENGINEERING_CHECKER_ID, "checker_version": P1_ENGINEERING_CHECKER_VERSION, "argv": [str(py), "-c", "pass"], "cwd": ".", "timeout_seconds": 60.0})
+        explicit_identity = raw_target.get("engineering_identity")
+        if explicit_identity is not None:
+            target_identity = _validated_engineering_identity(explicit_identity)
+        target_document = {"schema": P1_ENGINEERING_TARGET_SCHEMA_V2 if explicit_identity is not None else P1_ENGINEERING_TARGET_SCHEMA, "repository_id": target_source.repository_id, "repo_root": str(target_root), "branch": str(raw_target.get("branch") or branch_result.stdout.strip()), "commit": target_view.commit_oid, "tree": target_view.tree_oid, "view_id": target_view.view_id, "allowed_paths": list(raw_target.get("allowed_paths") or ["index.html", "styles.css", "app.js"]), "checker": target_checker}
+        if explicit_identity is not None:
+            target_document["engineering_identity"] = target_identity
         target = _validated_engineering_target(target_document, forbidden_roots=(repo, runtime, legacy, output_path))
+        target_identity = dict(target.get("engineering_identity") or target_identity)
     native_code = output_path / "native-code"
     native_code.mkdir(parents=True, exist_ok=True)
     archive = subprocess.run(["git", "-C", str(repo), "archive", "--format=tar", commit, "bdb_vnext", "bdb_shared", "pyproject.toml"], shell=False, capture_output=True, check=True)
@@ -2230,8 +2284,8 @@ def prepare_package(*, repo_root: str | Path, output: str | Path, runtime_root: 
     if target is not None:
         config["engineering_target"] = target
     _write_json(browser / "manifest.json", manifest)
-    (browser / "background.js").write_text(_js_background(binding["binding_digest"], identity["extension_id"]), encoding="utf-8")
-    (browser / "content.js").write_text(_js_content(), encoding="utf-8")
+    (browser / "background.js").write_text(_js_background(binding["binding_digest"], identity["extension_id"], target_identity["prompt_prefix"]), encoding="utf-8")
+    (browser / "content.js").write_text(_js_content(target_identity["prompt_prefix"]), encoding="utf-8")
     _write_json(config_path, config)
     shim = _build_shim(output_path, python_executable=py, native_code_root=native_code, config_path=config_path)
     native_manifest_path = output_path / "native-host-manifest.json"
