@@ -127,6 +127,7 @@ def test_package_switch_requires_explicit_predecessor_and_validates_both_manifes
     assert "Replacement Native Host manifest is missing." in switch
     assert "Native Host manifest extension origin is invalid." in switch
     assert "Set-ItemProperty -LiteralPath $key -Name '(default)' -Value $newPath" in switch
+    assert switch.index("[CmdletBinding()]") < switch.index("param(") < switch.index("$ErrorActionPreference = 'Stop'")
     assert switch.index("Current Native Host registration is not the explicitly expected predecessor.") < switch.index("Set-ItemProperty -LiteralPath $key")
     assert switch.index("$old = Get-Content") < switch.index("Set-ItemProperty -LiteralPath $key")
     assert execution["package"]["native_host"]["registration_script"] != str(switch_path)

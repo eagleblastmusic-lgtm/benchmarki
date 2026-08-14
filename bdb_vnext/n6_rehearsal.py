@@ -2225,13 +2225,13 @@ def _native_host_switch_script(*, manifest_path: Path, host_name: str, extension
     host_literal = host_name.replace("'", "''")
     extension_literal = extension_id.replace("'", "''")
     return (
-        "$ErrorActionPreference = 'Stop'\n"
         "[CmdletBinding()]\n"
         "param(\n"
         "    [Parameter(Mandatory = $true)]\n"
         "    [ValidateNotNullOrEmpty()]\n"
         "    [string]$ExpectedCurrentManifest\n"
         ")\n"
+        "$ErrorActionPreference = 'Stop'\n"
         f"$key = 'HKCU:\\Software\\Google\\Chrome\\NativeMessagingHosts\\{host_literal}'\n"
         f"$newManifest = '{manifest_literal}'\n"
         f"$expectedOrigin = 'chrome-extension://{extension_literal}/'\n"
