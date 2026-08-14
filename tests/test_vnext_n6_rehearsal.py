@@ -827,6 +827,34 @@ def _p1_event(service: N6RehearsalService, execution: dict[str, Any], event: str
     })
 
 
+def _p1_artifact_payload(service: N6RehearsalService, prepared: dict[str, Any], payload: dict[str, Any], suffix: bytes = b"\n/* evidence replay */\n") -> dict[str, Any]:
+    assert service.engineering_view is not None
+    content = service.engineering_view.read_bytes("styles.css") + suffix
+    artifact = EditBatch.from_mapping({
+        "schema": "bdb-vnext-edit-v1",
+        "base_view_id": prepared["base_repo_view"]["view_id"],
+        "expected_tree_digest": prepared["current_tree_digest"],
+        "task_id": prepared["task_id"],
+        "work_id": prepared["work_id"],
+        "run_id": prepared["run_id"],
+        "lease_id": prepared["lease_id"],
+        "fence": prepared["fence"],
+        "candidate_id": prepared["candidate_id"],
+        "workspace_generation": prepared["workspace_generation"],
+        "operations": [{"operation": "MODIFY", "path": "styles.css", "content_b64": base64.b64encode(content).decode("ascii")}],
+        "budget": {"max_operations": 8, "max_bytes": 8 * 1024 * 1024},
+    })
+    raw_answer = "```json\n" + json.dumps(artifact.as_dict(), sort_keys=True) + "\n```"
+    return {
+        "submission_key": payload["submission_key"],
+        "conversation_id": payload["conversation_id"],
+        "prompt_digest": _sha(payload["prompt"].encode("utf-8")),
+        "raw_answer": raw_answer,
+        "raw_answer_digest": _sha(raw_answer.encode("utf-8")),
+        "artifact": artifact.as_dict(),
+    }
+
+
 def test_engineering_recovery_after_projection_loss_reuses_task_and_rejects_stale_artifact(tmp_path: Path, monkeypatch) -> None:
     clock = {"now": 100.0}
     monkeypatch.setattr("bdb_vnext.m4a_work_kernel.time.time", lambda: clock["now"])
@@ -951,6 +979,75 @@ def test_engineering_recovery_adopts_existing_candidate_before_finalize(tmp_path
         candidate = plane.candidate.get(prepared["candidate_id"])
         assert candidate is not None and candidate.state == CANDIDATE_SEALED
         assert len(plane.publication.publications_for_task(prepared["task_id"])) == 1
+
+
+def test_engineering_artifact_evidence_replay_survives_processing_restart_without_duplicate(tmp_path: Path, monkeypatch) -> None:
+    clock = {"now": 100.0}
+    monkeypatch.setattr("bdb_vnext.m4a_work_kernel.time.time", lambda: clock["now"])
+    service, execution, _target = _p1_service_for_recovery_tests(tmp_path, monkeypatch)
+    payload = {
+        "submission_key": "p1-browser:evidence-restart",
+        "prompt": "BDB-P1-CALC-BROWSER-E2E\nevidence restart",
+        "conversation_id": "chatgpt-conversation:evidence-restart",
+        "profile_id": None,
+    }
+    prepared = _p1_event(service, execution, "engineering_prepare", payload, "p1:evidence:prepare")["result"]
+    event_payload = _p1_artifact_payload(service, prepared, payload)
+
+    def fail_workspace(*args: Any, **kwargs: Any) -> Path:
+        raise N6RehearsalError("injected_workspace_failure", "injected local failure after Evidence boundary")
+
+    with monkeypatch.context() as injected:
+        injected.setattr("bdb_vnext.candidate.CandidateStore.create_workspace", fail_workspace)
+        with pytest.raises(N6RehearsalError) as caught:
+            _p1_event(service, execution, "engineering_artifact", event_payload, "p1:evidence:first")
+        assert caught.value.code == "injected_workspace_failure"
+    with service._open() as plane:
+        request_id = _stable_id("p1-artifact", payload["submission_key"] + ":" + event_payload["artifact"]["artifact_digest"])
+        first_evidence = plane.evidence._existing_request(request_id)
+        assert first_evidence is not None
+        assert plane.candidate.get(prepared["candidate_id"]) is None
+
+    restarted = N6RehearsalService(N6RehearsalConfig.from_json(service.config.package_root / "native-config.json"))
+    restarted.package_digest = "sha256:" + "f" * 64
+    second = _p1_event(restarted, execution, "engineering_artifact", event_payload, "p1:evidence:restart")
+    assert second["result"]["status"] == "VALIDATED"
+    assert second["result"]["artifact_evidence_id"] == first_evidence.evidence_id
+    with restarted._open() as plane:
+        assert int(plane.evidence._connection.execute("SELECT COUNT(*) FROM m4c_evidence_records WHERE request_id=?", (request_id,)).fetchone()[0]) == 1
+        assert plane.evidence._existing_request(request_id).evidence_id == first_evidence.evidence_id  # type: ignore[union-attr]
+
+
+def test_engineering_artifact_evidence_replay_rejects_changed_raw_answer(tmp_path: Path, monkeypatch) -> None:
+    clock = {"now": 100.0}
+    monkeypatch.setattr("bdb_vnext.m4a_work_kernel.time.time", lambda: clock["now"])
+    service, execution, _target = _p1_service_for_recovery_tests(tmp_path, monkeypatch)
+    payload = {
+        "submission_key": "p1-browser:evidence-conflict",
+        "prompt": "BDB-P1-CALC-BROWSER-E2E\nevidence conflict",
+        "conversation_id": "chatgpt-conversation:evidence-conflict",
+        "profile_id": None,
+    }
+    prepared = _p1_event(service, execution, "engineering_prepare", payload, "p1:evidence:conflict:prepare")["result"]
+    event_payload = _p1_artifact_payload(service, prepared, payload)
+
+    def fail_workspace(*args: Any, **kwargs: Any) -> Path:
+        raise N6RehearsalError("injected_workspace_failure", "injected local failure after Evidence boundary")
+
+    with monkeypatch.context() as injected:
+        injected.setattr("bdb_vnext.candidate.CandidateStore.create_workspace", fail_workspace)
+        with pytest.raises(N6RehearsalError) as caught:
+            _p1_event(service, execution, "engineering_artifact", event_payload, "p1:evidence:conflict:first")
+        assert caught.value.code == "injected_workspace_failure"
+
+    changed = dict(event_payload)
+    changed["raw_answer"] = event_payload["raw_answer"] + "\nchanged"
+    changed["raw_answer_digest"] = _sha(changed["raw_answer"].encode("utf-8"))
+    with pytest.raises(N6RehearsalError) as conflict:
+        _p1_event(service, execution, "engineering_artifact", changed, "p1:evidence:conflict:changed")
+    assert conflict.value.code == "engineering_artifact_evidence_conflict"
+    with service._open() as plane:
+        assert int(plane.evidence._connection.execute("SELECT COUNT(*) FROM m4c_evidence_records").fetchone()[0]) == 1
 
 
 def test_engineering_recovery_ambiguous_history_fails_closed_without_new_task(tmp_path: Path, monkeypatch) -> None:

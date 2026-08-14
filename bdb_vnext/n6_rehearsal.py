@@ -1253,6 +1253,75 @@ class N6RehearsalService:
                 merged[operation.path] = source_content
         return merged
 
+    @staticmethod
+    def _engineering_artifact_evidence(
+        evidence_store: Any,
+        *,
+        request_id: str,
+        primary_subject_identity: Mapping[str, Any],
+        raw_observation: Mapping[str, Any],
+        checker_code_digest: str,
+        environment: Mapping[str, Any],
+    ) -> Any:
+        """Record or strictly replay immutable model-observation Evidence.
+
+        The N6 Browser adapter may be retried after a package/runtime restart
+        even though package metadata and observation timestamps are different.
+        Those are processing-attempt fields, not model-observation identity.
+        Reuse is therefore local to this adapter and is allowed only after the
+        canonical raw observation and subject binding have been verified
+        exactly.  ``EvidenceStore``'s global replay contract remains strict.
+        """
+        checker_id = "bdb-vnext-p1-browser-artifact"
+        checker_version = "1"
+        existing = evidence_store._existing_request(request_id)
+        if existing is not None:
+            if (
+                existing.primary_subject_kind != "ENGINEERING_ARTIFACT"
+                or existing.primary_subject_identity != dict(primary_subject_identity)
+                or existing.candidate_view_id is not None
+                or existing.checker_id != checker_id
+                or existing.checker_version != checker_version
+                or existing.checker_code_digest != checker_code_digest
+                or existing.completeness != "COMPLETE"
+                or existing.applicability != "APPLICABLE"
+                or existing.status != "CAPTURED"
+            ):
+                _fail(
+                    "engineering_artifact_evidence_conflict",
+                    "existing engineering artifact Evidence has a different immutable identity",
+                )
+            try:
+                stored_raw = json.loads(evidence_store.raw_observation(existing.evidence_id).decode("utf-8"))
+            except Exception as exc:
+                _fail(
+                    "engineering_artifact_evidence_conflict",
+                    "existing engineering artifact raw Evidence is unavailable or invalid",
+                    details={"error": type(exc).__name__},
+                )
+            if stored_raw != dict(raw_observation):
+                _fail(
+                    "engineering_artifact_evidence_conflict",
+                    "existing engineering artifact raw observation differs",
+                )
+            return existing
+        return evidence_store.record_observation(
+            request_id=request_id,
+            primary_subject_kind="ENGINEERING_ARTIFACT",
+            primary_subject_identity=primary_subject_identity,
+            candidate_view_id=None,
+            raw_observation=raw_observation,
+            checker_id=checker_id,
+            checker_version=checker_version,
+            checker_code_digest=checker_code_digest,
+            environment=environment,
+            observation_started_at=_now(),
+            observation_finished_at=_now(),
+            completeness="COMPLETE",
+            applicability="APPLICABLE",
+            status="CAPTURED",
+        )
+
     def _engineering_artifact(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         if self.engineering_view is None or self.engineering_target is None:
             _fail("engineering_target_unavailable", "engineering target is not present in this package")
@@ -1319,6 +1388,14 @@ class N6RehearsalService:
                     return {"status": "REPLAYED", "artifact_digest": artifact.artifact_digest, "task_id": found["task_id"], "work_id": ids["work_id"], "run_id": ids["run_id"], "lease_id": artifact.lease_id, "fence": artifact.fence, **replay}
                 if candidate.state == CANDIDATE_SEALED:
                     _fail("candidate_state_conflict", "sealed engineering Candidate cannot accept another artifact")
+            artifact_evidence = self._engineering_artifact_evidence(
+                plane.evidence,
+                request_id=_stable_id("p1-artifact", submission_key + ":" + artifact.artifact_digest),
+                primary_subject_identity={"submission_key": submission_key, "conversation_id": conversation_id, "prompt_digest": prompt_digest, "artifact_digest": artifact.artifact_digest, "task_id": found["task_id"], "work_id": ids["work_id"], "run_id": ids["run_id"]},
+                raw_observation={"schema": N6_EVENT_SCHEMA, "event": "engineering_artifact", "raw_answer": raw_answer, "raw_answer_digest": raw_answer_digest, "artifact": artifact.as_dict()},
+                checker_code_digest=semantic_digest({"schema": EDIT_SCHEMA, "adapter": "bdb_vnext.n6_rehearsal"}),
+                environment={"surface": "normal-chatgpt-browser", "package_digest": self.package_digest, "protocol_generation": N6_PROTOCOL_GENERATION},
+            )
             if candidate is None:
                 workspace_path = plane.candidate.create_workspace(candidate_id=ids["candidate_id"], base_view=self.engineering_view)
             else:
@@ -1326,19 +1403,6 @@ class N6RehearsalService:
             desired = self._engineering_desired_files(plane.candidate, candidate, self.engineering_view) if candidate is not None else None
             if desired is not None:
                 desired = self._engineering_merge_desired(desired, artifact, self.engineering_view)
-            # A raw assistant artifact is immutable evidence before any apply.
-            artifact_evidence = plane.evidence.record_observation(
-                request_id=_stable_id("p1-artifact", submission_key + ":" + artifact.artifact_digest),
-                primary_subject_kind="ENGINEERING_ARTIFACT",
-                primary_subject_identity={"submission_key": submission_key, "conversation_id": conversation_id, "prompt_digest": prompt_digest, "artifact_digest": artifact.artifact_digest, "task_id": found["task_id"], "work_id": ids["work_id"], "run_id": ids["run_id"]},
-                candidate_view_id=None,
-                raw_observation={"schema": N6_EVENT_SCHEMA, "event": "engineering_artifact", "raw_answer": raw_answer, "raw_answer_digest": raw_answer_digest, "artifact": artifact.as_dict()},
-                checker_id="bdb-vnext-p1-browser-artifact",
-                checker_version="1",
-                checker_code_digest=semantic_digest({"schema": EDIT_SCHEMA, "adapter": "bdb_vnext.n6_rehearsal"}),
-                environment={"surface": "normal-chatgpt-browser", "package_digest": self.package_digest, "protocol_generation": N6_PROTOCOL_GENERATION},
-                observation_started_at=_now(), observation_finished_at=_now(), completeness="COMPLETE", applicability="APPLICABLE", status="CAPTURED",
-            )
             record = editor.prepare_batch(artifact, base_view=self.engineering_view, workspace=workspace_path, desired_files=desired)
             applied = editor.apply_batch(artifact)
             observed = plane.candidate.observe(ids["candidate_id"])
