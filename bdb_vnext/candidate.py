@@ -310,6 +310,36 @@ def _git_path_is_unchanged(workspace: Path, path: str) -> bool:
     _fail("candidate_git_state_failed", "Git could not verify a bounded tracked path")
 
 
+def _same_absolute_path(first: str | Path, second: str | Path) -> bool:
+    """Compare Windows paths without resolving or following reparse points."""
+
+    return os.path.normcase(os.path.abspath(os.fspath(first))) == os.path.normcase(os.path.abspath(os.fspath(second)))
+
+
+def _git_worktree_state(source: Path, workspace: Path) -> tuple[bool, bool]:
+    """Return whether *workspace* is registered, and whether it is locked."""
+
+    completed = subprocess.run(
+        ["git", "-C", str(source), "worktree", "list", "--porcelain"],
+        shell=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return False, False
+    matching = False
+    locked = False
+    for line in completed.stdout.splitlines():
+        if line.startswith("worktree "):
+            matching = _same_absolute_path(line[len("worktree "):].strip(), workspace)
+            locked = False
+        elif matching and line.startswith("locked"):
+            locked = True
+    return matching, locked
+
+
 def _blob_oid(raw: bytes, object_format: str) -> str:
     algorithm = "sha256" if object_format == "sha256" else "sha1"
     header = f"blob {len(raw)}\0".encode("ascii")
@@ -944,15 +974,70 @@ class CandidateStore:
         ).fetchone()
         return self._record_row(row, connection=source) if row else None
 
+    def _workspace_matches_base(self, workspace: Path, base_view: CommittedRepoView, source: Path) -> bool:
+        """Allow reuse only for an unrecorded, clean exact-base worktree."""
+
+        if not _path_exists(workspace) or not workspace.is_dir() or _reparse(workspace):
+            return False
+        registered, locked = _git_worktree_state(source, workspace)
+        if not registered or locked:
+            return False
+        observed = subprocess.run(["git", "-C", str(workspace), "rev-parse", "HEAD"], shell=False, capture_output=True, text=True, timeout=10, check=False)
+        tree = subprocess.run(["git", "-C", str(workspace), "rev-parse", "HEAD^{tree}"], shell=False, capture_output=True, text=True, timeout=10, check=False)
+        if observed.returncode != 0 or observed.stdout.strip() != base_view.commit_oid or tree.returncode != 0 or tree.stdout.strip() != base_view.tree_oid:
+            return False
+        status = subprocess.run(["git", "-C", str(workspace), "status", "--porcelain=v1", "--untracked-files=all"], shell=False, capture_output=True, text=True, timeout=30, check=False)
+        if status.returncode != 0 or status.stdout:
+            return False
+        try:
+            return self._workspace_entries(workspace, object_format=base_view.object_format) == self._base_entries(base_view)
+        except CandidateError:
+            return False
+
+    def _next_orphan_path(self, workspace: Path) -> Path:
+        for index in range(1, 1001):
+            name = f"{workspace.name}.orphan-{index}"
+            candidate = _safe_child(self.workspace_root, name)
+            if not _path_exists(candidate):
+                return candidate
+        _fail("workspace_quarantine_exhausted", "no bounded orphan quarantine path is available")
+
+    def _quarantine_workspace(self, source: Path, workspace: Path) -> Path:
+        """Move an unowned workspace aside without deleting its bytes."""
+
+        if _reparse(workspace):
+            _fail("workspace_quarantine_unsafe", "orphan Candidate workspace is a reparse point")
+        registered, locked = _git_worktree_state(source, workspace)
+        if locked:
+            _fail("workspace_locked", "orphan Candidate workspace is Git-locked")
+        quarantine = self._next_orphan_path(workspace)
+        if registered:
+            completed = subprocess.run(["git", "-C", str(source), "worktree", "move", str(workspace), str(quarantine)], shell=False, capture_output=True, text=True, timeout=30, check=False)
+        else:
+            try:
+                os.replace(str(workspace), str(quarantine))
+                completed = None
+            except OSError as exc:
+                _fail("workspace_quarantine_failed", "unregistered orphan Candidate workspace could not be preserved", details={"error": str(exc)})
+        if completed is not None and completed.returncode != 0:
+            _fail("workspace_quarantine_failed", "orphan Candidate worktree could not be quarantined", details={"stderr": completed.stderr[-1000:]})
+        if _path_exists(workspace) or not _path_exists(quarantine):
+            _fail("workspace_quarantine_failed", "orphan Candidate workspace quarantine was incomplete")
+        return quarantine
+
     def create_workspace(self, *, candidate_id: str, base_view: CommittedRepoView) -> Path:
         candidate_id = _id(candidate_id, field="candidate_id")
         base_view.validate_integrity()
-        workspace = self._workspace_for(candidate_id)
-        if workspace.exists():
-            _fail("workspace_exists", "Candidate workspace is not disposable/empty")
         source = Path(base_view.repository.root).absolute()
         if _contains(self.root, source) or _contains(source, self.root):
             _fail("workspace_source_overlap", "Candidate workspace must not overlap the source repository")
+        if self.get(candidate_id) is not None:
+            _fail("workspace_exists", "canonical Candidate workspace already exists", details={"candidate_id": candidate_id})
+        workspace = self._workspace_for(candidate_id)
+        if _path_exists(workspace):
+            if self._workspace_matches_base(workspace, base_view, source):
+                return workspace
+            self._quarantine_workspace(source, workspace)
         workspace.parent.mkdir(parents=True, exist_ok=True)
         completed = subprocess.run(
             [

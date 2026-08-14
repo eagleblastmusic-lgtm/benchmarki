@@ -81,6 +81,77 @@ def _remove_candidate_worktree(subject: Path, workspace: Path) -> None:
     subprocess.run(["git", "-C", str(subject), "worktree", "remove", "--force", str(workspace)], capture_output=True, text=True, check=False)
 
 
+def _workspace_snapshot(root: Path) -> dict[str, bytes]:
+    snapshot: dict[str, bytes] = {}
+    for directory, dir_names, file_names in os.walk(root, topdown=True, followlinks=False):
+        current = Path(directory)
+        if current == root:
+            dir_names[:] = [name for name in dir_names if name != ".git"]
+        for name in file_names:
+            if name == ".git":
+                continue
+            path = current / name
+            snapshot[path.relative_to(root).as_posix()] = path.read_bytes()
+    return snapshot
+
+
+def _remove_all_candidate_worktrees(subject: Path, runtime: Path) -> None:
+    for path in (runtime / "candidates").iterdir():
+        if path.is_dir() and path.name.startswith("candidate-"):
+            _remove_candidate_worktree(subject, path)
+
+
+def test_dirty_unrecorded_workspace_is_quarantined_without_losing_bytes(tmp_path: Path) -> None:
+    with _stack(tmp_path) as (subject, view, _kernel, store, _work_id, _task_id, _lease):
+        candidate_id = "candidate:orphan-dirty"
+        source_head = _git(subject, "rev-parse", "HEAD")
+        source_status = _git(subject, "status", "--short", "--branch")
+        first = store.create_workspace(candidate_id=candidate_id, base_view=view)
+        (first / "one.txt").write_bytes(b"orphan bytes\r\n")
+        orphan_snapshot = _workspace_snapshot(first)
+        candidates_root = tmp_path / "runtime" / "candidates"
+        fresh = store.create_workspace(candidate_id=candidate_id, base_view=view)
+        assert fresh == store._workspace_for(candidate_id)
+        quarantined = [path for path in candidates_root.iterdir() if path != fresh]
+        assert len(quarantined) == 1
+        assert _workspace_snapshot(quarantined[0]) == orphan_snapshot
+        assert store._workspace_entries(fresh, object_format=view.object_format) == store._base_entries(view)
+        assert _git(subject, "rev-parse", "HEAD") == source_head
+        assert _git(subject, "status", "--short", "--branch") == source_status
+        _remove_all_candidate_worktrees(subject, tmp_path / "runtime")
+
+
+def test_clean_unrecorded_workspace_is_reused_at_same_candidate_path(tmp_path: Path) -> None:
+    with _stack(tmp_path) as (subject, view, _kernel, store, _work_id, _task_id, _lease):
+        candidate_id = "candidate:orphan-clean"
+        first = store.create_workspace(candidate_id=candidate_id, base_view=view)
+        reused = store.create_workspace(candidate_id=candidate_id, base_view=view)
+        assert reused == first
+        assert store._workspace_entries(reused, object_format=view.object_format) == store._base_entries(view)
+        _remove_all_candidate_worktrees(subject, tmp_path / "runtime")
+
+
+def test_existing_canonical_candidate_workspace_is_never_quarantined(tmp_path: Path) -> None:
+    with _stack(tmp_path) as (subject, view, _kernel, store, work_id, task_id, lease):
+        candidate_id = "candidate:canonical-owned"
+        workspace = store.create_workspace(candidate_id=candidate_id, base_view=view)
+        prepared = store.prepare(
+            candidate_id=candidate_id, work_id=work_id, task_id=task_id,
+            lease_id=lease.lease_id, fence=lease.fence, base_view=view,
+            workspace_root=workspace, replacements={"one.txt": b"planned\n"},
+        )
+        assert prepared.candidate_id == candidate_id
+        (workspace / "one.txt").write_bytes(b"canonical dirty bytes")
+        before_names = {path.name for path in (tmp_path / "runtime" / "candidates").iterdir()}
+        with pytest.raises(CandidateError) as caught:
+            store.create_workspace(candidate_id=candidate_id, base_view=view)
+        assert caught.value.code == "workspace_exists"
+        assert {path.name for path in (tmp_path / "runtime" / "candidates").iterdir()} == before_names
+        assert (workspace / "one.txt").read_bytes() == b"canonical dirty bytes"
+        assert store.get(candidate_id) is not None
+        _remove_all_candidate_worktrees(subject, tmp_path / "runtime")
+
+
 def test_candidate_worktree_creation_enables_windows_long_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     with _stack(tmp_path) as (subject, view, _kernel, store, _work_id, _task_id, _lease):
         real_run = subprocess.run
