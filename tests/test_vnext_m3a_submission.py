@@ -90,6 +90,25 @@ def test_same_key_same_digest_replays_and_maps_exactly_one_task_revision(tmp_pat
         assert task.intent_revision_id == first.intent_revision_id
 
 
+def test_read_only_recovery_lookup_returns_all_exact_conversation_lineages(tmp_path: Path) -> None:
+    with open_store(tmp_path) as store:
+        intent = {
+            "operation": "p1-engineering-edit",
+            "prompt_digest": "sha256:" + "1" * 64,
+            "target_repo_view_id": "view-1",
+            "target_tree": "tree-1",
+            "allowed_paths": ["app.js"],
+        }
+        first = make_request("p1-browser:first", revision="p1-calc-v1", intent=intent)
+        second = make_request("p1-browser:second", revision="p1-calc-v1", intent={**intent, "prompt_digest": "sha256:" + "2" * 64})
+        store.admit(first)
+        store.admit(second)
+        matches = store.find_tasks(conversation_id="conversation-shadow-1", intent_revision="p1-calc-v1")
+        assert [item["task"]["submission_key"] for item in matches] == [first.submission_key, second.submission_key]
+        assert matches[0]["canonical_intent"] == intent
+        assert matches[0]["request_digest"] == first.validated_digest()
+
+
 def test_same_key_different_digest_is_conflict(tmp_path: Path) -> None:
     with open_store(tmp_path) as store:
         store.admit(make_request())

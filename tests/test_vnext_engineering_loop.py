@@ -230,3 +230,35 @@ def test_recovery_observes_before_any_retry(tmp_path: Path) -> None:
         recovered = editor.recover_candidate(candidate_id, base_view=view)
         assert recovered.state == "PREPARED"
         assert (workspace / "target.txt").read_text(encoding="utf-8") == "TODO\n"
+
+
+def test_exact_artifact_replay_uses_canonical_batch_without_second_apply(tmp_path: Path) -> None:
+    with _stack(tmp_path) as (_subject, view, receipt, _kernel, store, evidence, _publication, work_id, lease):
+        candidate_id = "candidate:p1:replay"
+        workspace = store.create_workspace(candidate_id=candidate_id, base_view=view)
+        tree = store._tree_digest(store._base_entries(view))
+        batch = _artifact(view.view_id, tree, candidate_id=candidate_id, task_id=receipt.task_id, work_id=work_id, run_id="run:p1", lease_id=lease.lease_id, fence=lease.fence, generation=store.generation, operations=[{"operation": "MODIFY", "path": "target.txt", "content_b64": base64.b64encode(b"PASS\n").decode("ascii")}])
+        editor = EditorPort(store, evidence_store=evidence)
+        editor.prepare_batch(batch, base_view=view, workspace=workspace)
+        observed = editor.apply_batch(batch)
+        assert observed.state == "OBSERVED"
+        command = ValidationCommand("fixture-checker", "v1", (sys.executable, "checker.py"))
+        result = ValidationRunner(ValidationPolicy(allowed_argv=(command.argv,))).run(command, workspace)
+        validation = editor.record_validation(batch=batch, result=result)
+        assert validation.status == "PASS"
+        before = {
+            "effects": int(store._connection.execute("SELECT COUNT(*) FROM m4b_candidate_effects").fetchone()[0]),
+            "batches": int(store._connection.execute("SELECT COUNT(*) FROM p1_edit_batches").fetchone()[0]),
+            "validations": int(store._connection.execute("SELECT COUNT(*) FROM p1_validation_runs").fetchone()[0]),
+        }
+        replay = editor.replay_batch(batch, base_view=view)
+        assert replay is not None
+        assert replay["status"] == "REPLAYED"
+        assert replay["validation_status"] == "PASS"
+        assert replay["current_tree_digest"] == store._tree_digest(store._workspace_entries(workspace, object_format=view.object_format))
+        after = {
+            "effects": int(store._connection.execute("SELECT COUNT(*) FROM m4b_candidate_effects").fetchone()[0]),
+            "batches": int(store._connection.execute("SELECT COUNT(*) FROM p1_edit_batches").fetchone()[0]),
+            "validations": int(store._connection.execute("SELECT COUNT(*) FROM p1_validation_runs").fetchone()[0]),
+        }
+        assert after == before

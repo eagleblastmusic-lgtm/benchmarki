@@ -615,6 +615,56 @@ class ShadowSubmissionStore:
             json.loads(bytes(row[6]).decode("utf-8")),
         )
 
+    def find_tasks(self, *, conversation_id: str, intent_revision: str) -> tuple[dict[str, Any], ...]:
+        """Return exact admitted Task identities for a canonical recovery lookup.
+
+        This is deliberately read-only and returns all matches.  Callers must
+        reject zero or multiple matches rather than selecting by recency.
+        Canonical intent is read from the immutable intent-revision row so a
+        Browser projection never becomes an admission authority.
+        """
+        _text(conversation_id, field="conversation_id")
+        _text(intent_revision, field="intent_revision")
+        with self._connection_lock:
+            rows = self._connection.execute(
+                "SELECT t.task_id,t.submission_key,t.intent_revision_id,t.intent_revision,t.intent_digest,"
+                "t.conversation_binding,t.consumer_binding,s.request_digest,r.canonical_intent "
+                "FROM m3a_tasks t "
+                "JOIN m3a_submissions s ON s.submission_key=t.submission_key "
+                "JOIN m3a_intent_revisions r ON r.intent_revision_id=t.intent_revision_id "
+                "WHERE t.intent_revision=? ORDER BY s.created_order",
+                (intent_revision,),
+            ).fetchall()
+        matches: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                task_binding = json.loads(bytes(row[5]).decode("utf-8"))
+                consumer_binding = json.loads(bytes(row[6]).decode("utf-8"))
+                canonical_intent = json.loads(bytes(row[8]).decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError, TypeError) as exc:
+                _fail("corrupt_admission", "canonical recovery encountered malformed Task identity")
+            if not isinstance(task_binding, Mapping) or task_binding.get("conversation_id") != conversation_id:
+                continue
+            if not isinstance(consumer_binding, Mapping) or not isinstance(canonical_intent, Mapping):
+                _fail("corrupt_admission", "canonical recovery encountered malformed Task binding")
+            matches.append(
+                {
+                    "task": {
+                        "schema": M3A_SCHEMA,
+                        "task_id": str(row[0]),
+                        "submission_key": str(row[1]),
+                        "intent_revision_id": str(row[2]),
+                        "intent_revision": str(row[3]),
+                        "intent_digest": str(row[4]),
+                        "conversation_binding": dict(task_binding),
+                        "consumer_binding": dict(consumer_binding),
+                    },
+                    "request_digest": str(row[7]),
+                    "canonical_intent": dict(canonical_intent),
+                }
+            )
+        return tuple(matches)
+
     def counts(self) -> dict[str, int]:
         with self._connection_lock:
             return {

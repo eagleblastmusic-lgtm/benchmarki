@@ -845,6 +845,145 @@ class N6RehearsalService:
             "run_id": _stable_id("p1-run", submission_key),
         }
 
+    @staticmethod
+    def _engineering_recovery_claims(value: object) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        claims = dict(_mapping(value, "artifact_claims"))
+        allowed = {
+            "task_id", "work_id", "run_id", "lease_id", "fence", "candidate_id",
+            "base_view_id", "expected_tree_digest", "workspace_generation", "artifact_digest",
+        }
+        if set(claims) - allowed:
+            _fail("engineering_recovery_payload_invalid", "artifact recovery claims contain unknown fields")
+        required = {"task_id", "work_id", "run_id", "lease_id", "fence", "candidate_id", "base_view_id", "expected_tree_digest", "workspace_generation"}
+        if set(claims) != required and set(claims) != required | {"artifact_digest"}:
+            _fail("engineering_recovery_payload_invalid", "artifact recovery claims are incomplete")
+        for field in required - {"fence"}:
+            claims[field] = _text(claims.get(field), f"artifact_claims.{field}")
+        if not isinstance(claims["fence"], int) or isinstance(claims["fence"], bool) or claims["fence"] < 1:
+            _fail("engineering_recovery_payload_invalid", "artifact_claims.fence must be a positive integer")
+        if "artifact_digest" in claims:
+            claims["artifact_digest"] = _text(claims["artifact_digest"], "artifact_claims.artifact_digest")
+        return claims
+
+    def _engineering_validate_intent(self, canonical_intent: Mapping[str, Any]) -> str:
+        if self.engineering_view is None or self.engineering_target is None:
+            _fail("engineering_target_unavailable", "engineering target is not present in this package")
+        prompt_digest = canonical_intent.get("prompt_digest")
+        expected = {
+            "operation": "p1-engineering-edit",
+            "target_repo_view_id": self.engineering_view.view_id,
+            "target_tree": self.engineering_view.tree_oid,
+            "allowed_paths": list(self.engineering_target["allowed_paths"]),
+        }
+        for key, value in expected.items():
+            if canonical_intent.get(key) != value:
+                _fail("engineering_recovery_target_mismatch", "canonical engineering intent is incompatible with this package")
+        if not isinstance(prompt_digest, str) or len(prompt_digest) != 71 or not prompt_digest.startswith("sha256:"):
+            _fail("engineering_recovery_intent_corrupt", "canonical engineering intent has no valid initial prompt digest")
+        return prompt_digest
+
+    def _engineering_recover(
+        self,
+        *,
+        conversation_id: str,
+        submission_key: str | None,
+        profile_id: str | None,
+        artifact_claims: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        if self.engineering_view is None or self.engineering_target is None:
+            _fail("engineering_target_unavailable", "engineering target is not present in this package")
+        conversation_id = _text(conversation_id, "conversation_id")
+        if submission_key is not None:
+            submission_key = _text(submission_key, "submission_key")
+        claims = self._engineering_recovery_claims(artifact_claims)
+        with self._open() as plane:
+            store = getattr(plane.admission.authority, "_store", None)
+            if store is None or not hasattr(store, "find_tasks"):
+                _fail("engineering_recovery_unavailable", "canonical admission store does not expose recovery lookup")
+            matches = list(store.find_tasks(conversation_id=conversation_id, intent_revision=P1_ENGINEERING_INTENT_REVISION))
+            if submission_key is not None:
+                matches = [item for item in matches if item["task"]["submission_key"] == submission_key]
+            if claims is not None:
+                matches = [item for item in matches if item["task"]["task_id"] == claims["task_id"]]
+            compatible: list[dict[str, Any]] = []
+            for item in matches:
+                task = _mapping(item.get("task"), "recovery.task")
+                intent = _mapping(item.get("canonical_intent"), "recovery.canonical_intent")
+                self._engineering_validate_intent(intent)
+                binding = _mapping(task.get("conversation_binding"), "recovery.task.conversation_binding")
+                if binding.get("conversation_id") != conversation_id:
+                    continue
+                if profile_id is not None and binding.get("profile_id") not in {None, profile_id}:
+                    continue
+                compatible.append(item)
+            if not compatible:
+                if submission_key is not None or claims is not None:
+                    _fail("engineering_recovery_identity_mismatch", "the supplied engineering identity has no exact canonical match")
+                return {"recovery_status": "NOT_FOUND", "conversation_id": conversation_id}
+            if len(compatible) != 1:
+                _fail("engineering_recovery_ambiguous", "more than one canonical engineering lineage matches this conversation", details={"matches": len(compatible)})
+            found = compatible[0]
+            task = _mapping(found["task"], "recovery.task")
+            key = _text(task.get("submission_key"), "recovery.task.submission_key")
+            ids = self._engineering_ids(key)
+            if claims is not None:
+                expected_claims = {
+                    "task_id": task["task_id"],
+                    "work_id": ids["work_id"],
+                    "run_id": ids["run_id"],
+                    "lease_id": ids["lease_id"],
+                    "candidate_id": ids["candidate_id"],
+                    "base_view_id": self.engineering_view.view_id,
+                    "workspace_generation": plane.candidate.generation,
+                }
+                for field, expected_value in expected_claims.items():
+                    if claims[field] != expected_value:
+                        _fail("engineering_recovery_identity_mismatch", f"artifact recovery claim {field} differs from canonical state")
+            work = plane.work_kernel.query(ids["work_id"])
+            if work is None:
+                _fail("engineering_recovery_incomplete", "canonical Task exists without its engineering WorkItem")
+            candidate = plane.candidate.get(ids["candidate_id"])
+            if candidate is not None and candidate.task_id != task["task_id"]:
+                _fail("engineering_recovery_identity_mismatch", "engineering Candidate is bound to a different Task")
+            if work.work.disposition == "FINISHED":
+                if candidate is None or candidate.state != CANDIDATE_SEALED:
+                    _fail("engineering_recovery_incomplete", "finished engineering Work has no sealed Candidate")
+                current_tree = plane.candidate._tree_digest(plane.candidate._workspace_entries(Path(candidate.workspace_root), object_format=self.engineering_view.object_format))
+                result = self._engineering_context(task["task_id"], str(found["request_digest"]), conversation_id, key, work, candidate, plane.candidate.generation, current_tree, initial_prompt_digest=self._engineering_validate_intent(_mapping(found["canonical_intent"], "recovery.canonical_intent")), recovery_status="COMPLETED")
+                return result
+            if work.work.disposition not in {"READY", "RUNNING"}:
+                _fail("engineering_recovery_incomplete", "engineering WorkItem is not in a recoverable disposition")
+            if work.work.disposition == "READY":
+                lease = plane.work_kernel.acquire_lease(ids["work_id"], ids["lease_id"], "p1-browser-engineering", ttl_seconds=900.0)
+                work = plane.work_kernel.query(ids["work_id"])
+                if work is None:
+                    _fail("engineering_recovery_incomplete", "engineering WorkItem disappeared during recovery")
+                plane.work_kernel.start_run(ids["work_id"], ids["run_id"], lease.lease_id, lease.fence, work.work.state_version)
+                work = plane.work_kernel.query(ids["work_id"])
+            else:
+                if work.active_run is None or work.lease is None or work.active_run.run_id != ids["run_id"] or work.lease.lease_id != ids["lease_id"]:
+                    _fail("engineering_recovery_conflict", "engineering WorkItem has a foreign active Run/Lease")
+                if claims is not None and claims["fence"] != work.lease.fence:
+                    return self._engineering_context(task["task_id"], str(found["request_digest"]), conversation_id, key, work, candidate, plane.candidate.generation, plane.candidate._tree_digest(plane.candidate._workspace_entries(Path(candidate.workspace_root), object_format=self.engineering_view.object_format)) if candidate is not None else plane.candidate._tree_digest(plane.candidate._base_entries(self.engineering_view)), initial_prompt_digest=self._engineering_validate_intent(_mapping(found["canonical_intent"], "recovery.canonical_intent")), recovery_status="STALE_ARTIFACT", recovery_error="canonical fence has advanced; request a fresh BDB_EDIT_V1 artifact")
+                lease = plane.work_kernel.acquire_lease(ids["work_id"], ids["lease_id"], "p1-browser-engineering", ttl_seconds=900.0)
+                work = plane.work_kernel.query(ids["work_id"])
+                if work is None or work.active_run is None:
+                    _fail("engineering_recovery_conflict", "engineering WorkItem recovery lost its active Run/Lease")
+                if work.active_run.fence < lease.fence:
+                    plane.work_kernel.adopt_active_run(ids["work_id"], ids["run_id"], lease.lease_id, lease.fence, work.work.state_version)
+                    work = plane.work_kernel.query(ids["work_id"])
+            if work is None or work.active_run is None or work.lease is None or work.active_run.run_id != ids["run_id"] or work.lease.lease_id != ids["lease_id"]:
+                _fail("engineering_recovery_conflict", "engineering WorkItem recovery did not establish the expected owner")
+            current_tree = plane.candidate._tree_digest(plane.candidate._workspace_entries(Path(candidate.workspace_root), object_format=self.engineering_view.object_format)) if candidate is not None else plane.candidate._tree_digest(plane.candidate._base_entries(self.engineering_view))
+            recovery_status = "RECOVERED"
+            recovery_error = None
+            if claims is not None and claims["fence"] != work.lease.fence:
+                recovery_status = "STALE_ARTIFACT"
+                recovery_error = "canonical fence has advanced; request a fresh BDB_EDIT_V1 artifact"
+            return self._engineering_context(task["task_id"], str(found["request_digest"]), conversation_id, key, work, candidate, plane.candidate.generation, current_tree, initial_prompt_digest=self._engineering_validate_intent(_mapping(found["canonical_intent"], "recovery.canonical_intent")), recovery_status=recovery_status, recovery_error=recovery_error)
+
     def _engineering_checker(self) -> tuple[ValidationCommand, ValidationRunner]:
         if self.engineering_target is None:
             _fail("engineering_target_unavailable", "this N6 package has no disposable engineering target")
@@ -964,13 +1103,17 @@ class N6RehearsalService:
         candidate: Any,
         generation: str,
         current_tree_digest: str,
+        *,
+        initial_prompt_digest: str | None = None,
+        recovery_status: str | None = None,
+        recovery_error: str | None = None,
     ) -> dict[str, Any]:
         if self.engineering_view is None or self.engineering_target is None:
             _fail("engineering_target_unavailable", "engineering target is not present in this package")
         ids = self._engineering_ids(submission_key)
         lease = work.lease
         run = work.active_run or work.last_run
-        return {
+        result = {
             "submission_key": submission_key,
             "task_id": task_id,
             "intent_revision": P1_ENGINEERING_INTENT_REVISION,
@@ -989,6 +1132,14 @@ class N6RehearsalService:
             "candidate_view_id": candidate.manifest_digest if candidate is not None else None,
             "work": work.as_dict(),
         }
+        if initial_prompt_digest is not None:
+            result["initial_prompt_digest"] = initial_prompt_digest
+            result["prompt_digest"] = initial_prompt_digest
+        if recovery_status is not None:
+            result["recovery_status"] = recovery_status
+        if recovery_error is not None:
+            result["recovery_error"] = recovery_error
+        return result
 
     def _engineering_desired_files(self, store: Any, candidate: Any, base_view: Any) -> dict[str, bytes | None]:
         workspace = Path(candidate.workspace_root)
@@ -1057,13 +1208,18 @@ class N6RehearsalService:
             if work.lease is None or work.lease.lease_id != artifact.lease_id or work.lease.fence != artifact.fence:
                 _fail("engineering_fence_mismatch", "engineering artifact lease/fence is stale")
             candidate = plane.candidate.get(ids["candidate_id"])
-            if candidate is not None and candidate.state in {CANDIDATE_SEALED, CANDIDATE_INVALIDATED}:
-                _fail("candidate_state_conflict", "sealed or invalidated engineering Candidate cannot accept another artifact")
+            editor = EditorPort(plane.candidate, evidence_store=plane.evidence)
+            if candidate is not None and candidate.state == CANDIDATE_INVALIDATED:
+                _fail("candidate_state_conflict", "invalidated engineering Candidate cannot accept another artifact")
+            if candidate is not None and candidate.state in {CANDIDATE_OBSERVED, CANDIDATE_SEALED}:
+                replay = editor.replay_batch(artifact, base_view=self.engineering_view)
+                if replay is None:
+                    _fail("engineering_reconciliation_required", "completed engineering Candidate has no replayable exact batch")
+                return {"status": "REPLAYED", "artifact_digest": artifact.artifact_digest, "task_id": found["task_id"], "work_id": ids["work_id"], "run_id": ids["run_id"], "lease_id": artifact.lease_id, "fence": artifact.fence, **replay}
             if candidate is None:
                 workspace_path = plane.candidate.create_workspace(candidate_id=ids["candidate_id"], base_view=self.engineering_view)
             else:
                 workspace_path = Path(candidate.workspace_root)
-            editor = EditorPort(plane.candidate, evidence_store=plane.evidence)
             desired = self._engineering_desired_files(plane.candidate, candidate, self.engineering_view) if candidate is not None else None
             # A raw assistant artifact is immutable evidence before any apply.
             artifact_evidence = plane.evidence.record_observation(
@@ -1173,6 +1329,16 @@ class N6RehearsalService:
         if event == "status":
             return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": "READY", "package_digest": self.package_digest, "native_code_digest": self.native_code_digest, "interpreter_identity_digest": self.interpreter_identity["identity_digest"], "browser_native_binding_digest": self.browser_native_binding["binding_digest"], "browser_extension_id": self.identity["extension_id"], "native_host_name": N6_NATIVE_HOST_NAME, "protocol_generation": N6_PROTOCOL_GENERATION, "production_activation": False, "rehearsal_infrastructure": "ACTIVE_ONLY_WHEN_EXPLICIT_PACKAGE_LOADED", "production_runtime": "OFF", "production_writer": "OFF"}
         payload = _mapping(request.get("payload"), "payload")
+        if event == "engineering_recover":
+            submission_key = payload.get("submission_key") if isinstance(payload.get("submission_key"), str) else None
+            profile_id = payload.get("profile_id") if isinstance(payload.get("profile_id"), str) else None
+            result = self._engineering_recover(
+                conversation_id=_text(payload.get("conversation_id"), "conversation_id"),
+                submission_key=submission_key,
+                profile_id=profile_id,
+                artifact_claims=payload.get("artifact_claims") if payload.get("artifact_claims") is not None else None,
+            )
+            return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": "ENGINEERING_RECOVERED", "result": result}
         if event == "engineering_prepare":
             result = self._engineering_prepare(
                 submission_key=_text(payload.get("submission_key"), "submission_key"),
@@ -1581,6 +1747,15 @@ function strictEngineeringArtifact(rawAnswer) {
   if (!artifact || typeof artifact !== "object" || artifact.schema !== P1_EDIT_SCHEMA || Array.isArray(artifact)) throw new Error("BDB_EDIT_V1 schema is missing");
   return artifact;
 }
+function engineeringRecoveryClaims(artifact) {
+  if (!artifact || typeof artifact !== "object") throw new Error("BDB_EDIT_V1 recovery claims are unavailable");
+  const fields = ["task_id", "work_id", "run_id", "lease_id", "fence", "candidate_id", "base_view_id", "expected_tree_digest", "workspace_generation", "artifact_digest"];
+  const claims = {};
+  for (const field of fields) if (Object.prototype.hasOwnProperty.call(artifact, field)) claims[field] = artifact[field];
+  const required = ["task_id", "work_id", "run_id", "lease_id", "fence", "candidate_id", "base_view_id", "expected_tree_digest", "workspace_generation"];
+  if (required.some((field) => !(field in claims))) throw new Error("BDB_EDIT_V1 recovery claims are incomplete");
+  return claims;
+}
 function latestEngineeringPrompt() {
   const turns = [...document.querySelectorAll("[data-message-author-role]")];
   for (let index = turns.length - 1; index >= 0; index -= 1) {
@@ -1792,7 +1967,35 @@ async function inspectEngineeringScenario(conversation) {
   const prompt = latestEngineeringPrompt();
   if (!prompt) return;
   let prepared = engineeringState && engineeringState.conversation_id === conversation ? engineeringState : await restoreEngineeringState(conversation);
+  let observed = null;
+  let artifactClaims = null;
+  let artifactError = null;
+  try {
+    observed = await stableEngineeringObservation(prompt);
+    try { artifactClaims = engineeringRecoveryClaims(strictEngineeringArtifact(observed.raw_answer)); }
+    catch (error) { artifactError = error; }
+  } catch (_) {}
+  const cachedSubmissionKey = prepared && typeof prepared.submission_key === "string" ? prepared.submission_key : null;
+  let recovered = null;
+  try {
+    const recoveryResponse = await send("engineering_recover", {conversation_id: conversation, submission_key: cachedSubmissionKey, profile_id: null, artifact_claims: artifactClaims});
+    const recovery = nativeResult(recoveryResponse, "P1 canonical engineering recovery failed");
+    if (!recovery.result) {
+      showEngineeringResult({status: "RECOVERY_REJECTED", feedback: recovery.error}, cachedSubmissionKey || "unknown"); return;
+    } else if (recovery.result.recovery_status !== "NOT_FOUND") {
+      recovered = recovery.result;
+    }
+  } catch (error) {
+    showEngineeringResult({status: "RECOVERY_REJECTED", feedback: String(error)}, cachedSubmissionKey || "unknown"); return;
+  }
+  if (recovered) {
+    prepared = {...prepared, ...recovered, submission_key: recovered.submission_key, prompt_digest: recovered.initial_prompt_digest || recovered.prompt_digest, initial_prompt_digest: recovered.initial_prompt_digest || recovered.prompt_digest};
+    engineeringState = prepared;
+    await persistEngineeringState(conversation, prepared);
+    if (recovered.recovery_status === "STALE_ARTIFACT" || recovered.recovery_status === "COMPLETED") { showEngineeringResult({status: recovered.recovery_status, feedback: recovered.recovery_error || "Canonical engineering state was recovered"}, prepared.submission_key); return; }
+  }
   if (!prepared) {
+    if (artifactError) { showEngineeringResult({status: "ARTIFACT_REJECTED", feedback: String(artifactError)}, "unknown"); return; }
     const submissionKey = await engineeringSubmissionKey(conversation, prompt.text);
     const promptDigest = "sha256:" + await digest(prompt.text);
     const response = await send("engineering_prepare", {submission_key: submissionKey, prompt: prompt.text, conversation_id: conversation, profile_id: null});
@@ -1804,8 +2007,8 @@ async function inspectEngineeringScenario(conversation) {
     showEngineeringResult({status: "ENGINEERING_READY", ...prepared}, submissionKey);
   }
   const submissionKey = prepared.submission_key;
-  let observed;
-  try { observed = await stableEngineeringObservation(prompt); } catch (_) { return; }
+  if (prepared.recovery_status === "STALE_ARTIFACT" || prepared.recovery_status === "COMPLETED") { showEngineeringResult({status: prepared.recovery_status, feedback: prepared.recovery_error || "Canonical engineering state was recovered"}, submissionKey); return; }
+  if (!observed) { try { observed = await stableEngineeringObservation(prompt); } catch (_) { return; } }
   const answerDigest = "sha256:" + await digest(observed.raw_answer);
   const processedKey = await engineeringProcessedKey(submissionKey, answerDigest);
   const processed = await chrome.storage.local.get(processedKey);

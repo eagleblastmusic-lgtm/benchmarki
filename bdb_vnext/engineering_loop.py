@@ -498,6 +498,54 @@ class EditorPort:
         self._persist_batch(batch, status=record.state, effect_certainty=record.effect_certainty)
         return record
 
+    def replay_batch(self, batch: EditBatch, *, base_view: CommittedRepoView) -> dict[str, Any] | None:
+        """Return the canonical result for an already completed exact batch.
+
+        Browser-local processed-artifact markers are only a cache.  If they are
+        lost, the immutable batch/candidate/validation rows provide the replay
+        identity and no second filesystem apply or evidence observation is
+        created.  A merely PREPARED batch is intentionally left to the normal
+        reconciliation path, because its effect boundary may not yet have
+        been crossed.
+        """
+        batch_id = self._batch_id(batch)
+        row = self.connection.execute(
+            "SELECT artifact_digest,candidate_id,status FROM p1_edit_batches WHERE batch_id=?",
+            (batch_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        if str(row[0]) != batch.artifact_digest or str(row[1]) != batch.candidate_id:
+            _fail("edit_batch_conflict", "replayed artifact identity differs from the canonical batch")
+        candidate = self.candidate_store.get(batch.candidate_id)
+        if candidate is None:
+            _fail("candidate_missing", "canonical edit batch has no Candidate record")
+        if candidate.state == "PREPARED":
+            return None
+        validation = self.connection.execute(
+            "SELECT validation_id,status,evidence_id FROM p1_validation_runs WHERE batch_id=? ORDER BY finished_at DESC LIMIT 1",
+            (batch_id,),
+        ).fetchone()
+        if validation is None:
+            _fail("engineering_reconciliation_required", "completed edit batch has no canonical validation record")
+        workspace = Path(candidate.workspace_root)
+        if not workspace.is_dir():
+            _fail("candidate_workspace_missing", "canonical edit batch workspace is unavailable for replay")
+        current_tree = self._current_tree_digest(workspace, base_view)
+        return {
+            "status": "REPLAYED",
+            "batch_id": batch_id,
+            "validation_status": str(validation[1]),
+            "validation_id": str(validation[0]),
+            "validation_evidence_id": str(validation[2]) if validation[2] is not None else None,
+            "candidate_id": candidate.candidate_id,
+            "candidate_state": candidate.state,
+            "candidate_workspace": candidate.workspace_root,
+            "current_tree_digest": current_tree,
+            "expected_tree_digest": batch.expected_tree_digest,
+            "ready_to_seal": candidate.state == "OBSERVED" and str(validation[1]) == "PASS",
+        }
+
     def _persist_validation(self, batch_id: str, candidate_id: str, command: ValidationCommand, result: ValidationResult, *, evidence_id: str | None, stdout_ref: Mapping[str, Any], stderr_ref: Mapping[str, Any]) -> str:
         identity = {"schema": VALIDATION_SCHEMA, "batch_id": batch_id, "candidate_id": candidate_id, "checker_id": command.checker_id, "checker_version": command.checker_version, "argv": list(command.argv), "environment_fingerprint": result.environment_fingerprint, "status": result.status, "returncode": result.returncode, "stdout_digest": _digest(result.stdout), "stderr_digest": _digest(result.stderr), "error_code": result.error_code}
         validation_id = semantic_digest(identity)

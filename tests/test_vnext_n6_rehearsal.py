@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import shutil
 import subprocess
 import sys
@@ -35,6 +36,7 @@ from bdb_vnext.n6_rehearsal import (
     package_digest,
     write_manual_packet,
 )
+from bdb_vnext.engineering_loop import EditBatch
 
 
 def test_prepare_package_isolated_and_status_ready(tmp_path: Path, monkeypatch) -> None:
@@ -748,6 +750,163 @@ def test_generated_content_uses_canonical_prompt_digest_for_p1_engineering() -> 
     script = _js_content()
 
     assert script.count('const promptDigest = "sha256:" + await digest(prompt.text);') == 1
+    assert script.count('send("engineering_recover"') == 1
+    assert "artifactClaims" in script
+    assert "RECOVERY_REJECTED" in script
+    assert 'if (!recovery.result) {\n      showEngineeringResult({status: "RECOVERY_REJECTED"' in script
+
+
+def _p1_target_for_recovery_tests() -> dict[str, Any]:
+    return {
+        "repository_id": "bdb-p1-calculator",
+        "repo_root": r"C:\Projekty\DevMaster\bdb-calculator-pilot",
+        "branch": "pilot/calculator-browser-e2e",
+        "commit": "a30cf480dcedd337e4d8aac7fa6c461189fdaf68",
+        "allowed_paths": ["app.js", "index.html", "styles.css"],
+        "checker": {
+            "checker_id": "bdb-vnext-p1-calculator-checker",
+            "checker_version": "1",
+            "argv": [r"C:\Python314\python.exe", "tests/test_calculator.py"],
+            "cwd": ".",
+            "timeout_seconds": 60.0,
+        },
+    }
+
+
+def _p1_service_for_recovery_tests(tmp_path: Path, monkeypatch) -> tuple[N6RehearsalService, dict[str, Any], dict[str, Any]]:
+    repo = Path(__file__).parents[1].absolute()
+    package_root = tmp_path / "package-recovery"
+    execution = prepare_package(
+        repo_root=repo,
+        output=package_root,
+        runtime_root=tmp_path / "runtime-recovery",
+        legacy_runtime_root=tmp_path / "legacy-recovery",
+        source_commit="HEAD",
+        python_executable=sys.executable,
+        engineering_target=_p1_target_for_recovery_tests(),
+    )
+    return N6RehearsalService(N6RehearsalConfig.from_json(package_root / "native-config.json")), execution, _p1_target_for_recovery_tests()
+
+
+def _p1_event(service: N6RehearsalService, execution: dict[str, Any], event: str, payload: dict[str, Any], request_id: str) -> dict[str, Any]:
+    return service.handle({
+        "schema": N6_NATIVE_REQUEST_SCHEMA,
+        "request_id": request_id,
+        "event": event,
+        "package_id": N6_PACKAGE_SCHEMA,
+        "protocol_generation": N6_PROTOCOL_GENERATION,
+        "browser_native_binding_digest": execution["package"]["browser_native_binding"]["binding_digest"],
+        "payload": payload,
+    })
+
+
+def test_engineering_recovery_after_projection_loss_reuses_task_and_rejects_stale_artifact(tmp_path: Path, monkeypatch) -> None:
+    clock = {"now": 100.0}
+    monkeypatch.setattr("bdb_vnext.m4a_work_kernel.time.time", lambda: clock["now"])
+    service, execution, _target = _p1_service_for_recovery_tests(tmp_path, monkeypatch)
+    payload = {
+        "submission_key": "p1-browser:projection-loss",
+        "prompt": "BDB-P1-CALC-BROWSER-E2E\ninitial recovery prompt",
+        "conversation_id": "chatgpt-conversation:projection-loss",
+        "profile_id": None,
+    }
+    prepared = _p1_event(service, execution, "engineering_prepare", payload, "p1:prepare")
+    assert prepared["status"] == "ENGINEERING_READY"
+    first = prepared["result"]
+    recovered = _p1_event(service, execution, "engineering_recover", {"conversation_id": payload["conversation_id"], "submission_key": None, "profile_id": None, "artifact_claims": None}, "p1:recover")
+    assert recovered["result"]["recovery_status"] == "RECOVERED"
+    assert recovered["result"]["task_id"] == first["task_id"]
+    assert recovered["result"]["work_id"] == first["work_id"]
+    assert recovered["result"]["run_id"] == first["run_id"]
+    with service._open() as plane:
+        assert plane.admission.authority._store.counts()["tasks"] == 1
+        assert plane.work_kernel.counts()["runs"] == 1
+
+    claims = {
+        "task_id": first["task_id"],
+        "work_id": first["work_id"],
+        "run_id": first["run_id"],
+        "lease_id": first["lease_id"],
+        "fence": first["fence"],
+        "candidate_id": first["candidate_id"],
+        "base_view_id": first["base_repo_view"]["view_id"],
+        "expected_tree_digest": first["current_tree_digest"],
+        "workspace_generation": first["workspace_generation"],
+    }
+    clock["now"] = 1000.0
+    stale = _p1_event(service, execution, "engineering_recover", {"conversation_id": payload["conversation_id"], "submission_key": None, "profile_id": None, "artifact_claims": claims}, "p1:recover-stale")
+    assert stale["result"]["recovery_status"] == "STALE_ARTIFACT"
+    assert stale["result"]["fence"] == first["fence"] + 1
+    with service._open() as plane:
+        assert plane.admission.authority._store.counts()["tasks"] == 1
+        assert plane.work_kernel.counts()["runs"] == 1
+
+
+def test_engineering_recovery_ambiguous_history_fails_closed_without_new_task(tmp_path: Path, monkeypatch) -> None:
+    service, execution, _target = _p1_service_for_recovery_tests(tmp_path, monkeypatch)
+    conversation = "chatgpt-conversation:ambiguous"
+    for index in range(2):
+        _p1_event(service, execution, "engineering_prepare", {"submission_key": f"p1-browser:ambiguous-{index}", "prompt": f"BDB-P1-CALC-BROWSER-E2E\ninitial {index}", "conversation_id": conversation, "profile_id": None}, f"p1:ambiguous:{index}")
+    with pytest.raises(N6RehearsalError) as caught:
+        service._engineering_recover(conversation_id=conversation, submission_key=None, profile_id=None, artifact_claims=None)
+    assert caught.value.code == "engineering_recovery_ambiguous"
+    with service._open() as plane:
+        assert plane.admission.authority._store.counts()["tasks"] == 2
+
+
+def test_engineering_artifact_replay_after_processed_cache_loss_is_idempotent(tmp_path: Path, monkeypatch) -> None:
+    service, execution, _target = _p1_service_for_recovery_tests(tmp_path, monkeypatch)
+    payload = {
+        "submission_key": "p1-browser:artifact-replay",
+        "prompt": "BDB-P1-CALC-BROWSER-E2E\nreplay prompt",
+        "conversation_id": "chatgpt-conversation:artifact-replay",
+        "profile_id": None,
+    }
+    prepared = _p1_event(service, execution, "engineering_prepare", payload, "p1:artifact:prepare")["result"]
+    content = service.engineering_view.read_bytes("styles.css") + b"\n/* replay */\n"  # type: ignore[union-attr]
+    artifact = EditBatch.from_mapping({
+        "schema": "bdb-vnext-edit-v1",
+        "base_view_id": prepared["base_repo_view"]["view_id"],
+        "expected_tree_digest": prepared["current_tree_digest"],
+        "task_id": prepared["task_id"],
+        "work_id": prepared["work_id"],
+        "run_id": prepared["run_id"],
+        "lease_id": prepared["lease_id"],
+        "fence": prepared["fence"],
+        "candidate_id": prepared["candidate_id"],
+        "workspace_generation": prepared["workspace_generation"],
+        "operations": [{"operation": "MODIFY", "path": "styles.css", "content_b64": base64.b64encode(content).decode("ascii")}],
+        "budget": {"max_operations": 8, "max_bytes": 8 * 1024 * 1024},
+    })
+    raw_answer = "```json\n" + json.dumps(artifact.as_dict(), sort_keys=True) + "\n```"
+    event_payload = {
+        "submission_key": payload["submission_key"],
+        "conversation_id": payload["conversation_id"],
+        "prompt_digest": _sha(payload["prompt"].encode("utf-8")),
+        "raw_answer": raw_answer,
+        "raw_answer_digest": _sha(raw_answer.encode("utf-8")),
+        "artifact": artifact.as_dict(),
+    }
+    first = _p1_event(service, execution, "engineering_artifact", event_payload, "p1:artifact:first")
+    assert first["result"]["status"] == "VALIDATED"
+    with service._open() as plane:
+        before = {
+            "tasks": plane.admission.authority._store.counts()["tasks"],
+            "batches": int(plane.candidate._connection.execute("SELECT COUNT(*) FROM p1_edit_batches").fetchone()[0]),
+            "validations": int(plane.candidate._connection.execute("SELECT COUNT(*) FROM p1_validation_runs").fetchone()[0]),
+            "candidate": plane.candidate.get(prepared["candidate_id"]).state,
+        }
+    second = _p1_event(service, execution, "engineering_artifact", event_payload, "p1:artifact:replay")
+    assert second["result"]["status"] == "REPLAYED"
+    assert second["result"]["artifact_digest"] == first["result"]["artifact_digest"]
+    with service._open() as plane:
+        after = {
+            "tasks": plane.admission.authority._store.counts()["tasks"],
+            "batches": int(plane.candidate._connection.execute("SELECT COUNT(*) FROM p1_edit_batches").fetchone()[0]),
+            "validations": int(plane.candidate._connection.execute("SELECT COUNT(*) FROM p1_validation_runs").fetchone()[0]),
+            "candidate": plane.candidate.get(prepared["candidate_id"]).state,
+        }
+    assert after == before
 
 
 def test_engineering_prepare_reuses_matching_active_run_on_refresh(tmp_path: Path, monkeypatch) -> None:
