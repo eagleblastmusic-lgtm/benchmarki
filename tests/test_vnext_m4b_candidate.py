@@ -80,6 +80,31 @@ def _remove_candidate_worktree(subject: Path, workspace: Path) -> None:
     subprocess.run(["git", "-C", str(subject), "worktree", "remove", "--force", str(workspace)], capture_output=True, text=True, check=False)
 
 
+def test_candidate_worktree_creation_enables_windows_long_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    with _stack(tmp_path) as (subject, view, _kernel, store, _work_id, _task_id, _lease):
+        real_run = subprocess.run
+        worktree_commands: list[list[str]] = []
+
+        def spy(*args, **kwargs):
+            command = args[0] if args else kwargs.get("args")
+            if isinstance(command, list) and "worktree" in command:
+                worktree_commands.append(list(command))
+            return real_run(*args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", spy)
+        try:
+            workspace = store.create_workspace(candidate_id="candidate:longpaths", base_view=view)
+        finally:
+            monkeypatch.setattr(subprocess, "run", real_run)
+        try:
+            assert worktree_commands
+            command = worktree_commands[0]
+            assert command[0:3] == ["git", "-c", "core.autocrlf=false"]
+            assert command[3:5] == ["-c", "core.longpaths=true"]
+        finally:
+            _remove_candidate_worktree(subject, workspace)
+
+
 def test_single_file_exact_candidate_seals_and_reads_cas(tmp_path: Path) -> None:
     with _stack(tmp_path) as (subject, view, _kernel, store, work_id, task_id, lease):
         workspace = store.create_workspace(candidate_id="candidate:single", base_view=view)

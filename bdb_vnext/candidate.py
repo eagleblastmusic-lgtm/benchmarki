@@ -929,7 +929,12 @@ class CandidateStore:
             _fail("workspace_source_overlap", "Candidate workspace must not overlap the source repository")
         workspace.parent.mkdir(parents=True, exist_ok=True)
         completed = subprocess.run(
-            ["git", "-c", "core.autocrlf=false", "-C", str(source), "worktree", "add", "--detach", str(workspace), base_view.commit_oid],
+            [
+                "git",
+                "-c", "core.autocrlf=false",
+                "-c", "core.longpaths=true",
+                "-C", str(source), "worktree", "add", "--detach", str(workspace), base_view.commit_oid,
+            ],
             shell=False, capture_output=True, text=True, timeout=30, check=False,
         )
         if completed.returncode != 0:
