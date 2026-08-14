@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -591,3 +592,64 @@ if (rendered !== '```json\\n{{"schema":"bdb-vnext-edit-v1"}}\\n```') throw new E
 """
     result = subprocess.run(["node", "--input-type=module"], input=harness, capture_output=True, text=True, timeout=30, check=False)
     assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_engineering_prepare_reuses_matching_active_run_on_refresh(tmp_path: Path, monkeypatch) -> None:
+    repo = Path(__file__).parents[1].absolute()
+    package_root = tmp_path / "package"
+    monkeypatch.setattr("bdb_vnext.n6_rehearsal._build_shim", lambda *args, **kwargs: None)
+    target = {
+        "repository_id": "bdb-p1-calculator",
+        "repo_root": r"C:\Projekty\DevMaster\bdb-calculator-pilot",
+        "branch": "pilot/calculator-browser-e2e",
+        "commit": "a30cf480dcedd337e4d8aac7fa6c461189fdaf68",
+        "allowed_paths": ["app.js", "index.html", "styles.css"],
+        "checker": {
+            "checker_id": "bdb-vnext-p1-calculator-checker",
+            "checker_version": "1",
+            "argv": [r"C:\Python314\python.exe", "tests/test_calculator.py"],
+            "cwd": ".",
+            "timeout_seconds": 60.0,
+        },
+    }
+    execution = prepare_package(
+        repo_root=repo,
+        output=package_root,
+        runtime_root=tmp_path / "runtime",
+        legacy_runtime_root=tmp_path / "legacy",
+        source_commit="HEAD",
+        python_executable=sys.executable,
+        engineering_target=target,
+    )
+    config = N6RehearsalConfig.from_json(package_root / "native-config.json")
+    service = N6RehearsalService(config)
+    payload = {
+        "submission_key": "p1-browser:refresh-recovery-test",
+        "prompt": "BDB-P1-CALC-BROWSER-E2E\nexact recovery test",
+        "conversation_id": "chatgpt-conversation:refresh-recovery-test",
+        "profile_id": None,
+    }
+
+    def request(request_id: str) -> dict[str, Any]:
+        return service.handle({
+            "schema": N6_NATIVE_REQUEST_SCHEMA,
+            "request_id": request_id,
+            "event": "engineering_prepare",
+            "package_id": N6_PACKAGE_SCHEMA,
+            "protocol_generation": N6_PROTOCOL_GENERATION,
+            "browser_native_binding_digest": execution["package"]["browser_native_binding"]["binding_digest"],
+            "payload": payload,
+        })
+
+    first = request("n6:test:engineering-prepare:first")
+    assert first["status"] == "ENGINEERING_READY"
+    first_result = first["result"]
+    second = request("n6:test:engineering-prepare:refresh")
+    assert second["status"] == "ENGINEERING_READY"
+    second_result = second["result"]
+    assert second_result["task_id"] == first_result["task_id"]
+    assert second_result["work_id"] == first_result["work_id"]
+    assert second_result["run_id"] == first_result["run_id"]
+    assert second_result["lease_id"] == first_result["lease_id"]
+    assert second_result["fence"] == first_result["fence"]
+    assert second_result["work"]["work"]["disposition"] == "RUNNING"

@@ -897,16 +897,25 @@ class N6RehearsalService:
             if work.work.disposition == "FINISHED":
                 candidate = plane.candidate.get(ids["candidate_id"])
                 return self._engineering_context(receipt.task_id, request_digest, conversation_id, submission_key, work, candidate, plane.candidate.generation, plane.candidate._tree_digest(plane.candidate._base_entries(self.engineering_view)))
-            lease = plane.work_kernel.acquire_lease(ids["work_id"], ids["lease_id"], "p1-browser-engineering", ttl_seconds=900.0)
-            work = plane.work_kernel.query(ids["work_id"])
-            if work is None:
-                _fail("engineering_work_missing", "canonical WorkItem disappeared during preparation")
-            if work.work.disposition == "READY":
-                plane.work_kernel.start_run(ids["work_id"], ids["run_id"], lease.lease_id, lease.fence, work.work.state_version)
-                work = plane.work_kernel.query(ids["work_id"])
-            elif work.work.disposition == "RUNNING" and work.active_run is not None:
-                if work.active_run.run_id != ids["run_id"] or (work.active_run.lease_id, work.active_run.fence) != (lease.lease_id, lease.fence):
+            # Recovery must be idempotent for a prepared engineering run.  Do
+            # not reacquire an already-owned lease: doing so advances the
+            # fence before comparing it with the active Run and turns a
+            # valid refresh into a false run conflict.
+            lease = None
+            if work.work.disposition == "RUNNING" and work.active_run is not None:
+                if work.lease is None or work.active_run.run_id != ids["run_id"] or work.active_run.lease_id != ids["lease_id"] or work.active_run.fence != work.lease.fence:
                     _fail("engineering_run_conflict", "engineering WorkItem is owned by a different active Run")
+            else:
+                lease = plane.work_kernel.acquire_lease(ids["work_id"], ids["lease_id"], "p1-browser-engineering", ttl_seconds=900.0)
+                work = plane.work_kernel.query(ids["work_id"])
+                if work is None:
+                    _fail("engineering_work_missing", "canonical WorkItem disappeared during preparation")
+                if work.work.disposition == "READY":
+                    plane.work_kernel.start_run(ids["work_id"], ids["run_id"], lease.lease_id, lease.fence, work.work.state_version)
+                    work = plane.work_kernel.query(ids["work_id"])
+                elif work.work.disposition == "RUNNING" and work.active_run is not None:
+                    if work.active_run.run_id != ids["run_id"] or (work.active_run.lease_id, work.active_run.fence) != (lease.lease_id, lease.fence):
+                        _fail("engineering_run_conflict", "engineering WorkItem is owned by a different active Run")
             candidate = plane.candidate.get(ids["candidate_id"])
             return self._engineering_context(receipt.task_id, request_digest, conversation_id, submission_key, work, candidate, plane.candidate.generation, plane.candidate._tree_digest(plane.candidate._base_entries(self.engineering_view)))
 
