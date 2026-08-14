@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
 from bdb_shared.evidence import canonical_json_bytes, semantic_digest
-from bdb_vnext.candidate import CandidateError, CandidateRecord, CandidateRepoView, CandidateStore
+from bdb_vnext.candidate import CandidateError, CandidateRecord, CandidateRepoView, CandidateStore, _blob_oid
 from bdb_vnext.control_store import begin_control_write, commit_control_write
 from bdb_vnext.content_store import make_content_ref
 from bdb_vnext.m4c_evidence import EvidenceRecord, EvidenceStore, EvaluationRecord
@@ -435,6 +435,147 @@ class EditorPort:
 
     def _current_tree_digest(self, workspace: Path, base_view: CommittedRepoView) -> str:
         return self.candidate_store._tree_digest(self.candidate_store._workspace_entries(workspace, object_format=base_view.object_format))
+
+    def recover_accumulated_candidate(self, candidate_id: str, *, base_view: CommittedRepoView, workspace: str | Path) -> CandidateRecord:
+        """Rebind a legacy Candidate from its accepted edit-batch chain.
+
+        Older accumulated replans persisted the complete planned tree digest
+        but omitted path rows for files already changed by an earlier batch.
+        This recovery reads only immutable, completed ``p1_edit_batches``
+        facts, reconstructs their exact logical tree, verifies the physical
+        workspace and durable planned digest agree, and then delegates the
+        no-op path rebinding/apply transition to CandidateStore.  No model
+        artifact is replayed and no filesystem bytes are written.
+        """
+
+        record = self.candidate_store.get(candidate_id)
+        if record is None:
+            _fail("candidate_missing", "engineering Candidate does not exist")
+        if record.state == "SEALED":
+            return record
+        if record.state == "INVALIDATED":
+            _fail("candidate_state_conflict", "invalidated engineering Candidate cannot be recovered")
+        base_view.validate_integrity()
+        workspace_path = Path(workspace).absolute()
+        if workspace_path != Path(record.workspace_root).absolute():
+            _fail("foreign_workspace", "Candidate recovery workspace differs from the canonical Candidate workspace")
+        rows = self.connection.execute(
+            "SELECT batch_id,candidate_id,task_id,work_id,run_id,base_view_id,expected_tree_digest,artifact_digest,operations_json,workspace_generation,status,effect_certainty FROM p1_edit_batches WHERE candidate_id=? ORDER BY created_at,batch_id",
+            (candidate_id,),
+        ).fetchall()
+        if not rows:
+            _fail("engineering_recovery_plan_missing", "no canonical completed edit batches exist for the Candidate")
+        base_entries = self.candidate_store._base_entries(base_view)
+        working = {path: base_view.read_bytes(path) for path in base_entries}
+        working_modes = {path: mode for path, (_oid, mode) in base_entries.items()}
+
+        def tree_digest() -> str:
+            entries = {
+                path: (_blob_oid(content, base_view.object_format), working_modes[path])
+                for path, content in sorted(working.items())
+            }
+            return self.candidate_store._tree_digest(entries)
+
+        for row in rows:
+            try:
+                operations = json.loads(bytes(row[8]).decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                _fail("engineering_recovery_plan_invalid", "canonical edit-batch operations are not valid JSON", details={"batch_id": str(row[0])})
+            if not isinstance(operations, list) or not operations or len(operations) > MAX_EDIT_OPERATIONS:
+                _fail("engineering_recovery_plan_invalid", "canonical edit-batch operations are missing or too large", details={"batch_id": str(row[0])})
+            work_query = self.candidate_store.work_kernel.query(record.work_id) if self.candidate_store.work_kernel is not None else None
+            expected_run_id = work_query.active_run.run_id if work_query is not None and work_query.active_run is not None else None
+            if str(row[1]) != candidate_id or str(row[2]) != record.task_id or str(row[3]) != record.work_id or expected_run_id != str(row[4]) or str(row[5]) != base_view.view_id or str(row[9]) != record.workspace_generation:
+                _fail("engineering_recovery_plan_invalid", "canonical edit-batch identity does not match the Candidate", details={"batch_id": str(row[0])})
+            if not str(row[7]).startswith("sha256:") or str(row[5]) != base_view.view_id or str(row[9]) != record.workspace_generation:
+                _fail("engineering_recovery_plan_mismatch", "canonical edit batch is bound to a different RepoView or workspace generation", details={"batch_id": str(row[0])})
+            if str(row[10]) not in {"OBSERVED", "SEALED"} or str(row[11]) != "CERTAIN":
+                _fail("engineering_recovery_plan_incomplete", "Candidate recovery requires completed certain edit batches", details={"batch_id": str(row[0]), "status": str(row[10]), "effect_certainty": str(row[11])})
+            if tree_digest() != str(row[6]):
+                _fail("engineering_recovery_plan_mismatch", "accepted edit-batch precondition does not match the reconstructed accumulated tree", details={"batch_id": str(row[0])})
+            parsed_operations: list[EditOperation] = []
+            seen_paths: set[str] = set()
+            total_bytes = 0
+            for raw_operation in operations:
+                if not isinstance(raw_operation, Mapping):
+                    _fail("engineering_recovery_plan_invalid", "canonical edit operation is not a mapping", details={"batch_id": str(row[0])})
+                operation_name = str(raw_operation.get("operation", "")).upper()
+                content = _decode_b64(raw_operation["content_b64"]) if "content_b64" in raw_operation else None
+                try:
+                    mode = int(raw_operation.get("mode", 0o644))
+                except (TypeError, ValueError) as exc:
+                    raise EngineeringLoopError("engineering_recovery_plan_invalid", "canonical edit mode is invalid", details={"batch_id": str(row[0])}) from exc
+                operation = EditOperation(operation=operation_name, path=raw_operation.get("path"), source_path=raw_operation.get("source_path"), content=content, mode=mode)
+                for operation_path in (operation.path, operation.source_path):
+                    if operation_path is None:
+                        continue
+                    folded = operation_path.casefold()
+                    if folded in seen_paths:
+                        _fail("engineering_recovery_plan_invalid", "canonical edit batch contains a case-colliding path", details={"batch_id": str(row[0]), "path": operation_path})
+                    seen_paths.add(folded)
+                total_bytes += len(content or b"")
+                parsed_operations.append(operation)
+            if total_bytes > MAX_EDIT_BYTES:
+                _fail("engineering_recovery_plan_invalid", "canonical edit batch exceeds its byte budget", details={"batch_id": str(row[0])})
+            for operation in parsed_operations:
+                path = operation.path
+                if operation.operation == "MODIFY":
+                    if path not in working or operation.content is None:
+                        _fail("engineering_recovery_plan_invalid", "MODIFY does not address an existing file", details={"batch_id": str(row[0]), "path": path})
+                    working[path] = operation.content
+                    working_modes[path] = "100755" if operation.mode & 0o111 else "100644"
+                elif operation.operation == "CREATE":
+                    if path in working or operation.content is None:
+                        _fail("engineering_recovery_plan_invalid", "CREATE does not address an absent file", details={"batch_id": str(row[0]), "path": path})
+                    working[path] = operation.content
+                    working_modes[path] = "100755" if operation.mode & 0o111 else "100644"
+                elif operation.operation == "DELETE":
+                    if path not in working:
+                        _fail("engineering_recovery_plan_invalid", "DELETE does not address an existing file", details={"batch_id": str(row[0]), "path": path})
+                    working.pop(path)
+                    working_modes.pop(path)
+                else:
+                    source = operation.source_path
+                    if source is None or source not in working or path in working:
+                        _fail("engineering_recovery_plan_invalid", "RENAME does not have an unambiguous source/destination", details={"batch_id": str(row[0]), "path": path})
+                    working[path] = working.pop(source)
+                    working_modes[path] = working_modes.pop(source)
+
+        actual_entries = self.candidate_store._workspace_entries(workspace_path, object_format=base_view.object_format)
+        expected_entries = {
+            path: (_blob_oid(content, base_view.object_format), working_modes[path])
+            for path, content in sorted(working.items())
+        }
+        if actual_entries != expected_entries or self.candidate_store._tree_digest(actual_entries) != record.planned_tree_digest:
+            _fail("engineering_recovery_tree_mismatch", "canonical edit batches do not reconstruct the exact persisted Candidate tree")
+        desired: dict[str, bytes | None] = {}
+        desired_modes: dict[str, int] = {}
+        for path in sorted(set(base_entries) | set(working)):
+            base_present = path in base_entries
+            current_present = path in working
+            if not current_present:
+                if base_present:
+                    desired[path] = None
+                continue
+            base_bytes = base_view.read_bytes(path) if base_present else None
+            if not base_present or working[path] != base_bytes:
+                desired[path] = working[path]
+                desired_modes[path] = 0o755 if working_modes[path] == "100755" else 0o644
+            elif base_entries[path][1] != working_modes[path]:
+                _fail("engineering_recovery_mode_mismatch", "canonical edit batches require an unsupported mode-only recovery")
+        if not desired:
+            return self.candidate_store.observe(candidate_id)
+        prepared = self.candidate_store.reprepare_desired(
+            candidate_id=candidate_id,
+            base_view=base_view,
+            workspace_root=workspace_path,
+            desired_files=desired,
+            desired_modes=desired_modes,
+            allow_noop_only=True,
+        )
+        if prepared.state != "PREPARED":
+            _fail("engineering_recovery_state_conflict", "Candidate recovery did not produce a PREPARED no-op plan")
+        return self.candidate_store.apply(candidate_id)
 
     def _validate_batch(self, batch: EditBatch, base_view: CommittedRepoView, workspace: Path) -> None:
         base_view.validate_integrity()

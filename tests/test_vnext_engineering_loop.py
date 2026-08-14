@@ -199,6 +199,63 @@ def test_follow_up_replan_seal_includes_already_applied_paths(tmp_path: Path) ->
         assert candidate_view.read_bytes("second.txt") == second_content
 
 
+def test_recover_legacy_accumulated_plan_rebinds_missing_path_rows(tmp_path: Path) -> None:
+    """Completed edit batches recover a pre-repair Candidate path omission."""
+    with _stack(tmp_path) as (subject, _view, receipt, _kernel, store, evidence, _publication, work_id, lease):
+        (subject / "second.txt").write_text("BASE\n", encoding="utf-8")
+        _git(subject, "add", ".")
+        _git(subject, "commit", "-qm", "legacy accumulated plan fixture")
+        view = RepositoryResource.from_path(subject, repository_id="p1-subject").resolve_committed("HEAD")
+        candidate_id = "candidate:p1:legacy-recovery"
+        workspace = store.create_workspace(candidate_id=candidate_id, base_view=view)
+        editor = EditorPort(store, evidence_store=evidence)
+        base_tree = store._tree_digest(store._base_entries(view))
+        first_content = b"FIRST\n"
+        first = _artifact(
+            view.view_id,
+            base_tree,
+            candidate_id=candidate_id,
+            task_id=receipt.task_id,
+            work_id=work_id,
+            run_id="run:p1",
+            lease_id=lease.lease_id,
+            fence=lease.fence,
+            generation=store.generation,
+            operations=[{"operation": "MODIFY", "path": "target.txt", "content_b64": base64.b64encode(first_content).decode("ascii")}],
+        )
+        assert editor.prepare_batch(first, base_view=view, workspace=workspace).state == "PREPARED"
+        assert editor.apply_batch(first).state == "OBSERVED"
+        second_content = b"SECOND\n"
+        second_tree = store._tree_digest(store._workspace_entries(workspace, object_format=view.object_format))
+        second = _artifact(
+            view.view_id,
+            second_tree,
+            candidate_id=candidate_id,
+            task_id=receipt.task_id,
+            work_id=work_id,
+            run_id="run:p1",
+            lease_id=lease.lease_id,
+            fence=lease.fence,
+            generation=store.generation,
+            operations=[{"operation": "MODIFY", "path": "second.txt", "content_b64": base64.b64encode(second_content).decode("ascii")}],
+        )
+        assert editor.prepare_batch(second, base_view=view, workspace=workspace, desired_files={"target.txt": first_content, "second.txt": second_content}).state == "PREPARED"
+        assert editor.apply_batch(second).state == "OBSERVED"
+
+        # Test fixture only: reproduce the historical persisted shape in
+        # which the complete planned digest survived but the earlier no-op
+        # path row did not. Recovery itself must use CandidateStore APIs.
+        store._connection.execute("DELETE FROM m4b_candidate_paths WHERE candidate_id=? AND path=?", (candidate_id, "target.txt"))
+        store._connection.execute("UPDATE m4b_candidate_effects SET state='DIVERGED',effect_certainty='UNKNOWN' WHERE candidate_id=?", (candidate_id,))
+        store._connection.commit()
+        before = ((workspace / "target.txt").read_bytes(), (workspace / "second.txt").read_bytes())
+        recovered = editor.recover_accumulated_candidate(candidate_id, base_view=view, workspace=workspace)
+        assert recovered.state == "OBSERVED"
+        assert {item.path for item in recovered.planned_paths} == {"target.txt", "second.txt"}
+        assert ((workspace / "target.txt").read_bytes(), (workspace / "second.txt").read_bytes()) == before
+        assert store._tree_digest(store._workspace_entries(workspace, object_format=view.object_format)) == recovered.planned_tree_digest
+
+
 def test_edit_operations_create_delete_rename_have_exact_tree_proof(tmp_path: Path) -> None:
     with _stack(tmp_path) as (subject, view, receipt, kernel, store, evidence, _publication, work_id, lease):
         (subject / "delete.txt").write_text("delete\n", encoding="utf-8")

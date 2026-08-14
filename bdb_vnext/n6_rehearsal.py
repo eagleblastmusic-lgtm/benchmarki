@@ -891,6 +891,7 @@ class N6RehearsalService:
         submission_key: str | None,
         profile_id: str | None,
         artifact_claims: Mapping[str, Any] | None,
+        repair_legacy_plan: bool = False,
     ) -> dict[str, Any]:
         if self.engineering_view is None or self.engineering_target is None:
             _fail("engineering_target_unavailable", "engineering target is not present in this package")
@@ -983,6 +984,15 @@ class N6RehearsalService:
                         candidate.candidate_id,
                         lease_id=work.lease.lease_id,
                         fence=work.lease.fence,
+                    )
+            if repair_legacy_plan:
+                if submission_key is None or candidate is None or candidate.candidate_id != ids["candidate_id"]:
+                    _fail("engineering_recovery_identity_mismatch", "legacy Candidate plan repair requires the exact canonical submission and Candidate")
+                if candidate.state in {CANDIDATE_DIVERGED, CANDIDATE_UNKNOWN}:
+                    candidate = EditorPort(plane.candidate, evidence_store=plane.evidence).recover_accumulated_candidate(
+                        candidate.candidate_id,
+                        base_view=self.engineering_view,
+                        workspace=candidate.workspace_root,
                     )
             current_tree = plane.candidate._tree_digest(plane.candidate._workspace_entries(Path(candidate.workspace_root), object_format=self.engineering_view.object_format)) if candidate is not None else plane.candidate._tree_digest(plane.candidate._base_entries(self.engineering_view))
             recovery_status = "RECOVERED"
@@ -1382,11 +1392,15 @@ class N6RehearsalService:
         if event == "engineering_recover":
             submission_key = payload.get("submission_key") if isinstance(payload.get("submission_key"), str) else None
             profile_id = payload.get("profile_id") if isinstance(payload.get("profile_id"), str) else None
+            repair_legacy_plan = payload.get("repair_legacy_plan", False)
+            if not isinstance(repair_legacy_plan, bool):
+                _fail("engineering_recovery_payload_invalid", "repair_legacy_plan must be boolean")
             result = self._engineering_recover(
                 conversation_id=_text(payload.get("conversation_id"), "conversation_id"),
                 submission_key=submission_key,
                 profile_id=profile_id,
                 artifact_claims=payload.get("artifact_claims") if payload.get("artifact_claims") is not None else None,
+                repair_legacy_plan=repair_legacy_plan,
             )
             return {"schema": N6_NATIVE_RESPONSE_SCHEMA, "request_id": request_id, "status": "ENGINEERING_RECOVERED", "result": result}
         if event == "engineering_prepare":

@@ -1149,6 +1149,7 @@ class CandidateStore:
         workspace_root: str | Path,
         desired_files: Mapping[str, bytes | None],
         desired_modes: Mapping[str, int] | None = None,
+        allow_noop_only: bool = False,
     ) -> CandidateRecord:
         """Replan one unfinished Candidate after a bounded validation loop.
 
@@ -1212,6 +1213,12 @@ class CandidateStore:
             else:
                 self.content_store.publish(after_ref, b"")
             after_mode = int(modes.get(path, current_mode if current is not None else (0o755 if path in base_entries and base_entries[path][1] == "100755" else 0o644))) & 0o777
+            if allow_noop_only and current == after:
+                # A legacy recovery rebind observes bytes already present in
+                # the workspace.  Preserve the exact observed filesystem
+                # mode so Windows ACL presentation cannot turn a no-op into
+                # a synthetic write.
+                after_mode = current_mode
             # A replan may carry an already-applied path from an earlier
             # model turn.  When the workspace is already exactly at the new
             # desired bytes there is no effect to apply for this path.  Keep
@@ -1241,7 +1248,7 @@ class CandidateStore:
                 planned_entries.pop(path, None)
             else:
                 planned_entries[path] = (_blob_oid(after, base_view.object_format), "100755" if after_mode & 0o111 else "100644")
-        if not plans or all(self._is_noop_plan(item) for item in plans):
+        if not plans or (not allow_noop_only and all(self._is_noop_plan(item) for item in plans)):
             _fail("empty_edit_plan", "replanned Candidate has no net change")
         planned_tree_digest = self._tree_digest(planned_entries)
         effect_material = {
