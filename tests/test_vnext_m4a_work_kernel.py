@@ -139,6 +139,22 @@ def test_lease_handoff_advances_fence_and_invalidates_stale_worker(tmp_path: Pat
         assert run.fence == new.fence
 
 
+def test_adopt_active_run_rejects_stale_reverse_fence(tmp_path: Path) -> None:
+    with stack(tmp_path) as (_composition, kernel, task_id):
+        item = kernel.create_work_item("work:adopt-fence", task_id)
+        old = kernel.acquire_lease(item.work_id, "lease:adopt-old", "worker:old", ttl_seconds=1, now=0)
+        run = kernel.start_run(item.work_id, "run:adopt-fence", old.lease_id, old.fence, 0, now=0)
+        newer = kernel.acquire_lease(item.work_id, "lease:adopt-new", "worker:new", ttl_seconds=30, now=2)
+        adopted = kernel.adopt_active_run(item.work_id, run.run_id, newer.lease_id, newer.fence, 1, now=2)
+        assert adopted.fence == newer.fence
+        with pytest.raises(M4aError) as stale:
+            kernel.adopt_active_run(item.work_id, run.run_id, old.lease_id, old.fence, 2, now=2)
+        assert stale.value.code == "stale_lease"
+        current = kernel.query(item.work_id, now=2)
+        assert current is not None and current.active_run is not None
+        assert current.active_run.fence == newer.fence
+
+
 def test_lease_handoff_rebinds_held_resource_to_the_new_fence(tmp_path: Path) -> None:
     with stack(tmp_path) as (_composition, kernel, task_id):
         item = kernel.create_work_item("work:claim-handoff", task_id)

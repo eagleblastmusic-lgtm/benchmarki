@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from bdb_shared.evidence import semantic_digest
+from bdb_vnext.m3a_submission import ShadowSubmissionRequest
 from bdb_vnext.m3c_admission import M3cError
 from bdb_vnext.n4_publication import N4Error
 from bdb_vnext.n6_rehearsal import (
@@ -23,6 +24,9 @@ from bdb_vnext.n6_rehearsal import (
     N6RehearsalConfig,
     N6RehearsalService,
     N6_TASKS,
+    P1_ENGINEERING_INTENT_REVISION,
+    _sha,
+    _stable_id,
     native_code_digest,
     _js_background,
     _js_content,
@@ -622,6 +626,8 @@ def test_engineering_prepare_reuses_matching_active_run_on_refresh(tmp_path: Pat
         engineering_target=target,
     )
     config = N6RehearsalConfig.from_json(package_root / "native-config.json")
+    clock = {"now": 100.0}
+    monkeypatch.setattr("bdb_vnext.m4a_work_kernel.time.time", lambda: clock["now"])
     service = N6RehearsalService(config)
     payload = {
         "submission_key": "p1-browser:refresh-recovery-test",
@@ -653,3 +659,112 @@ def test_engineering_prepare_reuses_matching_active_run_on_refresh(tmp_path: Pat
     assert second_result["lease_id"] == first_result["lease_id"]
     assert second_result["fence"] == first_result["fence"]
     assert second_result["work"]["work"]["disposition"] == "RUNNING"
+
+    # The exact stale-owner shape is created by expiry, not by direct SQL:
+    # the same active Run remains at fence 1 while its lease is reacquired at
+    # fence 2.  P1 must delegate adoption to the canonical WorkKernel.
+    clock["now"] = 1000.0
+    recovered = request("n6:test:engineering-prepare:expired")
+    assert recovered["status"] == "ENGINEERING_READY"
+    recovered_result = recovered["result"]
+    assert recovered_result["task_id"] == first_result["task_id"]
+    assert recovered_result["work_id"] == first_result["work_id"]
+    assert recovered_result["run_id"] == first_result["run_id"]
+    assert recovered_result["lease_id"] == first_result["lease_id"]
+    assert recovered_result["fence"] == first_result["fence"] + 1
+    assert recovered_result["work"]["work"]["disposition"] == "RUNNING"
+    assert recovered_result["work"]["active_run"]["fence"] == recovered_result["fence"]
+    facts = recovered_result["work"]["recent_facts"]
+    assert sum(1 for fact in facts if fact["kind"] == "run_ownership_adopted") == 1
+
+    # A valid refresh after adoption reuses the current fence and does not
+    # create another Run or another adoption fact.
+    clock["now"] = 1001.0
+    repeated = request("n6:test:engineering-prepare:post-adoption-refresh")
+    assert repeated["status"] == "ENGINEERING_READY"
+    repeated_result = repeated["result"]
+    assert repeated_result["task_id"] == recovered_result["task_id"]
+    assert repeated_result["work_id"] == recovered_result["work_id"]
+    assert repeated_result["run_id"] == recovered_result["run_id"]
+    assert repeated_result["lease_id"] == recovered_result["lease_id"]
+    assert repeated_result["fence"] == recovered_result["fence"]
+    assert sum(1 for fact in repeated_result["work"]["recent_facts"] if fact["kind"] == "run_ownership_adopted") == 1
+    with service._open() as plane:
+        counts = plane.work_kernel.counts()
+        assert counts["work_items"] == 1
+        assert counts["runs"] == 1
+        assert counts["leases"] == 1
+
+
+def test_engineering_prepare_rejects_foreign_run_and_lease(tmp_path: Path, monkeypatch) -> None:
+    repo = Path(__file__).parents[1].absolute()
+    target = {
+        "repository_id": "bdb-p1-calculator",
+        "repo_root": r"C:\Projekty\DevMaster\bdb-calculator-pilot",
+        "branch": "pilot/calculator-browser-e2e",
+        "commit": "a30cf480dcedd337e4d8aac7fa6c461189fdaf68",
+        "allowed_paths": ["app.js", "index.html", "styles.css"],
+        "checker": {
+            "checker_id": "bdb-vnext-p1-calculator-checker",
+            "checker_version": "1",
+            "argv": [r"C:\Python314\python.exe", "tests/test_calculator.py"],
+            "cwd": ".",
+            "timeout_seconds": 60.0,
+        },
+    }
+
+    def prepare_seed(label: str, *, foreign_run: bool) -> tuple[N6RehearsalService, dict[str, Any]]:
+        package_root = tmp_path / f"package-{label}"
+        execution = prepare_package(
+            repo_root=repo,
+            output=package_root,
+            runtime_root=tmp_path / f"runtime-{label}",
+            legacy_runtime_root=tmp_path / f"legacy-{label}",
+            source_commit="HEAD",
+            python_executable=sys.executable,
+            engineering_target=target,
+        )
+        service = N6RehearsalService(N6RehearsalConfig.from_json(package_root / "native-config.json"))
+        payload = {
+            "submission_key": f"p1-browser:foreign-{label}",
+            "prompt": "BDB-P1-CALC-BROWSER-E2E\nforeign-owner test",
+            "conversation_id": f"chatgpt-conversation:foreign-{label}",
+            "profile_id": None,
+        }
+        ids = service._engineering_ids(payload["submission_key"])
+        prompt_digest = _sha(payload["prompt"].encode("utf-8"))
+        with service._open() as plane:
+            request = ShadowSubmissionRequest(
+                submission_key=payload["submission_key"],
+                intent_revision=P1_ENGINEERING_INTENT_REVISION,
+                intent={
+                    "operation": "p1-engineering-edit",
+                    "prompt_digest": prompt_digest,
+                    "target_repo_view_id": service.engineering_view.view_id,
+                    "target_tree": service.engineering_view.tree_oid,
+                    "allowed_paths": list(target["allowed_paths"]),
+                },
+                conversation_binding={"conversation_id": payload["conversation_id"], "profile_id": None},
+                consumer_binding={
+                    "consumer_id": _stable_id("p1-browser", payload["conversation_id"]),
+                    "kind": "browser",
+                    "generation": "bdb-vnext-g1",
+                },
+            )
+            receipt = plane.admission.client.submit(request)
+            work = plane.work_kernel.create_work_item(ids["work_id"], receipt.task_id, kind="p1-engineering")
+            lease_id = "p1-lease:foreign-owner" if not foreign_run else ids["lease_id"]
+            lease = plane.work_kernel.acquire_lease(ids["work_id"], lease_id, "foreign-worker")
+            run_id = "p1-run:foreign-owner" if foreign_run else ids["run_id"]
+            plane.work_kernel.start_run(ids["work_id"], run_id, lease.lease_id, lease.fence, work.state_version)
+        return service, payload
+
+    service, payload = prepare_seed("run", foreign_run=True)
+    with pytest.raises(N6RehearsalError) as foreign_run_error:
+        service._engineering_prepare(**payload)
+    assert foreign_run_error.value.code == "engineering_run_conflict"
+
+    service, payload = prepare_seed("lease", foreign_run=False)
+    with pytest.raises(N6RehearsalError) as foreign_lease_error:
+        service._engineering_prepare(**payload)
+    assert foreign_lease_error.value.code == "engineering_run_conflict"

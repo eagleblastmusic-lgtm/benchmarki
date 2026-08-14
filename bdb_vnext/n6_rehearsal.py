@@ -897,14 +897,50 @@ class N6RehearsalService:
             if work.work.disposition == "FINISHED":
                 candidate = plane.candidate.get(ids["candidate_id"])
                 return self._engineering_context(receipt.task_id, request_digest, conversation_id, submission_key, work, candidate, plane.candidate.generation, plane.candidate._tree_digest(plane.candidate._base_entries(self.engineering_view)))
-            # Recovery must be idempotent for a prepared engineering run.  Do
-            # not reacquire an already-owned lease: doing so advances the
-            # fence before comparing it with the active Run and turns a
-            # valid refresh into a false run conflict.
+            # Recovery is canonical WorkKernel ownership transfer.  A prior
+            # process may have left the intended Run active after its lease
+            # expired; reacquiring the same lease then advances the fence.  In
+            # that shape adopt the *same* Run through the WorkKernel rather
+            # than rejecting it or rewriting rows here.
             lease = None
-            if work.work.disposition == "RUNNING" and work.active_run is not None:
-                if work.lease is None or work.active_run.run_id != ids["run_id"] or work.active_run.lease_id != ids["lease_id"] or work.active_run.fence != work.lease.fence:
+            if work.work.disposition == "RUNNING":
+                active = work.active_run
+                current_lease = work.lease
+                if active is None or current_lease is None:
+                    _fail("engineering_run_conflict", "engineering WorkItem has no unambiguous active Run/Lease")
+                if active.run_id != ids["run_id"]:
                     _fail("engineering_run_conflict", "engineering WorkItem is owned by a different active Run")
+                if active.lease_id != ids["lease_id"] or current_lease.lease_id != ids["lease_id"]:
+                    _fail("engineering_run_conflict", "engineering WorkItem has a foreign active Lease")
+                lease = plane.work_kernel.acquire_lease(
+                    ids["work_id"], ids["lease_id"], "p1-browser-engineering", ttl_seconds=900.0
+                )
+                work = plane.work_kernel.query(ids["work_id"])
+                if work is None or work.active_run is None or work.lease is None:
+                    _fail("engineering_run_conflict", "engineering WorkItem recovery lost its active Run/Lease")
+                active = work.active_run
+                if active.run_id != ids["run_id"] or active.lease_id != lease.lease_id:
+                    _fail("engineering_run_conflict", "engineering WorkItem is owned by a different active Run")
+                if active.fence > lease.fence:
+                    _fail("engineering_run_conflict", "engineering Run fence is newer than the current Lease fence")
+                if active.fence < lease.fence:
+                    plane.work_kernel.adopt_active_run(
+                        ids["work_id"],
+                        ids["run_id"],
+                        lease.lease_id,
+                        lease.fence,
+                        work.work.state_version,
+                    )
+                    work = plane.work_kernel.query(ids["work_id"])
+                if (
+                    work is None
+                    or work.work.disposition != "RUNNING"
+                    or work.active_run is None
+                    or work.active_run.run_id != ids["run_id"]
+                    or work.active_run.lease_id != lease.lease_id
+                    or work.active_run.fence != lease.fence
+                ):
+                    _fail("engineering_run_conflict", "engineering WorkItem recovery did not establish the expected Run owner")
             else:
                 lease = plane.work_kernel.acquire_lease(ids["work_id"], ids["lease_id"], "p1-browser-engineering", ttl_seconds=900.0)
                 work = plane.work_kernel.query(ids["work_id"])
@@ -913,9 +949,8 @@ class N6RehearsalService:
                 if work.work.disposition == "READY":
                     plane.work_kernel.start_run(ids["work_id"], ids["run_id"], lease.lease_id, lease.fence, work.work.state_version)
                     work = plane.work_kernel.query(ids["work_id"])
-                elif work.work.disposition == "RUNNING" and work.active_run is not None:
-                    if work.active_run.run_id != ids["run_id"] or (work.active_run.lease_id, work.active_run.fence) != (lease.lease_id, lease.fence):
-                        _fail("engineering_run_conflict", "engineering WorkItem is owned by a different active Run")
+                elif work.work.disposition == "RUNNING":
+                    _fail("engineering_run_conflict", "engineering WorkItem changed to RUNNING during preparation")
             candidate = plane.candidate.get(ids["candidate_id"])
             return self._engineering_context(receipt.task_id, request_digest, conversation_id, submission_key, work, candidate, plane.candidate.generation, plane.candidate._tree_digest(plane.candidate._base_entries(self.engineering_view)))
 
