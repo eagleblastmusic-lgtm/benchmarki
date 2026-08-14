@@ -1202,6 +1202,18 @@ class CandidateStore:
             else:
                 self.content_store.publish(after_ref, b"")
             after_mode = int(modes.get(path, current_mode if current is not None else (0o755 if path in base_entries and base_entries[path][1] == "100755" else 0o644))) & 0o777
+            # A replan may carry an already-applied path from an earlier
+            # model turn.  When the workspace is already exactly at the new
+            # desired bytes there is no effect to apply for this path.  Keep
+            # it in the planned tree, but do not create a BEFORE/AFTER plan:
+            # such a no-op cannot be observed as a fresh filesystem effect
+            # (and would otherwise leave the replan PREPARED forever).
+            if current == after:
+                if after is None:
+                    planned_entries.pop(path, None)
+                else:
+                    planned_entries[path] = (_blob_oid(after, base_view.object_format), "100755" if after_mode & 0o111 else "100644")
+                continue
             plan = CandidatePathPlan(path, _digest(current or b""), _digest(after or b""), before_ref, after_ref, current_mode, after_mode, len(current or b""), len(after or b""))
             plans.append(plan)
             if after is None:

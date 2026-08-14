@@ -1156,6 +1156,40 @@ class N6RehearsalService:
                 desired[path] = None
         return desired
 
+    @staticmethod
+    def _engineering_merge_desired(
+        desired: Mapping[str, bytes | None],
+        artifact: EditBatch,
+        base_view: Any,
+    ) -> dict[str, bytes | None]:
+        """Add this artifact's operations to the accumulated Candidate plan.
+
+        ``_engineering_artifact`` is the Browser-facing adapter and does not
+        instantiate ``EngineeringLoop``.  It must nevertheless preserve the
+        same accumulated desired-state semantics for a follow-up artifact:
+        the current workspace snapshot is the precondition, while the new
+        model operations are the next plan to apply.  Passing only the
+        snapshot to ``reprepare_desired`` would silently validate the
+        preceding iteration again.
+        """
+        merged = dict(desired)
+        for operation in artifact.operations:
+            if operation.operation in {"CREATE", "MODIFY"}:
+                merged[operation.path] = operation.content
+            elif operation.operation == "DELETE":
+                merged[operation.path] = None
+            elif operation.operation == "RENAME":
+                if operation.source_path is None:
+                    _fail("invalid_rename", "RENAME source is required")
+                source_content = merged.get(operation.source_path)
+                if source_content is None and operation.source_path in merged:
+                    _fail("rename_source_missing", "RENAME source was already deleted")
+                if source_content is None:
+                    source_content = base_view.read_bytes(operation.source_path)
+                merged[operation.source_path] = None
+                merged[operation.path] = source_content
+        return merged
+
     def _engineering_artifact(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         if self.engineering_view is None or self.engineering_target is None:
             _fail("engineering_target_unavailable", "engineering target is not present in this package")
@@ -1227,6 +1261,8 @@ class N6RehearsalService:
             else:
                 workspace_path = Path(candidate.workspace_root)
             desired = self._engineering_desired_files(plane.candidate, candidate, self.engineering_view) if candidate is not None else None
+            if desired is not None:
+                desired = self._engineering_merge_desired(desired, artifact, self.engineering_view)
             # A raw assistant artifact is immutable evidence before any apply.
             artifact_evidence = plane.evidence.record_observation(
                 request_id=_stable_id("p1-artifact", submission_key + ":" + artifact.artifact_digest),

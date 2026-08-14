@@ -36,6 +36,7 @@ from bdb_vnext.n6_rehearsal import (
     package_digest,
     write_manual_packet,
 )
+from bdb_vnext.candidate import CANDIDATE_OBSERVED
 from bdb_vnext.engineering_loop import EditBatch
 
 
@@ -945,6 +946,72 @@ def test_engineering_artifact_replay_after_processed_cache_loss_is_idempotent(tm
     assert progressed["result"]["status"] == "VALIDATED"
     with service._open() as plane:
         assert int(plane.candidate._connection.execute("SELECT COUNT(*) FROM p1_edit_batches").fetchone()[0]) == 2
+
+
+def test_engineering_follow_up_artifact_applies_after_observed_candidate(tmp_path: Path, monkeypatch) -> None:
+    """A new model turn must be applied, not revalidated against the prior tree."""
+    service, execution, _target = _p1_service_for_recovery_tests(tmp_path, monkeypatch)
+    payload = {
+        "submission_key": "p1-browser:follow-up-apply",
+        "prompt": "BDB-P1-CALC-BROWSER-E2E\nfollow-up apply prompt",
+        "conversation_id": "chatgpt-conversation:follow-up-apply",
+        "profile_id": None,
+    }
+    prepared = _p1_event(service, execution, "engineering_prepare", payload, "p1:follow-up:prepare")["result"]
+    base_view = service.engineering_view
+    assert base_view is not None
+
+    def make_artifact(expected_tree: str, content: bytes) -> EditBatch:
+        return EditBatch.from_mapping({
+            "schema": "bdb-vnext-edit-v1",
+            "base_view_id": prepared["base_repo_view"]["view_id"],
+            "expected_tree_digest": expected_tree,
+            "task_id": prepared["task_id"],
+            "work_id": prepared["work_id"],
+            "run_id": prepared["run_id"],
+            "lease_id": prepared["lease_id"],
+            "fence": prepared["fence"],
+            "candidate_id": prepared["candidate_id"],
+            "workspace_generation": prepared["workspace_generation"],
+            "operations": [{"operation": "MODIFY", "path": "index.html", "content_b64": base64.b64encode(content).decode("ascii")}],
+            "budget": {"max_operations": 3, "max_bytes": 32768},
+        })
+
+    first_content = base_view.read_bytes("index.html") + b"\n<!-- first model turn -->\n"
+    first = make_artifact(prepared["current_tree_digest"], first_content)
+
+    def submit(artifact: EditBatch, request_id: str) -> dict[str, Any]:
+        raw_answer = "```json\n" + json.dumps(artifact.as_dict(), sort_keys=True) + "\n```"
+        return _p1_event(service, execution, "engineering_artifact", {
+            "submission_key": payload["submission_key"],
+            "conversation_id": payload["conversation_id"],
+            "prompt_digest": _sha(payload["prompt"].encode("utf-8")),
+            "raw_answer": raw_answer,
+            "raw_answer_digest": _sha(raw_answer.encode("utf-8")),
+            "artifact": artifact.as_dict(),
+        }, request_id)
+
+    first_result = submit(first, "p1:follow-up:first")["result"]
+    assert first_result["status"] == "VALIDATED"
+    with service._open() as plane:
+        candidate = plane.candidate.get(prepared["candidate_id"])
+        assert candidate is not None and candidate.state == CANDIDATE_OBSERVED
+        first_tree = str(first_result["current_tree_digest"])
+        assert first_tree != prepared["current_tree_digest"]
+
+    second_content = first_content + b"\n<!-- #display checker anchor -->\n"
+    second = make_artifact(first_tree, second_content)
+    second_result = submit(second, "p1:follow-up:second")["result"]
+    assert second_result["status"] == "VALIDATED"
+    assert second_result["current_tree_digest"] != first_tree
+    with service._open() as plane:
+        candidate = plane.candidate.get(prepared["candidate_id"])
+        assert candidate is not None and candidate.state == CANDIDATE_OBSERVED
+        actual = Path(candidate.workspace_root, "index.html").read_bytes()
+        assert actual == second_content
+        assert second_result["current_tree_digest"] == plane.candidate._tree_digest(
+            plane.candidate._workspace_entries(Path(candidate.workspace_root), object_format=base_view.object_format)
+        )
 
 
 def test_engineering_prepare_reuses_matching_active_run_on_refresh(tmp_path: Path, monkeypatch) -> None:
