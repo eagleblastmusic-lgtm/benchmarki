@@ -594,6 +594,24 @@ const renderedClone = {{
 const rendered = artifactFunctions.renderedAssistantText({{ cloneNode: () => renderedClone }});
 if (rendered !== '```json\\n{{"schema":"bdb-vnext-edit-v1"}}\\n```') throw new Error('rendered ChatGPT code block was not reconstructed as one fenced artifact: ' + rendered);
 
+const virtualizedLanguage = {{
+  getAttribute: () => 'json',
+  innerText: '{{"schema":"bdb-vnext-edit-v1","operations":['
+}};
+virtualizedLanguage.cmTile = {{ view: {{ state: {{ doc: {{ toString: () => '{{"schema":"bdb-vnext-edit-v1","complete":true}}' }} }} }} }};
+const virtualizedPre = {{
+  innerText: '{{"schema":"bdb-vnext-edit-v1","operations":[',
+  querySelector: (selector) => selector === '[data-language]' ? virtualizedLanguage : null,
+  replaceWith(value) {{ this.replacement = value; }},
+}};
+const virtualizedClone = {{
+  querySelectorAll: () => [virtualizedPre],
+  get innerText() {{ return virtualizedPre.replacement?.textContent || virtualizedPre.innerText; }},
+  get textContent() {{ return this.innerText; }},
+}};
+const virtualized = artifactFunctions.renderedAssistantText({{ cloneNode: () => virtualizedClone }});
+if (virtualized !== '```json\\n{{"schema":"bdb-vnext-edit-v1","complete":true}}\\n```') throw new Error('virtualized CodeMirror document text was not used: ' + virtualized);
+
 const engineeringUser = node('user', newlinePrompt);
 const engineeringPre = {{
   replacement: null,

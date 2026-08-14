@@ -1453,7 +1453,9 @@ function renderedAssistantText(node) {
   for (const pre of clone.querySelectorAll("pre")) {
     const code = pre.querySelector("[data-language]");
     const language = code?.getAttribute("data-language") || "";
-    const content = canonicalPrompt(code?.innerText || pre.innerText || pre.textContent || "");
+    const visible = code?.innerText || pre.innerText || pre.textContent || "";
+    const documentText = code?.cmTile?.view?.state?.doc?.toString?.() || "";
+    const content = canonicalPrompt(documentText.length > visible.length ? documentText : visible);
     pre.replaceWith(document.createTextNode("```" + language + "\n" + content + "\n```"));
   }
   return canonicalPrompt(clone.innerText || clone.textContent || "");
