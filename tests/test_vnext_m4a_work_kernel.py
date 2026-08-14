@@ -139,6 +139,37 @@ def test_lease_handoff_advances_fence_and_invalidates_stale_worker(tmp_path: Pat
         assert run.fence == new.fence
 
 
+def test_same_owner_lease_renewal_extends_expiry_without_advancing_fence(tmp_path: Path) -> None:
+    with stack(tmp_path) as (_composition, kernel, task_id):
+        item = kernel.create_work_item("work:renew", task_id)
+        original = kernel.acquire_lease(item.work_id, "lease:renew", "worker:renew", ttl_seconds=10, now=100)
+        renewed = kernel.acquire_lease(item.work_id, original.lease_id, "worker:renew", ttl_seconds=30, now=105)
+
+        assert renewed.lease_id == original.lease_id
+        assert renewed.fence == original.fence
+        assert renewed.expires_at == 135
+        kernel.assert_current_lease(item.work_id, renewed.lease_id, renewed.fence, now=134)
+        with pytest.raises(M4aError) as expired:
+            kernel.assert_current_lease(item.work_id, renewed.lease_id, renewed.fence, now=136)
+        assert expired.value.code == "lease_expired"
+
+
+def test_foreign_or_stale_owner_cannot_renew_current_lease(tmp_path: Path) -> None:
+    with stack(tmp_path) as (_composition, kernel, task_id):
+        item = kernel.create_work_item("work:renew-owner", task_id)
+        original = kernel.acquire_lease(item.work_id, "lease:renew-owner", "worker:owner", ttl_seconds=30, now=100)
+
+        with pytest.raises(M4aError) as foreign:
+            kernel.acquire_lease(item.work_id, original.lease_id, "worker:foreign", ttl_seconds=60, now=105)
+        assert foreign.value.code == "lease_conflict"
+
+        replacement = kernel.acquire_lease(item.work_id, "lease:replacement", "worker:replacement", ttl_seconds=30, now=131)
+        assert replacement.fence == original.fence + 1
+        with pytest.raises(M4aError) as stale:
+            kernel.acquire_lease(item.work_id, original.lease_id, "worker:owner", ttl_seconds=60, now=132)
+        assert stale.value.code == "lease_conflict"
+
+
 def test_adopt_active_run_rejects_stale_reverse_fence(tmp_path: Path) -> None:
     with stack(tmp_path) as (_composition, kernel, task_id):
         item = kernel.create_work_item("work:adopt-fence", task_id)

@@ -885,7 +885,17 @@ class WorkKernelStore:
             self._require_work(work_id)
             current = self._lease_row(work_id)
             if current is not None and str(current[1]) == lease_id and str(current[2]) == owner_id and str(current[4]) == "ACTIVE" and float(current[6]) > timestamp:
-                return self._lease(current, now=timestamp)
+                # A recovery/prepare call may deliberately renew an already
+                # valid lease.  Keep the same ownership identity and fence;
+                # only extend the expiry (never shorten it).
+                expires_at = max(float(current[6]), timestamp + ttl)
+                self._connection.execute(
+                    "UPDATE m4a_leases SET expires_at=? WHERE work_id=? AND lease_id=? AND owner_id=? AND fence=? AND state='ACTIVE'",
+                    (expires_at, work_id, lease_id, owner_id, int(current[3])),
+                )
+                row = self._lease_row(work_id)
+                assert row is not None
+                return self._lease(row, now=timestamp)
             if current is not None and str(current[4]) == "ACTIVE" and float(current[6]) > timestamp:
                 _fail("lease_conflict", "WorkItem already has a valid lease")
             fence = 1 if current is None else int(current[3]) + 1
