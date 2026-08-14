@@ -19,6 +19,7 @@ from bdb_vnext.candidate import (
     CANDIDATE_SEALED,
     CandidateError,
     CandidateStore,
+    MAX_FILE_BYTES,
 )
 from bdb_vnext.control_store import read_identity
 from bdb_vnext.bootstrap import create_coordinated_backup, restore_backup, verify_backup
@@ -101,6 +102,29 @@ def test_candidate_worktree_creation_enables_windows_long_paths(tmp_path: Path, 
             command = worktree_commands[0]
             assert command[0:3] == ["git", "-c", "core.autocrlf=false"]
             assert command[3:5] == ["-c", "core.longpaths=true"]
+        finally:
+            _remove_candidate_worktree(subject, workspace)
+
+
+def test_unplanned_large_tracked_file_uses_git_identity_without_relaxing_effect_budget(tmp_path: Path) -> None:
+    with _stack(tmp_path) as (subject, _view, _kernel, store, work_id, task_id, lease):
+        (subject / "large.bin").write_bytes(b"x" * (MAX_FILE_BYTES + 1))
+        _git(subject, "add", "large.bin")
+        _git(subject, "commit", "-qm", "large tracked fixture")
+        view = RepositoryResource.from_path(subject, repository_id="m4b-large-subject").resolve_committed("HEAD")
+        workspace = store.create_workspace(candidate_id="candidate:large-tracked", base_view=view)
+        try:
+            prepared = store.prepare_operations(
+                candidate_id="candidate:large-tracked",
+                work_id=work_id,
+                task_id=task_id,
+                lease_id=lease.lease_id,
+                fence=lease.fence,
+                base_view=view,
+                workspace_root=workspace,
+                operations=[{"operation": "MODIFY", "path": "one.txt", "mode": 0o644, "content": b"changed\r\n"}],
+            )
+            assert prepared.state == CANDIDATE_PREPARED
         finally:
             _remove_candidate_worktree(subject, workspace)
 

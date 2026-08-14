@@ -255,14 +255,14 @@ def _git_mode(path: Path) -> str:
     return "100755" if (_file_mode(path) & 0o111) else "100644"
 
 
-def _git_index_modes(workspace: Path) -> dict[str, str]:
-    """Read canonical Git modes instead of inferring them from Windows ACLs.
+def _git_index_entries(workspace: Path) -> dict[str, tuple[str, str]]:
+    """Read canonical Git blob identities/modes instead of filesystem bytes.
 
     On Windows a checked-out ``.cmd`` file can expose an executable bit through
     ``stat`` even though the committed tree records mode ``100644``.  Candidate
-    tree equality is a Git-object contract, so tracked modes must come from the
-    index; the filesystem mode remains only a fallback for foreign/untracked
-    files (which are rejected by the exact-tree comparison).
+    tree equality is a Git-object contract, so tracked identities and modes
+    must come from the index when a non-planned tracked file is larger than the
+    bounded effect byte budget.
     """
 
     completed = subprocess.run(
@@ -278,17 +278,36 @@ def _git_index_modes(workspace: Path) -> dict[str, str]:
         text = completed.stdout.decode("utf-8")
     except UnicodeDecodeError:
         return {}
-    modes: dict[str, str] = {}
+    entries: dict[str, tuple[str, str]] = {}
     for item in text.split("\x00"):
         if not item:
             continue
         prefix, separator, path = item.partition("\t")
         if not separator:
             continue
-        mode = prefix.split(" ", 1)[0]
-        if mode in {"100644", "100755", "120000", "160000"}:
-            modes[path.replace("\\", "/")] = mode
-    return modes
+        fields = prefix.split(" ")
+        mode = fields[0] if fields else ""
+        oid = fields[1] if len(fields) > 1 else ""
+        if mode in {"100644", "100755", "120000", "160000"} and oid:
+            entries[path.replace("\\", "/")] = (oid, mode)
+    return entries
+
+
+def _git_path_is_unchanged(workspace: Path, path: str) -> bool:
+    """Verify a large tracked path against the exact worktree index."""
+
+    completed = subprocess.run(
+        ["git", "-C", str(workspace), "diff", "--quiet", "--no-ext-diff", "--ignore-submodules", "--", path],
+        shell=False,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    if completed.returncode == 0:
+        return True
+    if completed.returncode == 1:
+        return False
+    _fail("candidate_git_state_failed", "Git could not verify a bounded tracked path")
 
 
 def _blob_oid(raw: bytes, object_format: str) -> str:
@@ -840,7 +859,8 @@ class CandidateStore:
 
     def _workspace_entries(self, workspace: Path, *, object_format: str) -> dict[str, tuple[str, str]]:
         result: dict[str, tuple[str, str]] = {}
-        index_modes = _git_index_modes(workspace)
+        index_entries = _git_index_entries(workspace)
+        index_modes = {path: mode for path, (_oid, mode) in index_entries.items()}
         for directory, dir_names, file_names in os.walk(workspace, topdown=True, followlinks=False):
             current = Path(directory)
             if current == workspace:
@@ -859,9 +879,15 @@ class CandidateStore:
                 child = current / name
                 if _reparse(child):
                     _fail("workspace_reparse_point", "Candidate workspace contains a reparse point")
-                raw = _read_exact(child)
                 relative = child.relative_to(workspace).as_posix()
                 normalized = _path(relative)
+                indexed = index_entries.get(normalized)
+                if indexed is not None and child.stat(follow_symlinks=False).st_size > MAX_FILE_BYTES:
+                    if not _git_path_is_unchanged(workspace, normalized):
+                        _fail("candidate_path_invalid", "large tracked path changed outside the bounded effect plan")
+                    result[normalized] = indexed
+                    continue
+                raw = _read_exact(child)
                 result[normalized] = (_blob_oid(raw, object_format), index_modes.get(normalized, _git_mode(child)))
         return dict(sorted(result.items()))
 
