@@ -1212,10 +1212,16 @@ class N6RehearsalService:
             if candidate is not None and candidate.state == CANDIDATE_INVALIDATED:
                 _fail("candidate_state_conflict", "invalidated engineering Candidate cannot accept another artifact")
             if candidate is not None and candidate.state in {CANDIDATE_OBSERVED, CANDIDATE_SEALED}:
+                # A byte-identical artifact after Browser-cache loss is a
+                # canonical replay.  A different artifact is the next
+                # model-authored iteration against the observed Candidate;
+                # it must be allowed to reprepare the accumulated desired
+                # state below while a sealed Candidate remains immutable.
                 replay = editor.replay_batch(artifact, base_view=self.engineering_view)
-                if replay is None:
-                    _fail("engineering_reconciliation_required", "completed engineering Candidate has no replayable exact batch")
-                return {"status": "REPLAYED", "artifact_digest": artifact.artifact_digest, "task_id": found["task_id"], "work_id": ids["work_id"], "run_id": ids["run_id"], "lease_id": artifact.lease_id, "fence": artifact.fence, **replay}
+                if replay is not None:
+                    return {"status": "REPLAYED", "artifact_digest": artifact.artifact_digest, "task_id": found["task_id"], "work_id": ids["work_id"], "run_id": ids["run_id"], "lease_id": artifact.lease_id, "fence": artifact.fence, **replay}
+                if candidate.state == CANDIDATE_SEALED:
+                    _fail("candidate_state_conflict", "sealed engineering Candidate cannot accept another artifact")
             if candidate is None:
                 workspace_path = plane.candidate.create_workspace(candidate_id=ids["candidate_id"], base_view=self.engineering_view)
             else:

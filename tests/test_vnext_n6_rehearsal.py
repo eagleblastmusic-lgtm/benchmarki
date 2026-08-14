@@ -908,6 +908,44 @@ def test_engineering_artifact_replay_after_processed_cache_loss_is_idempotent(tm
         }
     assert after == before
 
+    # A distinct model-authored follow-up must be accepted against the
+    # observed Candidate; only an exact byte-identical artifact is a replay.
+    with service._open() as plane:
+        current_tree = plane.candidate._tree_digest(
+            plane.candidate._workspace_entries(
+                Path(plane.candidate.get(prepared["candidate_id"]).workspace_root),
+                object_format=service.engineering_view.object_format,  # type: ignore[union-attr]
+            )
+        )
+        follow_up_content = service.engineering_view.read_bytes("index.html") + b"\n<!-- follow-up -->\n"  # type: ignore[union-attr]
+    follow_up = EditBatch.from_mapping({
+        "schema": "bdb-vnext-edit-v1",
+        "base_view_id": prepared["base_repo_view"]["view_id"],
+        "expected_tree_digest": current_tree,
+        "task_id": prepared["task_id"],
+        "work_id": prepared["work_id"],
+        "run_id": prepared["run_id"],
+        "lease_id": prepared["lease_id"],
+        "fence": prepared["fence"],
+        "candidate_id": prepared["candidate_id"],
+        "workspace_generation": prepared["workspace_generation"],
+        "operations": [{"operation": "MODIFY", "path": "index.html", "content_b64": base64.b64encode(follow_up_content).decode("ascii")}],
+        "budget": {"max_operations": 8, "max_bytes": 8 * 1024 * 1024},
+    })
+    follow_up_raw = "```json\n" + json.dumps(follow_up.as_dict(), sort_keys=True) + "\n```"
+    follow_up_event = {
+        "submission_key": payload["submission_key"],
+        "conversation_id": payload["conversation_id"],
+        "prompt_digest": _sha(payload["prompt"].encode("utf-8")),
+        "raw_answer": follow_up_raw,
+        "raw_answer_digest": _sha(follow_up_raw.encode("utf-8")),
+        "artifact": follow_up.as_dict(),
+    }
+    progressed = _p1_event(service, execution, "engineering_artifact", follow_up_event, "p1:artifact:follow-up")
+    assert progressed["result"]["status"] == "VALIDATED"
+    with service._open() as plane:
+        assert int(plane.candidate._connection.execute("SELECT COUNT(*) FROM p1_edit_batches").fetchone()[0]) == 2
+
 
 def test_engineering_prepare_reuses_matching_active_run_on_refresh(tmp_path: Path, monkeypatch) -> None:
     repo = Path(__file__).parents[1].absolute()
