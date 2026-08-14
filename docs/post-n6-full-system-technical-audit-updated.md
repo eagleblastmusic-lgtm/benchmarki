@@ -128,3 +128,30 @@ The later independent Sol audit superseded this document's prior closure verdict
 The bounded repair keeps the frozen authority model. Candidate v2 seal now archives an exact Git bundle in the existing CAS and binds it into the immutable manifest; Evidence and Publication use one positive applicability authorization and recheck it under the durable writer transaction. Current Control DB version 3 validates the sealed layout before any store-owned `CREATE`. Publication replay and presentation state changes resolve under writer locks with typed results. N6 presentation now requires an exact prior assistant-capture Evidence and a fresh stable assistant DOM observation outside extension UI. N6 package v2 identity includes normalized execution-controlling config and manifest plus a separately attested, externally owned interpreter identity.
 
 Adversarial tests cover the exact interleavings, damaged current DB non-mutation, cold restore after Candidate worktree removal, missing CAS/Git authority, concurrent Publication replay, concurrent UNKNOWN/PRESENTED, extension self-witness rejection, stale/ambiguous assistant response, and package/config mutation. Historical Candidate view v1 remains explicitly readable; new seals use v2. The previous human Browser evidence remains immutable but is not acceptance evidence for the changed package. Fresh human Browser evidence, deterministic runtime reconciliation and a final independent Sol re-audit remain required; therefore the current state is `NOT_READY_FOR_CHATGPT_WORK_STRATEGIC_SYNTHESIS`.
+
+## Y. P1 calculator pilot closure — proven baseline
+
+The bounded P1 calculator pilot is now closed as a durable proven baseline. This closure records the accepted result; it does not change BDB runtime behavior, calculator bytes, historical evidence, or production activation.
+
+- automated verdict: `P1_CANONICAL_RECOVERY_AND_CALCULATOR_PASS`;
+- human calculator acceptance gate: `PASS` on the exact sealed Candidate;
+- real normal-ChatGPT Browser → model-authored `BDB_EDIT_V1` path: `PROVEN`;
+- multi-turn engineering and automated calculator Browser E2E: `PROVEN` / `PASS`;
+- pilot runtime: `C:\Users\Skarabeusz\.codex\visualizations\2026\08\09\019fe496-ab67-7fb1-a55a-9c913ded0563\p1-calculator-7cee8b3-fresh\runtime`;
+- accepted package: `C:\Users\Skarabeusz\.codex\visualizations\2026\08\09\019fe496-ab67-7fb1-a55a-9c913ded0563\p1-calculator-3cb0eea-recovery\package` (`sha256:18ac9cfb38d4486d8f527a94d24af6d7da9f90b7319c572d6b2eb3f12d395109`, binding `sha256:73900ea8a229aac676542f139dfc47a389fabaa9d8517a25d64165062aa50853`);
+- calculator baseline: repository `bdb-p1-calculator`, commit `a30cf480dcedd337e4d8aac7fa6c461189fdaf68`, tree `5edec70af398212c3e6868f88cce86737ba26452`;
+- final Task: `task-528055416145c8698104734b3bfa5829ce4ad39e9c91eff0`;
+- final WorkItem: `p1-work:528055416145c8698104734b3bfa5829ce4ad39e`;
+- final Run: `p1-run:528055416145c8694734b3bfa5829ce4ad39e` (`FINISHED` / `SUCCEEDED` / `CERTAIN`);
+- final Candidate: `p1-candidate:528055416145c8698104734b3bfa5829ce4ad39e` (`SEALED` / `CERTAIN`);
+- Candidate tree: `sha256:adc969d4b40e1083c3e3e7147498f6d562a836b903ca945add7fc62941030d3a`;
+- Candidate view/manifest: `sha256:956b35ebb3d9f9b1e049209e7e6df82865cbefadb22eda16dbeedea3a5eaa6fe`;
+- final Evidence: `sha256:a329b1a954f420bae6d5a10338a9fe098e858210175b6f00f2e0b199631140e5` (`PASS` / `APPLICABLE`);
+- final Evaluation: `sha256:75573634f40e5e50825a02d2df447863df734a8804b70020a7b63675b25eaa6b` (`PASS` / `APPLICABLE`);
+- final Disposition: `sha256:b7176d2e0d123e4361aef4ab33c9043823bfc815c4a3c7d6396439f570f16c77` (`PASS`);
+- final Publication: `sha256:6ae00e028965463f2e779583e9b452d48d47161c259a27f9bd540c0d4d3fd626`;
+- production runtime/writer/activation: `OFF/OFF/OFF`;
+- legacy: `operational + isolated + untouched`;
+- no calculator source mutation or BDB runtime change is part of this closure.
+
+The next canonical development step after this frozen P1 baseline is **P0-STAB-1 — Control DB authority / data-integrity closure (Phase 0)**. This entry is a handoff only; P0-STAB-1 is not started here.
