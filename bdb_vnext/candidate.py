@@ -43,7 +43,11 @@ CANDIDATE_PATH_SCHEMA = "bdb-vnext-candidate-path-v1"
 CANDIDATE_EFFECT_SCHEMA = "bdb-vnext-candidate-effect-v1"
 CANDIDATE_VIEW_SCHEMA_V1 = "bdb-vnext-candidate-repo-view-v1"
 CANDIDATE_VIEW_SCHEMA = "bdb-vnext-candidate-repo-view-v2"
+# Kept for verification of already sealed v2 Candidates.  New seals use the
+# thin authority below and never recreate a full-history bundle.
 CANDIDATE_BASE_AUTHORITY_SCHEMA = "bdb-vnext-candidate-base-git-bundle-v1"
+CANDIDATE_THIN_BASE_AUTHORITY_SCHEMA = "bdb-vnext-candidate-thin-exact-base-authority-v1"
+CANDIDATE_THIN_BASE_AUTHORITY_KIND = "THIN_EXACT_BASE_AUTHORITY_V1"
 CANDIDATE_ABSENCE_SCHEMA = "bdb-vnext-candidate-absence-v1"
 CANDIDATE_KIND = "CANDIDATE"
 CANDIDATE_EFFECT_CLASS = "EXACT_REPLACEMENT_V1"
@@ -690,48 +694,87 @@ class CandidateStore:
             _fail("candidate_base_mismatch", "reopened Candidate base differs from the prepared exact RepoView")
         return view
 
-    def _archive_base_authority(self, workspace: Path, view: CommittedRepoView) -> dict[str, Any]:
-        """Publish a self-contained exact Git object authority into Content CAS."""
+    def _archive_base_authority(
+        self,
+        record: CandidateRecord,
+        view: CommittedRepoView,
+        candidate_tree_digest: str,
+    ) -> dict[str, Any]:
+        """Publish the minimum immutable authority needed for Candidate proof.
 
-        with tempfile.TemporaryDirectory(prefix="bdb-m4b-base-") as directory:
-            bundle = Path(directory) / "base.bundle"
-            completed = subprocess.run(
-                ["git", "-C", str(workspace), "bundle", "create", str(bundle), "HEAD"],
-                shell=False,
-                capture_output=True,
-                text=True,
-                timeout=60,
-                check=False,
-            )
-            if completed.returncode != 0 or not bundle.is_file():
-                raise CandidateError(
-                    "candidate_base_archive_failed",
-                    "exact Candidate base Git objects could not be archived",
-                    details={"returncode": completed.returncode},
-                )
-            raw = bundle.read_bytes()
-        try:
-            ref = make_content_ref("application/x-git-bundle", CANDIDATE_BASE_AUTHORITY_SCHEMA, raw)
-            self.content_store.publish(ref, raw)
-        except Exception as exc:
-            raise CandidateError("candidate_base_archive_failed", "exact Candidate base archive could not enter Content CAS") from exc
-        return {
-            "schema": CANDIDATE_BASE_AUTHORITY_SCHEMA,
-            "kind": "GIT_BUNDLE_CAS_V1",
-            "content_ref": ref.as_dict(),
+        The committed RepoView remains the external authority for unchanged
+        bytes.  Candidate CAS already owns every changed BEFORE/AFTER byte,
+        so sealing stores only the exact identity/path proof and never walks
+        the repository's commit ancestry.
+        """
+
+        payload = {
+            "schema": CANDIDATE_THIN_BASE_AUTHORITY_SCHEMA,
+            "kind": CANDIDATE_THIN_BASE_AUTHORITY_KIND,
             "repository_id": view.repository_id,
             "repository_identity_digest": view.repository_identity_digest,
             "object_format": view.object_format,
+            "base_view_id": view.view_id,
             "commit_oid": view.commit_oid,
             "tree_oid": view.tree_oid,
+            "candidate_id": record.candidate_id,
+            "candidate_tree_digest": candidate_tree_digest,
+            "changed_paths": [item.path for item in record.planned_paths],
+            "path_bindings": [item.as_dict() for item in record.planned_paths],
         }
+        raw = canonical_json_bytes(payload)
+        try:
+            ref = make_content_ref("application/json", CANDIDATE_THIN_BASE_AUTHORITY_SCHEMA, raw)
+            self.content_store.publish(ref, raw)
+        except Exception as exc:
+            raise CandidateError("candidate_base_archive_failed", "exact Candidate base authority could not enter Content CAS") from exc
+        return {**payload, "content_ref": ref.as_dict()}
+
+    def _verify_thin_base_authority(self, record: CandidateRecord, authority: Mapping[str, Any]) -> Mapping[str, Any]:
+        base = record.base_view
+        repository = base.get("repository")
+        expected = {
+            "schema": CANDIDATE_THIN_BASE_AUTHORITY_SCHEMA,
+            "kind": CANDIDATE_THIN_BASE_AUTHORITY_KIND,
+            "repository_id": repository.get("repository_id") if isinstance(repository, Mapping) else None,
+            "repository_identity_digest": repository.get("identity_digest") if isinstance(repository, Mapping) else None,
+            "object_format": repository.get("object_format") if isinstance(repository, Mapping) else None,
+            "base_view_id": base.get("view_id"),
+            "commit_oid": base.get("commit_oid"),
+            "tree_oid": base.get("tree_oid"),
+            "candidate_id": record.candidate_id,
+            "candidate_tree_digest": record.observed_tree_digest or record.planned_tree_digest,
+            "changed_paths": [item.path for item in record.planned_paths],
+            "path_bindings": [item.as_dict() for item in record.planned_paths],
+        }
+        if set(authority) != set(expected) | {"content_ref"}:
+            _fail("candidate_base_mismatch", "Candidate thin base authority has an unexpected field set")
+        if any(authority.get(key) != value for key, value in expected.items()):
+            _fail("candidate_base_mismatch", "Candidate thin base authority binding differs from the exact proof subject")
+        try:
+            ref = ContentRef.from_mapping(authority.get("content_ref"))
+            if ref.schema != CANDIDATE_THIN_BASE_AUTHORITY_SCHEMA or ref.type != "application/json":
+                _fail("candidate_base_mismatch", "Candidate thin base authority ContentRef has the wrong schema")
+            raw = self.content_store.resolve(ref)
+            payload = json.loads(raw.decode("utf-8"))
+        except CandidateError:
+            raise
+        except Exception as exc:
+            raise CandidateError("candidate_base_unavailable", "Candidate thin base authority is unavailable from Content CAS") from exc
+        if not isinstance(payload, Mapping) or dict(payload) != expected:
+            _fail("candidate_base_mismatch", "Candidate thin base authority payload differs from the exact proof subject")
+        return authority
 
     def _verify_base_authority(self, record: CandidateRecord) -> Mapping[str, Any]:
         document = record.candidate_view_id
         if not isinstance(document, Mapping) or document.get("schema") != CANDIDATE_VIEW_SCHEMA:
             _fail("candidate_base_authority_missing", "sealed Candidate lacks restorable exact Git authority")
         authority = document.get("base_authority")
-        if not isinstance(authority, Mapping) or authority.get("schema") != CANDIDATE_BASE_AUTHORITY_SCHEMA or authority.get("kind") != "GIT_BUNDLE_CAS_V1":
+        if not isinstance(authority, Mapping):
+            _fail("candidate_base_authority_missing", "sealed Candidate base authority is incomplete")
+        if authority.get("schema") == CANDIDATE_THIN_BASE_AUTHORITY_SCHEMA and authority.get("kind") == CANDIDATE_THIN_BASE_AUTHORITY_KIND:
+            return self._verify_thin_base_authority(record, authority)
+        if authority.get("schema") != CANDIDATE_BASE_AUTHORITY_SCHEMA or authority.get("kind") != "GIT_BUNDLE_CAS_V1":
             _fail("candidate_base_authority_missing", "sealed Candidate base authority is incomplete")
         base = record.base_view
         repository = base.get("repository")
@@ -1775,7 +1818,7 @@ class CandidateStore:
         if actual_entries != planned_entries or observed_digest != planned_digest:
             self._write(lambda: self._connection.execute("UPDATE m4b_candidate_effects SET state=?,effect_certainty=?,observed_tree_digest=? WHERE candidate_id=?", (CANDIDATE_DIVERGED, "UNKNOWN", observed_digest, record.candidate_id)))
             _fail("candidate_tree_mismatch", "observed Candidate tree is not exactly the planned tree", details={"planned": planned_digest, "observed": observed_digest})
-        base_authority = self._archive_base_authority(workspace, base_view)
+        base_authority = self._archive_base_authority(record, base_view, observed_digest)
         identity = {
             "schema": CANDIDATE_VIEW_SCHEMA,
             "kind": CANDIDATE_KIND,
@@ -1895,5 +1938,5 @@ class CandidateStore:
 __all__ = [
     "CANDIDATE_EFFECT_CLASS", "CANDIDATE_EFFECT_SCHEMA", "CANDIDATE_KIND", "CANDIDATE_PREPARED", "CANDIDATE_POSSIBLE",
     "CANDIDATE_OBSERVED", "CANDIDATE_SEALED", "CANDIDATE_DIVERGED", "CANDIDATE_UNKNOWN", "CANDIDATE_INVALIDATED",
-    "CANDIDATE_SCHEMA", "CANDIDATE_VIEW_SCHEMA", "CANDIDATE_VIEW_SCHEMA_V1", "CANDIDATE_BASE_AUTHORITY_SCHEMA", "CandidateError", "CandidatePathPlan", "CandidateRecord", "CandidateRepoView", "CandidateStore",
+    "CANDIDATE_SCHEMA", "CANDIDATE_VIEW_SCHEMA", "CANDIDATE_VIEW_SCHEMA_V1", "CANDIDATE_BASE_AUTHORITY_SCHEMA", "CANDIDATE_THIN_BASE_AUTHORITY_SCHEMA", "CANDIDATE_THIN_BASE_AUTHORITY_KIND", "CandidateError", "CandidatePathPlan", "CandidateRecord", "CandidateRepoView", "CandidateStore",
 ]

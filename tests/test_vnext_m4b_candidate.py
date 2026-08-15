@@ -19,11 +19,14 @@ from bdb_vnext.candidate import (
     CANDIDATE_SEALED,
     CandidateError,
     CandidateStore,
+    CANDIDATE_BASE_AUTHORITY_SCHEMA,
+    CANDIDATE_THIN_BASE_AUTHORITY_KIND,
+    CANDIDATE_THIN_BASE_AUTHORITY_SCHEMA,
     MAX_FILE_BYTES,
 )
 from bdb_vnext.control_store import read_identity
 from bdb_vnext.bootstrap import create_coordinated_backup, restore_backup, verify_backup
-from bdb_vnext.content_store import ContentRef
+from bdb_vnext.content_store import ContentRef, make_content_ref
 from bdb_vnext.m3a_submission import ShadowSubmissionRequest
 from bdb_vnext.m3c_admission import open_vnext_admission_composition
 from bdb_vnext.m4a_work_kernel import WorkKernelStore
@@ -340,7 +343,7 @@ def test_unfinished_effect_can_be_adopted_only_by_current_fence(tmp_path: Path) 
 
 
 def test_schema_documents_are_closed_and_control_identity_is_unified(tmp_path: Path) -> None:
-    schema_names = ["bdb-vnext-m4b-candidate-v1.schema.json", "bdb-vnext-candidate-repo-view-v1.schema.json", "bdb-vnext-candidate-repo-view-v2.schema.json"]
+    schema_names = ["bdb-vnext-m4b-candidate-v1.schema.json", "bdb-vnext-candidate-repo-view-v1.schema.json", "bdb-vnext-candidate-repo-view-v2.schema.json", "bdb-vnext-candidate-thin-exact-base-authority-v1.schema.json"]
     for name in schema_names:
         document = json.loads((Path(__file__).parents[1] / "schemas" / name).read_text(encoding="utf-8"))
         assert document["$schema"].endswith("2020-12/schema")
@@ -353,7 +356,7 @@ def test_schema_documents_are_closed_and_control_identity_is_unified(tmp_path: P
         assert store.database_path == runtime / "control" / "control.db"
 
 
-def test_sealed_candidate_manifest_and_cas_survive_cold_restore(tmp_path: Path) -> None:
+def test_sealed_candidate_manifest_and_thin_proof_survive_cold_restore(tmp_path: Path) -> None:
     with _stack(tmp_path) as (subject, view, _kernel, store, work_id, task_id, lease):
         workspace = store.create_workspace(candidate_id="candidate:backup", base_view=view)
         prepared = store.prepare(
@@ -382,6 +385,8 @@ def test_sealed_candidate_manifest_and_cas_survive_cold_restore(tmp_path: Path) 
             assert record is not None and record.manifest_digest == sealed.manifest_digest
             assert record.state == CANDIDATE_SEALED
             assert record.candidate_view_id is not None
+            assert record.candidate_view_id["base_authority"]["schema"] == CANDIDATE_THIN_BASE_AUTHORITY_SCHEMA
+            assert record.candidate_view_id["base_authority"]["kind"] == CANDIDATE_THIN_BASE_AUTHORITY_KIND
             assert reopened.verify_current_applicability(prepared.candidate_id).manifest_digest == sealed.manifest_digest
             authority = record.candidate_view_id["base_authority"]
             base_ref = ContentRef.from_mapping(authority["content_ref"])
@@ -392,6 +397,164 @@ def test_sealed_candidate_manifest_and_cas_survive_cold_restore(tmp_path: Path) 
             assert caught.value.code == "candidate_base_unavailable"
         finally:
             reopened.close()
+
+
+def test_thin_authority_excludes_deleted_history_and_stays_bounded(tmp_path: Path) -> None:
+    with _stack(tmp_path) as (subject, _initial_view, _kernel, store, work_id, task_id, lease):
+        historical = os.urandom(20 * 1024 * 1024)
+        (subject / "historical.bin").write_bytes(historical)
+        _git(subject, "add", "historical.bin")
+        _git(subject, "commit", "-qm", "historical payload")
+        historical_blob = _git(subject, "rev-parse", "HEAD:historical.bin")
+        _git(subject, "rm", "-q", "historical.bin")
+        _git(subject, "commit", "-qm", "remove historical payload")
+        view = RepositoryResource.from_path(subject, repository_id="m4b-history-subject").resolve_committed("HEAD")
+        old_bundle = tmp_path / "old-full-history.bundle"
+        _git(subject, "bundle", "create", str(old_bundle), "HEAD")
+        old_size = old_bundle.stat().st_size
+        workspace = store.create_workspace(candidate_id="candidate:thin-history", base_view=view)
+        try:
+            prepared = store.prepare(
+                candidate_id="candidate:thin-history", work_id=work_id, task_id=task_id,
+                lease_id=lease.lease_id, fence=lease.fence, base_view=view,
+                workspace_root=workspace, replacements={"one.txt": b"thin\n"},
+            )
+            store.apply(prepared.candidate_id)
+            sealed, _candidate = store.seal(prepared.candidate_id, base_view=view)
+            authority = sealed.candidate_view_id["base_authority"]  # type: ignore[index]
+            ref = ContentRef.from_mapping(authority["content_ref"])
+            thin_raw = store.content_store.resolve(ref)
+            assert old_size > 20 * 1024 * 1024
+            assert len(thin_raw) < 128 * 1024
+            assert len(thin_raw) < MAX_FILE_BYTES
+            assert historical_blob.encode("ascii") not in thin_raw
+            assert authority["schema"] == CANDIDATE_THIN_BASE_AUTHORITY_SCHEMA
+            assert store.verify_current_applicability(prepared.candidate_id).state == CANDIDATE_SEALED
+            print(f"BASE_AUTHORITY_SIZES old_full_history={old_size} new_thin={len(thin_raw)}")
+        finally:
+            _remove_candidate_worktree(subject, workspace)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("commit_oid", "0" * 40), ("tree_oid", "0" * 40), ("repository_id", "foreign"), ("object_format", "sha256")],
+)
+def test_thin_authority_identity_corruption_fails_closed(tmp_path: Path, field: str, value: str) -> None:
+    case_root = tmp_path / field
+    case_root.mkdir()
+    with _stack(case_root) as (subject, view, _kernel, store, work_id, task_id, lease):
+        workspace = store.create_workspace(candidate_id="candidate:thin-corrupt-" + field, base_view=view)
+        prepared = store.prepare(
+            candidate_id="candidate:thin-corrupt-" + field, work_id=work_id, task_id=task_id,
+            lease_id=lease.lease_id, fence=lease.fence, base_view=view,
+            workspace_root=workspace, replacements={"one.txt": b"corrupt\n"},
+        )
+        store.apply(prepared.candidate_id)
+        sealed, _candidate = store.seal(prepared.candidate_id, base_view=view)
+        document = dict(sealed.candidate_view_id)  # type: ignore[arg-type]
+        authority = dict(document["base_authority"])
+        authority[field] = value
+        document["base_authority"] = authority
+        identity = dict(document)
+        identity.pop("view_id", None)
+        identity.pop("manifest_digest", None)
+        manifest = semantic_digest(identity)
+        document["view_id"] = manifest
+        document["manifest_digest"] = manifest
+        store._connection.execute(
+            "UPDATE m4b_candidate_effects SET candidate_view_json=?,manifest_digest=? WHERE candidate_id=?",
+            (canonical_json_bytes(document), manifest, prepared.candidate_id),
+        )
+        store._connection.commit()
+        with pytest.raises(CandidateError) as caught:
+            store.verify_current_applicability(prepared.candidate_id)
+        assert caught.value.code == "candidate_base_mismatch"
+        _remove_candidate_worktree(subject, workspace)
+
+
+@pytest.mark.parametrize("tamper", ["missing", "modified"])
+def test_thin_authority_content_corruption_fails_closed(tmp_path: Path, tamper: str) -> None:
+    case_root = tmp_path / tamper
+    case_root.mkdir()
+    with _stack(case_root) as (subject, view, _kernel, store, work_id, task_id, lease):
+        workspace = store.create_workspace(candidate_id="candidate:thin-content-" + tamper, base_view=view)
+        prepared = store.prepare(
+            candidate_id="candidate:thin-content-" + tamper, work_id=work_id, task_id=task_id,
+            lease_id=lease.lease_id, fence=lease.fence, base_view=view,
+            workspace_root=workspace, replacements={"one.txt": b"corrupt-content\n"},
+        )
+        store.apply(prepared.candidate_id)
+        sealed, _candidate = store.seal(prepared.candidate_id, base_view=view)
+        authority = sealed.candidate_view_id["base_authority"]  # type: ignore[index]
+        ref = ContentRef.from_mapping(authority["content_ref"])
+        object_path = store.content_store.object_path(ref)
+        if tamper == "missing":
+            object_path.unlink()
+        else:
+            object_path.write_bytes(b"tampered thin authority")
+        with pytest.raises(CandidateError) as caught:
+            store.verify_current_applicability(prepared.candidate_id)
+        assert caught.value.code == "candidate_base_unavailable"
+        _remove_candidate_worktree(subject, workspace)
+
+
+def test_thin_authority_changed_path_content_corruption_fails_closed(tmp_path: Path) -> None:
+    with _stack(tmp_path) as (subject, view, _kernel, store, work_id, task_id, lease):
+        workspace = store.create_workspace(candidate_id="candidate:thin-path-corrupt", base_view=view)
+        prepared = store.prepare(
+            candidate_id="candidate:thin-path-corrupt", work_id=work_id, task_id=task_id,
+            lease_id=lease.lease_id, fence=lease.fence, base_view=view,
+            workspace_root=workspace, replacements={"one.txt": b"corrupt-path\n"},
+        )
+        store.apply(prepared.candidate_id)
+        sealed, _candidate = store.seal(prepared.candidate_id, base_view=view)
+        path_ref = ContentRef.from_mapping(sealed.candidate_view_id["path_bindings"][0]["after_ref"])  # type: ignore[index]
+        store.content_store.object_path(path_ref).write_bytes(b"tampered after bytes")
+        with pytest.raises(CandidateError) as caught:
+            store.verify_current_applicability(prepared.candidate_id)
+        assert caught.value.code == "candidate_content_unavailable"
+        _remove_candidate_worktree(subject, workspace)
+
+
+def test_legacy_git_bundle_authority_remains_verifiable(tmp_path: Path) -> None:
+    with _stack(tmp_path) as (subject, view, _kernel, store, work_id, task_id, lease):
+        workspace = store.create_workspace(candidate_id="candidate:legacy-bundle", base_view=view)
+        prepared = store.prepare(
+            candidate_id="candidate:legacy-bundle", work_id=work_id, task_id=task_id,
+            lease_id=lease.lease_id, fence=lease.fence, base_view=view,
+            workspace_root=workspace, replacements={"one.txt": b"legacy\n"},
+        )
+        store.apply(prepared.candidate_id)
+        sealed, _candidate = store.seal(prepared.candidate_id, base_view=view)
+        legacy_bundle = tmp_path / "legacy.bundle"
+        _git(subject, "bundle", "create", str(legacy_bundle), "HEAD")
+        raw = legacy_bundle.read_bytes()
+        ref = make_content_ref("application/x-git-bundle", CANDIDATE_BASE_AUTHORITY_SCHEMA, raw)
+        store.content_store.publish(ref, raw)
+        document = dict(sealed.candidate_view_id)  # type: ignore[arg-type]
+        document["base_authority"] = {
+            "schema": CANDIDATE_BASE_AUTHORITY_SCHEMA,
+            "kind": "GIT_BUNDLE_CAS_V1",
+            "content_ref": ref.as_dict(),
+            "repository_id": view.repository_id,
+            "repository_identity_digest": view.repository_identity_digest,
+            "object_format": view.object_format,
+            "commit_oid": view.commit_oid,
+            "tree_oid": view.tree_oid,
+        }
+        identity = dict(document)
+        identity.pop("view_id", None)
+        identity.pop("manifest_digest", None)
+        manifest = semantic_digest(identity)
+        document["view_id"] = manifest
+        document["manifest_digest"] = manifest
+        store._connection.execute(
+            "UPDATE m4b_candidate_effects SET candidate_view_json=?,manifest_digest=? WHERE candidate_id=?",
+            (canonical_json_bytes(document), manifest, prepared.candidate_id),
+        )
+        store._connection.commit()
+        assert store.verify_current_applicability(prepared.candidate_id).manifest_digest == manifest
+        _remove_candidate_worktree(subject, workspace)
 
 
 def test_historical_v1_candidate_view_remains_explicitly_readable(tmp_path: Path) -> None:

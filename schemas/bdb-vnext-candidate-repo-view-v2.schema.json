@@ -20,19 +20,43 @@
     "changed_paths": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
     "path_bindings": { "type": "array", "minItems": 1, "items": { "type": "object" } },
     "base_authority": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["schema", "kind", "content_ref", "repository_id", "repository_identity_digest", "object_format", "commit_oid", "tree_oid"],
-      "properties": {
-        "schema": { "const": "bdb-vnext-candidate-base-git-bundle-v1" },
-        "kind": { "const": "GIT_BUNDLE_CAS_V1" },
-        "content_ref": { "type": "object" },
-        "repository_id": { "type": "string", "minLength": 1 },
-        "repository_identity_digest": { "$ref": "#/$defs/digest" },
-        "object_format": { "enum": ["sha1", "sha256"] },
-        "commit_oid": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
-        "tree_oid": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" }
-      }
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "kind", "content_ref", "repository_id", "repository_identity_digest", "object_format", "commit_oid", "tree_oid"],
+          "properties": {
+            "schema": { "const": "bdb-vnext-candidate-base-git-bundle-v1" },
+            "kind": { "const": "GIT_BUNDLE_CAS_V1" },
+            "content_ref": { "type": "object" },
+            "repository_id": { "type": "string", "minLength": 1 },
+            "repository_identity_digest": { "$ref": "#/$defs/digest" },
+            "object_format": { "enum": ["sha1", "sha256"] },
+            "commit_oid": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+            "tree_oid": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "kind", "content_ref", "repository_id", "repository_identity_digest", "object_format", "base_view_id", "commit_oid", "tree_oid", "candidate_id", "candidate_tree_digest", "changed_paths", "path_bindings"],
+          "properties": {
+            "schema": { "const": "bdb-vnext-candidate-thin-exact-base-authority-v1" },
+            "kind": { "const": "THIN_EXACT_BASE_AUTHORITY_V1" },
+            "content_ref": { "type": "object" },
+            "repository_id": { "type": "string", "minLength": 1 },
+            "repository_identity_digest": { "$ref": "#/$defs/digest" },
+            "object_format": { "enum": ["sha1", "sha256"] },
+            "base_view_id": { "$ref": "#/$defs/digest" },
+            "commit_oid": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+            "tree_oid": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+            "candidate_id": { "type": "string", "minLength": 1 },
+            "candidate_tree_digest": { "$ref": "#/$defs/digest" },
+            "changed_paths": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+            "path_bindings": { "type": "array", "minItems": 1, "items": { "type": "object" } }
+          }
+        }
+      ]
     },
     "workspace_generation": { "type": "string", "minLength": 1 },
     "config_digest": { "$ref": "#/$defs/digest" },
