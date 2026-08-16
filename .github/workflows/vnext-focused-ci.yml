@@ -1,0 +1,59 @@
+name: BDB vNext Focused CI
+
+on:
+  push:
+    branches:
+      - bdb-vnext
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bdb-vnext-focused-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  focused-contracts:
+    name: Focused vNext contracts / Python 3.12
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install focused test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+
+      - name: Compile current P1/P2 modules
+        run: |
+          python -m py_compile \
+            bdb_vnext/m5a_effects.py \
+            bdb_vnext/m6a_evidence_policy.py \
+            bdb_vnext/m6b_check_plan.py
+
+      - name: Run focused P1/P2 contracts
+        run: |
+          python -m pytest \
+            tests/test_vnext_m5a_effects.py \
+            tests/test_vnext_m5b_effect_cutover.py \
+            tests/test_vnext_m6a_evidence_policy.py \
+            tests/test_vnext_m6b_check_plan.py \
+            tests/test_vnext_engineering_loop.py \
+            -q
+
+      - name: Check committed diff whitespace
+        shell: bash
+        run: |
+          if git rev-parse HEAD^ >/dev/null 2>&1; then
+            git diff --check HEAD^ HEAD
+          else
+            git diff --check
+          fi
