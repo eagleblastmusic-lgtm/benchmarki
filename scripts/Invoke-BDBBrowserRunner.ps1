@@ -12,7 +12,10 @@ param(
     [string]$ChromeExecutable = $env:BDB_CFT_EXECUTABLE,
     [string]$ConnectUrl,
     [string]$ConversationUrl,
+    [string]$ExpectedSourceCommit,
+    [string]$ExpectedSourceTree,
     [int]$CdpPort = 9230,
+    [int]$ReadinessTimeoutSeconds = 45,
     [int]$TimeoutSeconds = 900,
     [switch]$KeepOpen
 )
@@ -23,7 +26,7 @@ if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) {
     throw "BDB Browser Runner script is missing: $runner"
 }
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-    throw 'Node.js is required to run BDB Browser Runner v1.'
+    throw 'Node.js is required to run BDB Browser Runner v1.1.'
 }
 
 $arguments = @(
@@ -31,6 +34,7 @@ $arguments = @(
     '--mode', $Mode,
     '--package-root', $PackageRoot,
     '--puppeteer-dir', $PuppeteerDir,
+    '--readiness-timeout-seconds', [string]$ReadinessTimeoutSeconds,
     '--timeout-seconds', [string]$TimeoutSeconds
 )
 
@@ -49,6 +53,12 @@ if (-not [string]::IsNullOrWhiteSpace($PromptFile)) {
 }
 if (-not [string]::IsNullOrWhiteSpace($ConversationUrl)) {
     $arguments += @('--conversation-url', $ConversationUrl)
+}
+if (-not [string]::IsNullOrWhiteSpace($ExpectedSourceCommit)) {
+    $arguments += @('--expected-source-commit', $ExpectedSourceCommit)
+}
+if (-not [string]::IsNullOrWhiteSpace($ExpectedSourceTree)) {
+    $arguments += @('--expected-source-tree', $ExpectedSourceTree)
 }
 if ($KeepOpen) {
     $arguments += '--keep-open'
