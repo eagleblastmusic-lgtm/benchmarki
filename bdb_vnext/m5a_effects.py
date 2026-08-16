@@ -13,7 +13,7 @@ POSSIBLE/AMBIGUOUS/DIVERGED effect blindly.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Mapping, NoReturn
+from typing import Any, Callable, Literal, Mapping, NoReturn
 
 from bdb_shared.evidence import semantic_digest
 from bdb_vnext.candidate import (
@@ -263,6 +263,7 @@ class KernelEffectReconciler:
         *,
         candidate_id: str,
         run_id: str,
+        on_possible: Callable[[], None] | None = None,
         fault: str | None = None,
         fail_after_paths: int | None = None,
     ) -> EffectProjection:
@@ -290,6 +291,9 @@ class KernelEffectReconciler:
         # physical filesystem apply path.
         record = self.candidate_store.mark_possible(candidate_id)
         self._assert_run(record, run_id, require_active=True)
+
+        if on_possible is not None:
+            on_possible()
 
         kwargs: dict[str, Any] = {}
         if fault is not None:

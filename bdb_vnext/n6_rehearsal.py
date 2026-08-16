@@ -35,6 +35,7 @@ from bdb_vnext.candidate import (
     CANDIDATE_UNKNOWN,
     CandidateError,
 )
+from bdb_vnext.m5a_effects import KernelEffectReconciler, M5aError
 from bdb_vnext.engineering_loop import (
     EditBatch,
     EDIT_SCHEMA,
@@ -782,17 +783,27 @@ class N6RehearsalService:
             if candidate.state == CANDIDATE_INVALIDATED:
                 _fail("candidate_invalidated", "N6 Candidate was invalidated and cannot be retried")
             if candidate.state != CANDIDATE_SEALED:
-                candidate = plane.candidate.observe(candidate_id)
-                if candidate.state == CANDIDATE_PREPARED:
-                    plane.candidate.mark_possible(candidate_id)
-                    checkpoint("candidate_possible")
-                    candidate = plane.candidate.apply(candidate_id)
-                if candidate.state != CANDIDATE_OBSERVED:
-                    candidate = plane.candidate.observe(candidate_id)
-                if candidate.state in {CANDIDATE_DIVERGED, CANDIDATE_UNKNOWN}:
-                    _fail("candidate_reconciliation_required", "N6 Candidate effect cannot be retried without exact observation")
-                if candidate.state != CANDIDATE_OBSERVED:
+                reconciler = KernelEffectReconciler(
+                    work_kernel=plane.work_kernel,
+                    candidate_store=plane.candidate,
+                )
+                try:
+                    projection = reconciler.apply_if_safe(
+                        candidate_id=candidate_id,
+                        run_id=run_id,
+                        on_possible=lambda: checkpoint("candidate_possible"),
+                    )
+                except M5aError as exc:
+                    _fail(
+                        "candidate_reconciliation_required",
+                        f"N6 Candidate effect reconciliation failed: {exc}",
+                        details={"m5a_error": exc.code, **exc.details},
+                    )
+                if projection.effect_certainty != "AFTER":
                     _fail("candidate_reconciliation_required", "N6 Candidate has not reached an exact AFTER observation")
+                candidate = plane.candidate.get(candidate_id)
+                if candidate is None or candidate.state != CANDIDATE_OBSERVED:
+                    _fail("candidate_reconciliation_required", "N6 Candidate must be exactly OBSERVED before seal")
                 checkpoint("candidate_observed")
                 _sealed, candidate_view = plane.candidate.seal(candidate_id, base_view=self.view)
                 checkpoint("candidate_sealed")
@@ -1417,10 +1428,9 @@ class N6RehearsalService:
             if desired is not None:
                 desired = self._engineering_merge_desired(desired, artifact, self.engineering_view)
             record = editor.prepare_batch(artifact, base_view=self.engineering_view, workspace=workspace_path, desired_files=desired)
-            applied = editor.apply_batch(artifact)
-            observed = plane.candidate.observe(ids["candidate_id"])
-            if observed.state in {CANDIDATE_DIVERGED, CANDIDATE_UNKNOWN}:
-                _fail("engineering_reconciliation_required", "engineering Candidate observation is not exact")
+            observed = editor.apply_batch(artifact)
+            if observed.state != CANDIDATE_OBSERVED:
+                _fail("engineering_reconciliation_required", "engineering Candidate must be exactly OBSERVED before validation")
             command, runner = self._engineering_checker()
             result = runner.run(command, observed.workspace_root)
             validation = editor.record_validation(batch=artifact, result=result)

@@ -27,6 +27,7 @@ from bdb_vnext.candidate import CandidateError, CandidateRecord, CandidateRepoVi
 from bdb_vnext.control_store import ControlStoreError, begin_control_write, commit_control_write, rollback_control_write
 from bdb_vnext.content_store import make_content_ref
 from bdb_vnext.m4c_evidence import EvidenceRecord, EvidenceStore, EvaluationRecord
+from bdb_vnext.m5a_effects import KernelEffectReconciler, M5aError
 from bdb_vnext.n4_publication import PublicationRecord, PublicationStore
 from bdb_vnext.repo_view import CommittedRepoView
 
@@ -710,7 +711,24 @@ class EditorPort:
         )
         if prepared.state != "PREPARED":
             _fail("engineering_recovery_state_conflict", "Candidate recovery did not produce a PREPARED no-op plan")
-        return self.candidate_store.apply(candidate_id)
+        reconciler = KernelEffectReconciler(
+            work_kernel=self.candidate_store.work_kernel,
+            candidate_store=self.candidate_store,
+        )
+        if expected_run_id is None:
+            _fail("engineering_recovery_plan_invalid", "Candidate recovery requires an active Run")
+        try:
+            reconciler.apply_if_safe(candidate_id=candidate_id, run_id=expected_run_id)
+        except M5aError as exc:
+            _fail(
+                "engineering_reconciliation_required",
+                f"Candidate recovery effect reconciliation failed: {exc}",
+                details={"m5a_error": exc.code, **exc.details},
+            )
+        current = self.candidate_store.get(candidate_id)
+        if current is None:
+            _fail("candidate_missing", "Candidate record missing after recovery apply")
+        return current
 
     def _validate_batch(self, batch: EditBatch, base_view: CommittedRepoView, workspace: Path) -> None:
         base_view.validate_integrity()
@@ -788,13 +806,32 @@ class EditorPort:
             if row is None or str(row[2]) in {"OBSERVED", "SEALED"}:
                 self._persist_batch(batch, status=existing.state, effect_certainty=existing.effect_certainty)
                 return existing
+        reconciler = KernelEffectReconciler(
+            work_kernel=self.candidate_store.work_kernel,
+            candidate_store=self.candidate_store,
+        )
         try:
-            record = self.candidate_store.apply(batch.candidate_id)
+            reconciler.apply_if_safe(
+                candidate_id=batch.candidate_id,
+                run_id=batch.run_id,
+            )
+        except M5aError as exc:
+            current = self.candidate_store.get(batch.candidate_id)
+            if current is not None:
+                self._persist_batch(batch, status=current.state, effect_certainty=current.effect_certainty)
+            _fail(
+                "engineering_reconciliation_required",
+                f"Candidate effect reconciliation failed: {exc}",
+                details={"m5a_error": exc.code, **exc.details},
+            )
         except CandidateError:
             current = self.candidate_store.get(batch.candidate_id)
             if current is not None:
                 self._persist_batch(batch, status=current.state, effect_certainty=current.effect_certainty)
             raise
+        record = self.candidate_store.get(batch.candidate_id)
+        if record is None:
+            _fail("candidate_missing", "Candidate record missing after reconciliation")
         self._persist_batch(batch, status=record.state, effect_certainty=record.effect_certainty)
         return record
 
@@ -881,10 +918,34 @@ class EditorPort:
             _fail("candidate_missing", "engineering Candidate does not exist")
         if record.state == "SEALED":
             return self.candidate_store.verify_current_applicability(candidate_id)
-        observed = self.candidate_store.observe(candidate_id)
-        if observed.state in {"DIVERGED", "UNKNOWN"}:
-            _fail("engineering_reconciliation_required", "interrupted edit requires exact observation before retry")
-        return observed
+        work_query = self.candidate_store.work_kernel.query(record.work_id) if self.candidate_store.work_kernel is not None else None
+        if work_query is None:
+            _fail("work_missing", "Candidate is not bound to a canonical WorkItem")
+        run = work_query.active_run or work_query.last_run
+        if run is None:
+            _fail("run_identity_mismatch", "Candidate has no active or last Run")
+        reconciler = KernelEffectReconciler(
+            work_kernel=self.candidate_store.work_kernel,
+            candidate_store=self.candidate_store,
+        )
+        try:
+            projection = reconciler.reconcile(candidate_id=candidate_id, run_id=run.run_id)
+        except M5aError as exc:
+            _fail(
+                "engineering_reconciliation_required",
+                f"Candidate reconciliation failed: {exc}",
+                details={"m5a_error": exc.code, **exc.details},
+            )
+        if projection.effect_certainty not in {"BEFORE", "AFTER"}:
+            _fail(
+                "engineering_reconciliation_required",
+                "interrupted edit requires exact observation before retry",
+                details={"effect_certainty": projection.effect_certainty, "safe_next_action": projection.safe_next_action},
+            )
+        current = self.candidate_store.get(candidate_id)
+        if current is None:
+            _fail("candidate_missing", "engineering Candidate does not exist after reconciliation")
+        return current
 
 
 class EngineeringLoop:
