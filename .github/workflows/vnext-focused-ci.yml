@@ -17,7 +17,7 @@ jobs:
   focused-contracts:
     name: Focused vNext contracts / Python 3.12
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
@@ -37,7 +37,8 @@ jobs:
           python -m py_compile \
             bdb_vnext/m5a_effects.py \
             bdb_vnext/m6a_evidence_policy.py \
-            bdb_vnext/m6b_check_plan.py
+            bdb_vnext/m6b_check_plan.py \
+            bdb_vnext/m7a_git_cas.py
 
       - name: Run focused P1/P2 contracts
         run: |
@@ -46,6 +47,7 @@ jobs:
             tests/test_vnext_m5b_effect_cutover.py \
             tests/test_vnext_m6a_evidence_policy.py \
             tests/test_vnext_m6b_check_plan.py \
+            tests/test_vnext_m7a_git_cas.py \
             tests/test_vnext_engineering_loop.py \
             -q
 
@@ -57,3 +59,27 @@ jobs:
           else
             git diff --check
           fi
+
+  m7a-windows:
+    name: M7a Git CAS / Windows / Python 3.12
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install focused test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+
+      - name: Compile M7a
+        run: python -m py_compile bdb_vnext/m7a_git_cas.py
+
+      - name: Run M7a Git crash/CAS contracts
+        run: python -m pytest tests/test_vnext_m7a_git_cas.py -q
