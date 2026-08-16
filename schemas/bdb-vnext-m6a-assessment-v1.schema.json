@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-m6a-assessment-v1",
+  "title": "BDB vNext M6a immutable assessment record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "assessment_id",
+    "obligation_id",
+    "evidence_id",
+    "evaluation_id",
+    "disposition_id",
+    "subject_digest",
+    "status",
+    "applicability",
+    "verdict",
+    "details",
+    "created_at"
+  ],
+  "properties": {
+    "schema": {"const": "bdb-vnext-m6a-assessment-v1"},
+    "assessment_id": {"$ref": "#/$defs/digest"},
+    "obligation_id": {"$ref": "#/$defs/digest"},
+    "evidence_id": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+    "evaluation_id": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+    "disposition_id": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+    "subject_digest": {"$ref": "#/$defs/digest"},
+    "status": {"enum": ["SATISFIED", "UNSATISFIED", "UNKNOWN", "STALE"]},
+    "applicability": {"enum": ["APPLICABLE", "NOT_APPLICABLE", "UNKNOWN"]},
+    "verdict": {"enum": ["PASS", "FAIL", "NOT_APPLICABLE", "UNKNOWN"]},
+    "details": {"type": "object"},
+    "created_at": {"type": "string", "minLength": 1}
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}

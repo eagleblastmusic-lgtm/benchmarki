@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-m6a-approval-v1",
+  "title": "BDB vNext M6a immutable approval record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "approval_id",
+    "subject_digest",
+    "intent_revision_id",
+    "effect_digest",
+    "policy_digest",
+    "actor",
+    "authority",
+    "scope",
+    "expires_at",
+    "created_at"
+  ],
+  "properties": {
+    "schema": {"const": "bdb-vnext-m6a-approval-v1"},
+    "approval_id": {"$ref": "#/$defs/digest"},
+    "subject_digest": {"$ref": "#/$defs/digest"},
+    "intent_revision_id": {"type": "string", "minLength": 1},
+    "effect_digest": {"$ref": "#/$defs/digest"},
+    "policy_digest": {"$ref": "#/$defs/digest"},
+    "actor": {"type": "string", "minLength": 1},
+    "authority": {"type": "string", "minLength": 1},
+    "scope": {"type": "string", "minLength": 1},
+    "expires_at": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "minLength": 1}
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}

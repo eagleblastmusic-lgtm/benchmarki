@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-m6a-obligation-v1",
+  "title": "BDB vNext M6a immutable obligation record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "obligation_id",
+    "subject_kind",
+    "subject_identity",
+    "subject_digest",
+    "requirement",
+    "evidence_contract",
+    "waivability",
+    "risk",
+    "created_at"
+  ],
+  "properties": {
+    "schema": {"const": "bdb-vnext-m6a-obligation-v1"},
+    "obligation_id": {"$ref": "#/$defs/digest"},
+    "subject_kind": {"type": "string", "minLength": 1},
+    "subject_identity": {"type": "object"},
+    "subject_digest": {"$ref": "#/$defs/digest"},
+    "requirement": {"type": "string", "minLength": 1},
+    "evidence_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence_type", "coverage", "freshness"],
+      "properties": {
+        "evidence_type": {"type": "string", "minLength": 1},
+        "coverage": {"type": "string", "minLength": 1},
+        "freshness": {"enum": ["CURRENT", "IMMUTABLE_EXACT"]},
+        "checker_id": {"type": "string", "minLength": 1},
+        "checker_version": {"type": "string", "minLength": 1},
+        "checker_code_digest": {"$ref": "#/$defs/digest"},
+        "environment_fingerprint": {"$ref": "#/$defs/digest"},
+        "evaluation_config_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "waivability": {"enum": ["NEVER", "AUTHORIZED_USER", "ADMIN_ONLY"]},
+    "risk": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "minLength": 1}
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}
