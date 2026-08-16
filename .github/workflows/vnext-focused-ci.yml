@@ -38,6 +38,7 @@ jobs:
             bdb_vnext/m5a_effects.py \
             bdb_vnext/m6a_evidence_policy.py \
             bdb_vnext/m6b_check_plan.py \
+            bdb_vnext/m6c_validation_authority.py \
             bdb_vnext/m7a_git_cas.py \
             bdb_vnext/m7b_checkout_sync.py
 
@@ -48,6 +49,7 @@ jobs:
             tests/test_vnext_m5b_effect_cutover.py \
             tests/test_vnext_m6a_evidence_policy.py \
             tests/test_vnext_m6b_check_plan.py \
+            tests/test_vnext_m6c_validation_authority.py \
             tests/test_vnext_m7a_git_cas.py \
             tests/test_vnext_m7b_checkout_sync.py \
             tests/test_vnext_engineering_loop.py \
@@ -61,6 +63,30 @@ jobs:
           else
             git diff --check
           fi
+
+  m6c-windows:
+    name: M6c Validation Authority / Windows / Python 3.12
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install focused test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+
+      - name: Compile M6c
+        run: python -m py_compile bdb_vnext/m6c_validation_authority.py
+
+      - name: Run M6c authority/bypass contracts
+        run: python -m pytest tests/test_vnext_m6c_validation_authority.py -q
 
   m7a-windows:
     name: M7a Git CAS / Windows / Python 3.12
