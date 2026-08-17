@@ -1,7 +1,7 @@
 """Operator CLI for the single M11c External Bootstrap cutover path.
 
 The CLI intentionally separates non-authoritative staging/observation from the
-one production effect boundary.  ``apply`` cannot be invoked without an exact
+one production effect boundary. ``apply`` cannot be invoked without an exact
 cutover-plan SHA supplied as explicit operator approval.
 """
 
@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -75,11 +74,15 @@ def _stage_clients(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _register_native(args: argparse.Namespace) -> dict[str, Any]:
-    routes = register_windows_target_native_host(runtime_root=args.runtime_root)
+    routes = register_windows_target_native_host(
+        runtime_root=args.runtime_root,
+        replace_existing_target=args.replace_existing_target,
+    )
     return {
         "schema": CLI_SCHEMA,
         "action": "register-native",
         "status": "TARGET_REGISTERED_NOT_ACTIVATED",
+        "stale_target_replacement_requested": bool(args.replace_existing_target),
         "routes": routes,
         "production_activation_performed": False,
     }
@@ -154,7 +157,7 @@ def _status(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _apply(args: argparse.Namespace) -> dict[str, Any]:
-    # The exact plan SHA is the operator's approval token.  There is no boolean
+    # The exact plan SHA is the operator's approval token. There is no boolean
     # --yes shortcut and no implicit discovery of the current plan.
     result = apply_windows_cutover(
         authority_root=args.authority_root,
@@ -187,6 +190,11 @@ def _parser() -> argparse.ArgumentParser:
 
     register = sub.add_parser("register-native", help="register only the dedicated vNext Native host")
     register.add_argument("--runtime-root", required=True)
+    register.add_argument(
+        "--replace-existing-target",
+        action="store_true",
+        help="backup and replace an existing conflicting HKCU vNext rehearsal registration; HKLM still blocks",
+    )
     register.set_defaults(handler=_register_native)
 
     client_status = sub.add_parser("client-status", help="observe staged clients and Browser launch witness")
