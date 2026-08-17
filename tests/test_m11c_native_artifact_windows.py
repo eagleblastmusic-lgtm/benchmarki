@@ -33,14 +33,15 @@ def _decode(value: bytes) -> dict[str, object]:
     return result
 
 
-def test_frozen_onefile_native_host_runs_exact_browser_handshake(tmp_path: Path) -> None:
+def test_frozen_onefile_native_host_runs_exact_browser_handshake_without_explicit_config(tmp_path: Path) -> None:
     subject = exact_git_subject(ROOT)
     artifact = build_windows_native_artifact(repo_root=ROOT, output_root=tmp_path / "artifact")
     assert artifact.source_head == subject["source_head"]
     assert artifact.source_tree == subject["source_tree"]
 
-    runtime = tmp_path / "runtime"
-    legacy = tmp_path / "legacy"
+    local_app_data = tmp_path / "LocalAppData"
+    runtime = local_app_data / "BartoszDevBridge-Next" / "runtime"
+    legacy = local_app_data / "BartoszDevBridge"
     bootstrap = tmp_path / "ProgramData" / "BartoszDevBridge-Next" / "bootstrap"
     staged = stage_client_plan(
         runtime_root=runtime,
@@ -61,11 +62,14 @@ def test_frozen_onefile_native_host_runs_exact_browser_handshake(tmp_path: Path)
         "browser_extension_id": BROWSER_EXTENSION_ID,
         "browser_observation": observation,
     }
+    environment = dict(os.environ)
+    environment["LOCALAPPDATA"] = str(local_app_data)
     completed = subprocess.run(
-        [str(artifact.executable_path), ORIGIN, "--parent-window=0", "--config", str(staged["plan"]["native_config_path"])],
+        [str(artifact.executable_path), ORIGIN, "--parent-window=0"],
         input=_frame(request),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=environment,
         timeout=60,
         check=False,
     )
