@@ -1,0 +1,85 @@
+name: M11b Activation Fault Matrix
+
+on:
+  pull_request:
+    branches: [bdb-vnext]
+    paths:
+      - 'bdb_vnext/m11b_*.py'
+      - 'bdb_vnext/m11a_*.py'
+      - 'bdb_vnext/bootstrap.py'
+      - 'bdb_vnext/control_store.py'
+      - 'tests/test_m11b_*.py'
+      - 'tests/test_m11a_*.py'
+      - 'tests/test_vnext_bootstrap.py'
+      - 'tests/test_control_seal_*retry.py'
+      - '.github/workflows/m11b-fault-matrix-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fault-matrix:
+    name: ${{ matrix.os }} / fault matrix
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+
+      - name: Compile M11b source
+        run: >-
+          python -m py_compile
+          bdb_vnext/m11b_fault_matrix.py
+          bdb_vnext/m11b_fault_catalog.py
+          tests/test_m11b_fault_matrix.py
+          tests/test_m11b_fault_catalog.py
+          tests/test_m11b_windows_faults.py
+
+      - name: Validate frozen fault catalog
+        run: python -m pytest -q tests/test_m11b_fault_catalog.py
+
+      - name: Run disposable activation crash matrix
+        run: python -m pytest -q tests/test_m11b_fault_matrix.py
+
+      - name: Run real Windows fault mechanics
+        if: runner.os == 'Windows'
+        run: python -m pytest -q tests/test_m11b_windows_faults.py
+
+      - name: Re-run prerequisite Bootstrap/Control Store fault substrate
+        run: >-
+          python -m pytest -q
+          tests/test_vnext_bootstrap.py
+          tests/test_m11a_bootstrap_slots.py
+          tests/test_m11a_prepared_activation.py
+          tests/test_m11a_windows_tcb.py
+          tests/test_m11a_bootstrap_admin.py
+          tests/test_control_seal_read_retry.py
+          tests/test_control_seal_write_retry.py
+
+      - name: Prove experiment cannot target production authority
+        shell: python {0}
+        run: |
+          import inspect
+          import bdb_vnext.m11b_fault_matrix as matrix
+          import bdb_vnext.m11a_bootstrap_admin as admin
+          assert 'production_activation_performed' in inspect.getsource(matrix)
+          assert not hasattr(matrix, 'activate_production')
+          parser = admin._parser()
+          import argparse
+          action = next(item for item in parser._actions if isinstance(item, argparse._SubParsersAction))
+          assert 'activate' not in action.choices and 'switch' not in action.choices
+          print('M11b is experiment-only; M11c activation remains unavailable')
