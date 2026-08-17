@@ -5,9 +5,15 @@ If the canonical Legacy Native Host configuration is missing, this module may
 restore *only that configuration file* from an already-existing local backup.
 
 It deliberately has no registry, process, activation, install, start, stop, or
-route mutation capability.  It never synthesizes repository bindings.  A
-backup is eligible only when the existing Legacy NativeHostConfig parser can
-load it completely, including all referenced BridgeConfig subjects.
+route mutation capability. It never synthesizes repository bindings. A backup
+is eligible only when the existing Legacy NativeHostConfig parser can load it
+completely, including all referenced BridgeConfig subjects.
+
+When several byte-distinct valid backups exist, recovery remains fail-closed
+unless exactly one byte identity is a monotonic semantic extension of every
+other valid backup: global Native Host settings must match and every historical
+repository alias must still point at the same resolved BridgeConfig path. The
+selected backup may only add repository aliases.
 """
 
 from __future__ import annotations
@@ -96,11 +102,72 @@ def _candidate_paths(root: Path) -> tuple[Path, ...]:
 
 
 @dataclass(frozen=True)
+class LegacyConfigSemantics:
+    allowed_origins: tuple[str, ...]
+    state_path: str
+    session_store_path: str
+    request_store_path: str
+    max_wait_seconds: float
+    max_message_bytes: int
+    repository_bindings: tuple[tuple[str, str], ...]
+
+    @classmethod
+    def from_config(cls, config: NativeHostConfig) -> "LegacyConfigSemantics":
+        return cls(
+            allowed_origins=tuple(sorted(config.allowed_origins)),
+            state_path=str(config.state_path),
+            session_store_path=str(config.session_store_path),
+            request_store_path=str(config.request_store_path),
+            max_wait_seconds=float(config.max_wait_seconds),
+            max_message_bytes=int(config.max_message_bytes),
+            repository_bindings=tuple(
+                sorted(
+                    (alias, str(repository.bridge_config_path))
+                    for alias, repository in config.repositories.items()
+                )
+            ),
+        )
+
+    def _global_identity(self) -> tuple[object, ...]:
+        return (
+            self.allowed_origins,
+            self.state_path,
+            self.session_store_path,
+            self.request_store_path,
+            self.max_wait_seconds,
+            self.max_message_bytes,
+        )
+
+    def extends(self, other: "LegacyConfigSemantics") -> bool:
+        """Return true only when self preserves other and may only add aliases."""
+
+        if self._global_identity() != other._global_identity():
+            return False
+        candidate = dict(self.repository_bindings)
+        historical = dict(other.repository_bindings)
+        return all(candidate.get(alias) == path for alias, path in historical.items())
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "allowed_origins": list(self.allowed_origins),
+            "state_path": self.state_path,
+            "session_store_path": self.session_store_path,
+            "request_store_path": self.request_store_path,
+            "max_wait_seconds": self.max_wait_seconds,
+            "max_message_bytes": self.max_message_bytes,
+            "repository_bindings": {
+                alias: path for alias, path in self.repository_bindings
+            },
+        }
+
+
+@dataclass(frozen=True)
 class ValidBackup:
     path: Path
     sha256: str
     size_bytes: int
     repository_aliases: tuple[str, ...]
+    semantics: LegacyConfigSemantics
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -122,7 +189,44 @@ def _valid_backup(path: Path) -> ValidBackup | None:
         sha256=_sha256_bytes(payload),
         size_bytes=len(payload),
         repository_aliases=tuple(sorted(parsed.repositories)),
+        semantics=LegacyConfigSemantics.from_config(parsed),
     )
+
+
+def _identity_documents(valid: tuple[ValidBackup, ...]) -> list[dict[str, Any]]:
+    identities: dict[str, list[ValidBackup]] = {}
+    for item in valid:
+        identities.setdefault(item.sha256, []).append(item)
+    return [
+        {
+            "sha256": digest,
+            "copies": [candidate.as_dict() for candidate in copies],
+        }
+        for digest, copies in sorted(identities.items())
+    ]
+
+
+def _dominant_identity(valid: tuple[ValidBackup, ...]) -> dict[str, Any] | None:
+    """Find one byte identity that semantically extends every valid backup."""
+
+    if not valid:
+        return None
+    dominant_digests = {
+        candidate.sha256
+        for candidate in valid
+        if all(candidate.semantics.extends(other.semantics) for other in valid)
+    }
+    if len(dominant_digests) != 1:
+        return None
+    digest = next(iter(dominant_digests))
+    copies = [candidate for candidate in valid if candidate.sha256 == digest]
+    representative = copies[0]
+    return {
+        "sha256": digest,
+        "copies": [candidate.as_dict() for candidate in copies],
+        "repository_aliases": list(representative.repository_aliases),
+        "selection_basis": "unique_monotonic_semantic_extension",
+    }
 
 
 def inspect_legacy_recovery(*, legacy_runtime_root: str | Path) -> dict[str, Any]:
@@ -141,15 +245,13 @@ def inspect_legacy_recovery(*, legacy_runtime_root: str | Path) -> dict[str, Any
             "target_sha256": _sha256_bytes(payload),
             "repository_aliases": sorted(parsed.repositories),
             "valid_backup_identities": [],
+            "dominant_backup_identity": None,
             "registry_mutation_performed": False,
             "process_mutation_performed": False,
             "production_activation_performed": False,
         }
 
     valid = tuple(item for path in _candidate_paths(root) if (item := _valid_backup(path)) is not None)
-    identities: dict[str, list[ValidBackup]] = {}
-    for item in valid:
-        identities.setdefault(item.sha256, []).append(item)
     return {
         "schema": LEGACY_RECOVERY_SCHEMA,
         "status": "RECOVERY_REQUIRED",
@@ -157,21 +259,43 @@ def inspect_legacy_recovery(*, legacy_runtime_root: str | Path) -> dict[str, Any
         "target_path": str(target),
         "target_sha256": None,
         "repository_aliases": [],
-        "valid_backup_identities": [
-            {
-                "sha256": digest,
-                "copies": [candidate.as_dict() for candidate in copies],
-            }
-            for digest, copies in sorted(identities.items())
-        ],
+        "valid_backup_identities": _identity_documents(valid),
+        "dominant_backup_identity": _dominant_identity(valid),
         "registry_mutation_performed": False,
         "process_mutation_performed": False,
         "production_activation_performed": False,
     }
 
 
+def _select_backup_identity(inspection: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    identities = inspection["valid_backup_identities"]
+    if not identities:
+        _fail(
+            "legacy_native_config_backup_missing",
+            "no valid Legacy native-host.json backup is available for config-only recovery",
+        )
+    if len(identities) == 1:
+        return identities[0], "unique_valid_identity"
+
+    dominant = inspection.get("dominant_backup_identity")
+    if isinstance(dominant, dict):
+        digest = dominant.get("sha256")
+        matching = [identity for identity in identities if identity.get("sha256") == digest]
+        if len(matching) == 1:
+            return matching[0], "unique_monotonic_semantic_extension"
+
+    _fail(
+        "legacy_native_config_backup_ambiguous",
+        "multiple valid Legacy configs exist without one unique monotonic semantic successor",
+        details={
+            "valid_backup_identities": identities,
+            "dominant_backup_identity": dominant,
+        },
+    )
+
+
 def restore_legacy_native_config(*, legacy_runtime_root: str | Path) -> dict[str, Any]:
-    """Restore missing native-host.json from one unique validated backup identity."""
+    """Restore missing native-host.json from one proven validated backup identity."""
 
     root = _absolute_root(legacy_runtime_root)
     target = root / _BACKUP_PREFIX
@@ -179,20 +303,7 @@ def restore_legacy_native_config(*, legacy_runtime_root: str | Path) -> dict[str
     if inspection["status"] == "READY":
         return {**inspection, "status": "ALREADY_READY", "restored": False}
 
-    identities = inspection["valid_backup_identities"]
-    if not identities:
-        _fail(
-            "legacy_native_config_backup_missing",
-            "no valid Legacy native-host.json backup is available for config-only recovery",
-        )
-    if len(identities) != 1:
-        _fail(
-            "legacy_native_config_backup_ambiguous",
-            "multiple different valid Legacy native-host.json backup identities exist",
-            details={"valid_backup_identities": identities},
-        )
-
-    identity = identities[0]
+    identity, selection_basis = _select_backup_identity(inspection)
     copies = identity["copies"]
     source = Path(copies[0]["path"])
     payload = _read_bounded(source)
@@ -200,8 +311,10 @@ def restore_legacy_native_config(*, legacy_runtime_root: str | Path) -> dict[str
         _fail("legacy_native_config_backup_changed", "selected Legacy config backup changed after inspection")
     _validate_native_config(source)
 
-    if target.exists():
-        # The target appeared after inspection. Never overwrite it.
+    # Re-observe the complete valid backup set before any write. A changing
+    # history must never be hidden by the config-only recovery operation.
+    confirmation = inspect_legacy_recovery(legacy_runtime_root=root)
+    if confirmation["status"] == "READY":
         current = _read_bounded(target)
         if current == payload:
             parsed = _validate_native_config(target)
@@ -214,12 +327,18 @@ def restore_legacy_native_config(*, legacy_runtime_root: str | Path) -> dict[str
                 "repository_aliases": sorted(parsed.repositories),
                 "source_backup_path": str(source),
                 "source_backup_sha256": identity["sha256"],
+                "selection_basis": selection_basis,
                 "restored": False,
                 "registry_mutation_performed": False,
                 "process_mutation_performed": False,
                 "production_activation_performed": False,
             }
         _fail("legacy_native_config_conflict", "Legacy native-host.json appeared with different bytes; refusing overwrite")
+    if confirmation["valid_backup_identities"] != inspection["valid_backup_identities"]:
+        _fail("legacy_native_config_backup_set_changed", "Legacy config backup set changed during recovery")
+    confirmed_identity, confirmed_basis = _select_backup_identity(confirmation)
+    if confirmed_identity["sha256"] != identity["sha256"] or confirmed_basis != selection_basis:
+        _fail("legacy_native_config_backup_set_changed", "Legacy config recovery authority changed during re-observation")
 
     temporary = root / f".{_BACKUP_PREFIX}.recover-{os.getpid()}-{secrets.token_hex(4)}.tmp"
     try:
@@ -256,6 +375,7 @@ def restore_legacy_native_config(*, legacy_runtime_root: str | Path) -> dict[str
         "repository_aliases": sorted(parsed.repositories),
         "source_backup_path": str(source),
         "source_backup_sha256": identity["sha256"],
+        "selection_basis": selection_basis,
         "restored": True,
         "registry_mutation_performed": False,
         "process_mutation_performed": False,

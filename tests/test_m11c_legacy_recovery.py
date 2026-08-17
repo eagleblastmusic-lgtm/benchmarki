@@ -33,10 +33,23 @@ def _bridge_config(root: Path, *, name: str = "bdb-self", repository_id: str = "
     return path
 
 
-def _native_document(legacy: Path, bridge: Path, *, alias: str = "bdb-self", wait: int = 30) -> dict[str, object]:
+def _native_document(
+    legacy: Path,
+    bridge: Path | None = None,
+    *,
+    alias: str = "bdb-self",
+    repositories: dict[str, Path] | None = None,
+    wait: int = 30,
+) -> dict[str, object]:
+    if repositories is None:
+        assert bridge is not None
+        repositories = {alias: bridge}
     return {
         "schema": "bdb-native-host-config-v1",
-        "repositories": {alias: {"bridge_config_path": str(bridge)}},
+        "repositories": {
+            repo_alias: {"bridge_config_path": str(path)}
+            for repo_alias, path in repositories.items()
+        },
         "allowed_origins": [ORIGIN],
         "state_path": str(legacy / "native-host-arm.json"),
         "session_store_path": str(legacy / "native-host-sessions.json"),
@@ -50,6 +63,17 @@ def _backup(legacy: Path, name: str, document: dict[str, object]) -> Path:
     path = legacy / name
     path.write_text(json.dumps(document, sort_keys=True, indent=2), encoding="utf-8")
     return path
+
+
+def _three_bridges(legacy: Path) -> dict[str, Path]:
+    return {
+        alias: _bridge_config(
+            legacy / "workspaces" / alias,
+            name=alias,
+            repository_id=alias,
+        )
+        for alias in ("alpha", "beta", "gamma")
+    }
 
 
 def test_unique_valid_backup_is_restored_byte_exact_without_effect_surfaces(tmp_path: Path) -> None:
@@ -72,6 +96,7 @@ def test_unique_valid_backup_is_restored_byte_exact_without_effect_surfaces(tmp_
     target = legacy / "native-host.json"
     assert result["status"] == "RECOVERED_CONFIG_ONLY"
     assert result["restored"] is True
+    assert result["selection_basis"] == "unique_valid_identity"
     assert result["repository_aliases"] == ["bdb-self"]
     assert result["registry_mutation_performed"] is False
     assert result["process_mutation_performed"] is False
@@ -95,19 +120,129 @@ def test_multiple_identical_valid_backups_are_one_identity(tmp_path: Path) -> No
 
     result = restore_legacy_native_config(legacy_runtime_root=legacy)
     assert result["status"] == "RECOVERED_CONFIG_ONLY"
+    assert result["selection_basis"] == "unique_valid_identity"
     assert (legacy / "native-host.json").read_bytes() == first.read_bytes()
 
 
-def test_different_valid_backup_identities_block_instead_of_guessing(tmp_path: Path) -> None:
+def test_unique_monotonic_successor_is_selected_without_using_filename_recency(tmp_path: Path) -> None:
+    legacy = tmp_path / "BartoszDevBridge"
+    legacy.mkdir()
+    bridges = _three_bridges(legacy)
+
+    _backup(
+        legacy,
+        "native-host.json.zzz-historical.bak",
+        _native_document(legacy, repositories={"alpha": bridges["alpha"]}),
+    )
+    _backup(
+        legacy,
+        "native-host.json.middle.bak",
+        _native_document(
+            legacy,
+            repositories={"alpha": bridges["alpha"], "beta": bridges["beta"]},
+        ),
+    )
+    successor = _backup(
+        legacy,
+        "native-host.json.aaa-successor.bak",
+        _native_document(legacy, repositories=bridges),
+    )
+
+    inspected = inspect_legacy_recovery(legacy_runtime_root=legacy)
+    assert len(inspected["valid_backup_identities"]) == 3
+    dominant = inspected["dominant_backup_identity"]
+    assert dominant is not None
+    assert dominant["repository_aliases"] == ["alpha", "beta", "gamma"]
+    assert dominant["selection_basis"] == "unique_monotonic_semantic_extension"
+
+    result = restore_legacy_native_config(legacy_runtime_root=legacy)
+
+    assert result["status"] == "RECOVERED_CONFIG_ONLY"
+    assert result["selection_basis"] == "unique_monotonic_semantic_extension"
+    assert result["repository_aliases"] == ["alpha", "beta", "gamma"]
+    assert (legacy / "native-host.json").read_bytes() == successor.read_bytes()
+    assert _legacy_profiles(legacy) == tuple(
+        (alias, bridges[alias].resolve()) for alias in ("alpha", "beta", "gamma")
+    )
+
+
+def test_different_global_settings_block_instead_of_guessing(tmp_path: Path) -> None:
     legacy = tmp_path / "BartoszDevBridge"
     legacy.mkdir()
     bridge = _bridge_config(legacy / "workspaces" / "bdb-self")
     _backup(legacy, "native-host.json.first.bak", _native_document(legacy, bridge, wait=20))
     _backup(legacy, "native-host.json.second.bak", _native_document(legacy, bridge, wait=30))
 
+    inspected = inspect_legacy_recovery(legacy_runtime_root=legacy)
+    assert inspected["dominant_backup_identity"] is None
+
     with pytest.raises(M11cLegacyRecoveryError) as caught:
         restore_legacy_native_config(legacy_runtime_root=legacy)
 
+    assert caught.value.code == "legacy_native_config_backup_ambiguous"
+    assert not (legacy / "native-host.json").exists()
+
+
+def test_remapped_existing_alias_blocks_monotonic_selection(tmp_path: Path) -> None:
+    legacy = tmp_path / "BartoszDevBridge"
+    legacy.mkdir()
+    first_alpha = _bridge_config(
+        legacy / "workspaces" / "alpha-v1",
+        name="alpha-v1",
+        repository_id="alpha-v1",
+    )
+    second_alpha = _bridge_config(
+        legacy / "workspaces" / "alpha-v2",
+        name="alpha-v2",
+        repository_id="alpha-v2",
+    )
+    beta = _bridge_config(legacy / "workspaces" / "beta", name="beta", repository_id="beta")
+    _backup(
+        legacy,
+        "native-host.json.first.bak",
+        _native_document(legacy, repositories={"alpha": first_alpha}),
+    )
+    _backup(
+        legacy,
+        "native-host.json.second.bak",
+        _native_document(legacy, repositories={"alpha": second_alpha, "beta": beta}),
+    )
+
+    inspected = inspect_legacy_recovery(legacy_runtime_root=legacy)
+    assert inspected["dominant_backup_identity"] is None
+
+    with pytest.raises(M11cLegacyRecoveryError) as caught:
+        restore_legacy_native_config(legacy_runtime_root=legacy)
+    assert caught.value.code == "legacy_native_config_backup_ambiguous"
+    assert not (legacy / "native-host.json").exists()
+
+
+def test_branched_history_with_removed_alias_blocks_monotonic_selection(tmp_path: Path) -> None:
+    legacy = tmp_path / "BartoszDevBridge"
+    legacy.mkdir()
+    bridges = _three_bridges(legacy)
+    _backup(
+        legacy,
+        "native-host.json.left.bak",
+        _native_document(
+            legacy,
+            repositories={"alpha": bridges["alpha"], "beta": bridges["beta"]},
+        ),
+    )
+    _backup(
+        legacy,
+        "native-host.json.right.bak",
+        _native_document(
+            legacy,
+            repositories={"alpha": bridges["alpha"], "gamma": bridges["gamma"]},
+        ),
+    )
+
+    inspected = inspect_legacy_recovery(legacy_runtime_root=legacy)
+    assert inspected["dominant_backup_identity"] is None
+
+    with pytest.raises(M11cLegacyRecoveryError) as caught:
+        restore_legacy_native_config(legacy_runtime_root=legacy)
     assert caught.value.code == "legacy_native_config_backup_ambiguous"
     assert not (legacy / "native-host.json").exists()
 
@@ -120,6 +255,7 @@ def test_backup_with_missing_or_invalid_bridge_subject_is_not_eligible(tmp_path:
 
     inspected = inspect_legacy_recovery(legacy_runtime_root=legacy)
     assert inspected["valid_backup_identities"] == []
+    assert inspected["dominant_backup_identity"] is None
 
     with pytest.raises(M11cLegacyRecoveryError) as caught:
         restore_legacy_native_config(legacy_runtime_root=legacy)
