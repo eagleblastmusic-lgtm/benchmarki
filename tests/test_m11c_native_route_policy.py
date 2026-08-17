@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -121,9 +122,10 @@ def test_explicit_hkcu_target_replacement_backs_up_and_writes_both_registry_view
     assert all(value == expected for _, value in writes)
     backup = runtime / "clients" / "prior-target-native-route-backup.json"
     assert backup.is_file()
-    text = backup.read_text(encoding="utf-8")
-    assert old32 in text and old64 in text and expected in text
-    assert "backup_sha256" in text
+    document = json.loads(backup.read_text(encoding="utf-8"))
+    assert document["replacement_manifest"] == expected
+    assert {item["value"] for item in document["target"]} == {old32, old64}
+    assert document["backup_sha256"].startswith("sha256:")
 
 
 def test_hklm_target_conflict_never_replaced_even_with_explicit_flag(
