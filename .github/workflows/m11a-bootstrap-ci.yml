@@ -15,6 +15,7 @@ on:
       - 'tests/test_vnext_m3a_submission.py'
       - 'tests/test_vnext_m3b_browser_admission.py'
       - 'tests/test_vnext_m3c_admission.py'
+      - 'pyproject.toml'
       - '.github/workflows/m11a-bootstrap-ci.yml'
   workflow_dispatch:
 
@@ -49,9 +50,11 @@ jobs:
           bdb_vnext/m11a_bootstrap_slots.py
           bdb_vnext/m11a_prepared_activation.py
           bdb_vnext/m11a_windows_tcb.py
+          bdb_vnext/m11a_bootstrap_admin.py
           tests/test_m11a_bootstrap_slots.py
           tests/test_m11a_prepared_activation.py
           tests/test_m11a_windows_tcb.py
+          tests/test_m11a_bootstrap_admin.py
 
       - name: Validate M11a JSON schemas
         shell: python {0}
@@ -85,7 +88,19 @@ jobs:
           tests/test_m11a_bootstrap_slots.py
           tests/test_m11a_prepared_activation.py
           tests/test_m11a_windows_tcb.py
+          tests/test_m11a_bootstrap_admin.py
           tests/test_vnext_bootstrap.py
+
+      - name: Verify installed admin CLI has no activation verb
+        shell: python {0}
+        run: |
+          import argparse
+          import bdb_vnext.m11a_bootstrap_admin as admin
+          parser = admin._parser()
+          action = next(item for item in parser._actions if isinstance(item, argparse._SubParsersAction))
+          assert set(action.choices) == {'status', 'verify-tcb', 'prepare'}
+          assert 'activate' not in action.choices and 'switch' not in action.choices
+          print('Bootstrap admin entrypoint is installed and M11a has no activation verb')
 
       - name: Run impacted M9b + M3 regression
         run: >-
@@ -103,9 +118,11 @@ jobs:
           import bdb_vnext.m11a_bootstrap_slots as slots
           import bdb_vnext.m11a_prepared_activation as prepared
           import bdb_vnext.m11a_windows_tcb as windows_tcb
+          import bdb_vnext.m11a_bootstrap_admin as admin
           assert not hasattr(slots, 'activate_candidate_slot')
           assert not hasattr(prepared, 'activate_prepared_candidate')
           assert not hasattr(windows_tcb, 'activate_candidate')
+          assert not hasattr(admin, 'activate')
           query_actions = {'activate_candidate': False}
           assert query_actions['activate_candidate'] is False
           print('M11a remains build-only; activation is not exported')
