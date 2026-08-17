@@ -28,6 +28,10 @@ These tranches implement the source-level core of Sequence 37 by evolving the ex
 - prepared query fails closed if slot bytes, slot state, or backup identity become stale/tampered;
 - explicit `activate_candidate = false`; no activation function is exported.
 
+## CI authority
+
+Trusted `BDB vNext CI` is now installed on the canonical `bdb-vnext` base. Pull requests to `bdb-vnext` are validated on GitHub-hosted Windows and Ubuntu runners. This replaces routine local operator test loops; local Windows execution is reserved for machine-specific runtime/registry/Chrome/ACL/cold-start evidence that GitHub-hosted runners cannot establish for the user's installation.
+
 ## Frozen safety properties
 
 - candidate business logic never chooses the ACTIVE pointer;
@@ -51,4 +55,4 @@ These tranches implement the source-level core of Sequence 37 by evolving the ex
 
 ## Next M11a loop
 
-Run source/regression gates for tranches 1–2, then add the platform-targeted Windows Bootstrap authority/permissions/launcher preflight required by M11a DONE. Only after that proof is green should M11a be closed and M11b begin.
+Use trusted GitHub Actions for source/regression validation, then add the platform-targeted Windows Bootstrap authority/permissions/launcher preflight required by M11a DONE. Only after that proof is green should M11a be closed and M11b begin.
