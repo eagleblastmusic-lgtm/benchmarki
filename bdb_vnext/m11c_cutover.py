@@ -27,6 +27,7 @@ from typing import Any, NoReturn
 
 from bdb_shared.evidence import canonical_json_bytes, semantic_digest
 from bdb_vnext.bootstrap import (
+    BootstrapError,
     BootstrapLock,
     _absolute_path,
     _load_json,
@@ -530,7 +531,7 @@ def _ensure_client_gate(runtime: Path, plan: Mapping[str, Any]) -> ActivationRec
             runtime_root=runtime,
             expected_client_plan_sha256=plan["client_plan_sha256"],
         )
-    except M11cClientError as exc:
+    except (M11cClientError, BootstrapError) as exc:
         raise M11cCutoverError(exc.code, str(exc)) from exc
     current = read_activation(runtime)
     if current is None:
@@ -768,7 +769,7 @@ def apply_windows_cutover(
             runtime_root=runtime,
             expected_client_plan_sha256=plan["client_plan_sha256"],
         )
-    except M11cClientError as exc:
+    except (M11cClientError, BootstrapError) as exc:
         raise M11cCutoverError(exc.code, str(exc)) from exc
 
     observed = observe_bootstrap_activation(authority_root=authority)
