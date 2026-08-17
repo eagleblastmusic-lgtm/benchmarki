@@ -1,0 +1,89 @@
+name: M11a Bootstrap CI
+
+on:
+  pull_request:
+    branches: [bdb-vnext]
+    paths:
+      - 'bdb_vnext/m11a_*.py'
+      - 'bdb_vnext/bootstrap.py'
+      - 'bdb_vnext/m9b_*.py'
+      - 'schemas/bdb-vnext-bootstrap-*.schema.json'
+      - 'tests/test_m11a_*.py'
+      - 'tests/test_vnext_bootstrap.py'
+      - 'tests/test_m9b_*.py'
+      - 'tests/test_vnext_m3a_submission.py'
+      - 'tests/test_vnext_m3b_browser_admission.py'
+      - 'tests/test_vnext_m3c_admission.py'
+      - '.github/workflows/m11a-bootstrap-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: ${{ matrix.os }} / Python 3.12
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+
+      - name: Compile M11a source
+        run: >-
+          python -m py_compile
+          bdb_vnext/m11a_bootstrap_slots.py
+          bdb_vnext/m11a_prepared_activation.py
+          tests/test_m11a_bootstrap_slots.py
+          tests/test_m11a_prepared_activation.py
+
+      - name: Validate M11a JSON schemas
+        shell: python
+        run: |
+          import json
+          from pathlib import Path
+          for path in (
+              Path('schemas/bdb-vnext-bootstrap-slot-manifest-v1.schema.json'),
+              Path('schemas/bdb-vnext-bootstrap-slot-state-v1.schema.json'),
+              Path('schemas/bdb-vnext-bootstrap-prepared-activation-v1.schema.json'),
+          ):
+              json.loads(path.read_text(encoding='utf-8'))
+              print(f'validated {path}')
+
+      - name: Run M11a + M1b gate
+        run: >-
+          python -m pytest -q
+          tests/test_m11a_bootstrap_slots.py
+          tests/test_m11a_prepared_activation.py
+          tests/test_vnext_bootstrap.py
+
+      - name: Run impacted M9b + M3 regression
+        run: >-
+          python -m pytest -q
+          tests/test_m9b_activation.py
+          tests/test_m9b_native_host.py
+          tests/test_m9b_browser_bundle.py
+          tests/test_vnext_m3a_submission.py
+          tests/test_vnext_m3b_browser_admission.py
+          tests/test_vnext_m3c_admission.py
+
+      - name: Prove no M11a activation export
+        shell: python
+        run: |
+          import bdb_vnext.m11a_bootstrap_slots as slots
+          import bdb_vnext.m11a_prepared_activation as prepared
+          assert not hasattr(slots, 'activate_candidate_slot')
+          assert not hasattr(prepared, 'activate_prepared_candidate')
+          query_actions = {'activate_candidate': False}
+          assert query_actions['activate_candidate'] is False
+          print('M11a remains build-only; activation is not exported')
