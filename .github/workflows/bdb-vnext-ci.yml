@@ -1,0 +1,80 @@
+name: BDB vNext CI
+
+on:
+  pull_request:
+    branches: [bdb-vnext]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-vnext:
+    name: ${{ matrix.os }} / Python 3.12
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Some exact-source contracts resolve historical committed subjects.
+          # Keep those objects available without turning machine-specific N6
+          # experiments into a universal PR gate.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+
+      - name: Compile vNext sources
+        run: python -c "import pathlib, py_compile; [py_compile.compile(str(p), doraise=True) for p in pathlib.Path('bdb_vnext').glob('*.py')]"
+
+      - name: Validate JSON schemas
+        shell: python {0}
+        run: |
+          import json
+          from pathlib import Path
+          for path in Path('schemas').glob('bdb-vnext-*.schema.json'):
+              json.loads(path.read_text(encoding='utf-8'))
+          print('vNext schemas parse as JSON')
+
+      - name: Run M11a/M1b focused gate when present
+        shell: python {0}
+        run: |
+          import subprocess
+          from pathlib import Path
+          tests = [
+              'tests/test_vnext_bootstrap.py',
+              'tests/test_m11a_bootstrap_slots.py',
+              'tests/test_m11a_prepared_activation.py',
+          ]
+          existing = [item for item in tests if Path(item).is_file()]
+          if existing:
+              raise SystemExit(subprocess.call(['python', '-m', 'pytest', '-q', *existing]))
+
+      - name: Run M9b/M3 portable regression gate
+        run: >-
+          python -m pytest -q
+          tests/test_m9b_activation.py
+          tests/test_m9b_native_host.py
+          tests/test_m9b_browser_bundle.py
+          tests/test_vnext_m3a_submission.py
+          tests/test_vnext_m3b_browser_admission.py
+          tests/test_vnext_m3c_admission.py
+
+      - name: Explain excluded platform experiments
+        shell: python {0}
+        run: |
+          print(
+              'PASS: portable PR gate complete. '
+              'Historical benchmark suites, local-path N6 engineering pilots, '
+              'Browser runtime harnesses, and destructive/platform fault experiments '
+              'belong to their dedicated workflows and are not universal PR blockers.'
+          )
