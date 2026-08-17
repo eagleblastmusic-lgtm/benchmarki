@@ -48,7 +48,7 @@ def _stage(tmp_path: Path):
     runtime = tmp_path / "runtime"
     legacy = tmp_path / "legacy"
     bootstrap = tmp_path / "ProgramData" / "BartoszDevBridge-Next" / "bootstrap"
-    plan = stage_client_plan(
+    result = stage_client_plan(
         runtime_root=runtime,
         legacy_runtime_root=legacy,
         bootstrap_authority_root=bootstrap,
@@ -56,18 +56,21 @@ def _stage(tmp_path: Path):
         native_host_executable=_native_executable(),
         source_head=HEAD,
         source_tree=TREE,
-    )["plan"]
-    return runtime, plan
+    )
+    observation = dict(result["browser"])
+    observation.pop("bundle_digest")
+    return runtime, result["plan"], observation
 
 
 def test_installed_native_host_accepts_real_chrome_argv_binary_frame_and_records_witness(tmp_path: Path) -> None:
-    runtime, plan = _stage(tmp_path)
+    runtime, plan, observation = _stage(tmp_path)
     request = {
         "schema": M9B_NATIVE_REQUEST_SCHEMA,
         "request_id": "process-handshake-1",
         "action": "handshake",
         "protocol_generation": PROTOCOL_GENERATION,
         "browser_extension_id": BROWSER_EXTENSION_ID,
+        "browser_observation": observation,
     }
     completed = subprocess.run(
         [
@@ -95,11 +98,12 @@ def test_installed_native_host_accepts_real_chrome_argv_binary_frame_and_records
         expected_client_plan_sha256=plan["client_plan_sha256"],
     )
     assert witness["verification_sha256"] == response["client_verification_sha256"]
+    assert witness["browser_bundle_digest"] == plan["browser_bundle_digest"]
     assert witness["production_activation_performed"] is False
 
 
 def test_installed_native_host_rejects_foreign_extension_origin_before_reading_messages(tmp_path: Path) -> None:
-    _runtime, plan = _stage(tmp_path)
+    _runtime, plan, _observation = _stage(tmp_path)
     completed = subprocess.run(
         [
             str(_native_executable()),
