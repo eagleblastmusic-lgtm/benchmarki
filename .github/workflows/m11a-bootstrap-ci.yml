@@ -48,7 +48,7 @@ jobs:
           tests/test_m11a_prepared_activation.py
 
       - name: Validate M11a JSON schemas
-        shell: python
+        shell: python {0}
         run: |
           import json
           from pathlib import Path
@@ -78,7 +78,7 @@ jobs:
           tests/test_vnext_m3c_admission.py
 
       - name: Prove no M11a activation export
-        shell: python
+        shell: python {0}
         run: |
           import bdb_vnext.m11a_bootstrap_slots as slots
           import bdb_vnext.m11a_prepared_activation as prepared
