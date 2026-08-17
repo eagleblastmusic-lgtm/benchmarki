@@ -31,7 +31,7 @@ jobs:
         run: python -c "import pathlib, py_compile; [py_compile.compile(str(p), doraise=True) for p in pathlib.Path('bdb_vnext').glob('*.py')]"
 
       - name: Validate JSON schemas
-        shell: python
+        shell: python {0}
         run: |
           import json
           from pathlib import Path
@@ -40,7 +40,7 @@ jobs:
           print('vNext schemas parse as JSON')
 
       - name: Run M11a/M1b focused gate when present
-        shell: python
+        shell: python {0}
         run: |
           import subprocess
           from pathlib import Path
@@ -64,7 +64,7 @@ jobs:
           tests/test_vnext_m3c_admission.py
 
       - name: Run full vNext test selection
-        shell: python
+        shell: python {0}
         run: |
           import subprocess
           from pathlib import Path
