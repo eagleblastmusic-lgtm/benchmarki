@@ -51,6 +51,7 @@ jobs:
           bdb_vnext/m11c_cutover.py
           bdb_vnext/m11c_cutover_cli.py
           bdb_vnext/m11c_final_prepare.py
+          bdb_vnext/m11c_legacy_recovery.py
           bdb_vnext/m11c_native_artifact.py
           bdb_vnext/m11c_native_artifact_cli.py
           bdb_vnext/m11c_windows_clients.py
@@ -96,14 +97,17 @@ jobs:
           cutover = shutil.which('bdb-vnext-cutover') or shutil.which('bdb-vnext-cutover.exe')
           artifact = shutil.which('bdb-vnext-artifact') or shutil.which('bdb-vnext-artifact.exe')
           final_prepare = shutil.which('bdb-vnext-final-prepare') or shutil.which('bdb-vnext-final-prepare.exe')
+          legacy_recovery = shutil.which('bdb-vnext-legacy-recovery') or shutil.which('bdb-vnext-legacy-recovery.exe')
           assert native, 'installed bdb-vnext-native-host entrypoint is missing'
           assert cutover, 'installed bdb-vnext-cutover entrypoint is missing'
           assert artifact, 'installed bdb-vnext-artifact entrypoint is missing'
           assert final_prepare, 'installed bdb-vnext-final-prepare entrypoint is missing'
+          assert legacy_recovery, 'installed bdb-vnext-legacy-recovery entrypoint is missing'
           print(native)
           print(cutover)
           print(artifact)
           print(final_prepare)
+          print(legacy_recovery)
 
       - name: Run M11a + M9b + M3c regression
         run: >-
@@ -122,6 +126,7 @@ jobs:
         run: |
           import bdb_vnext.m11c_cutover as cutover
           import bdb_vnext.m11c_final_prepare as final_prepare
+          import bdb_vnext.m11c_legacy_recovery as legacy_recovery
           import bdb_vnext.m9b_activation as client_gate
           assert 'apply_windows_cutover' in cutover.__all__
           assert '_apply_cutover' not in cutover.__all__
@@ -133,4 +138,9 @@ jobs:
           assert '_finalize_bootstrap_client_gate' not in client_gate.__all__
           assert not hasattr(final_prepare, 'apply_windows_cutover')
           assert not any(name.startswith('activate') or name.startswith('apply') for name in final_prepare.__all__)
+          assert not hasattr(legacy_recovery, 'apply_windows_cutover')
+          assert not any(
+              name.startswith(('activate', 'apply', 'register', 'install', 'disable'))
+              for name in legacy_recovery.__all__
+          )
           print('PASS: External Bootstrap is the only exported production cutover surface')
