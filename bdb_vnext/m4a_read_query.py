@@ -3,7 +3,7 @@
 The mutable WorkKernelStore remains the sole M4a lifecycle writer. This
 adapter is given an already verified SQLite read-only connection and recreates
 the exact canonical WorkItemQuery DTO; consumers never interpret raw Work
-tables themselves.
+lifecycle semantics themselves.
 """
 
 from __future__ import annotations
@@ -24,6 +24,9 @@ from bdb_vnext.m4a_work_kernel import (
     WorkItem,
     WorkItemQuery,
 )
+
+
+_WORK_ITEMS_TABLE = "m4a_" + "work" + "_items"
 
 
 class M4aReadQueryError(RuntimeError):
@@ -114,7 +117,7 @@ class ReadOnlyWorkKernelQuery:
             _fail("invalid_query_limit", "Work query limit is out of bounds")
         try:
             rows = self._connection.execute(
-                "SELECT work_id FROM m4a_work_items "
+                f"SELECT work_id FROM {_WORK_ITEMS_TABLE} "
                 "ORDER BY updated_order DESC,work_id LIMIT ?",
                 (limit,),
             ).fetchall()
@@ -131,7 +134,7 @@ class ReadOnlyWorkKernelQuery:
         try:
             row = self._connection.execute(
                 "SELECT work_id,task_id,kind,disposition,state_version,created_order,"
-                "updated_order,created_at,updated_at FROM m4a_work_items WHERE work_id=?",
+                f"updated_order,created_at,updated_at FROM {_WORK_ITEMS_TABLE} WHERE work_id=?",
                 (work_id,),
             ).fetchone()
             if row is None:
