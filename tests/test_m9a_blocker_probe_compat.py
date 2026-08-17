@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 from bdb_vnext.m9a_blocker_probe_compat import _promoter_observation, _receipt_shape
@@ -24,6 +26,22 @@ def promotion_receipt(*, event_seq: int | None = None, session: str = "session-a
     if event_seq is not None:
         value["repository_event_seq"] = event_seq
     return value
+
+
+def test_cli_wrapper_can_run_directly_from_scripts_path() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "scripts" / "run_m9a_blocker_probe_compat.py"
+
+    completed = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "source-compatible read-only M9a legacy blocker probe" in completed.stdout
 
 
 def test_native_receipt_store_accepts_missing_submission_reservations(tmp_path: Path) -> None:
