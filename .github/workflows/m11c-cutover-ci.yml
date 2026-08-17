@@ -83,12 +83,17 @@ jobs:
           tests/test_m9b_browser_bundle.py
           tests/test_vnext_m3c_admission.py
 
-      - name: Prove production apply is Windows/operator scoped
+      - name: Prove sole production activation surface
         shell: python {0}
         run: |
           import bdb_vnext.m11c_cutover as cutover
+          import bdb_vnext.m9b_activation as client_gate
           assert 'apply_windows_cutover' in cutover.__all__
           assert '_apply_cutover' not in cutover.__all__
           assert 'prepare_windows_cutover_plan' in cutover.__all__
           assert cutover.M11C_ACTIVATION_AUTHORITY == 'm11c-external-bootstrap'
-          print('M11c external Bootstrap is the only exported production cutover surface')
+          assert not hasattr(client_gate, 'activate')
+          assert not hasattr(client_gate, 'finalize_interrupted_activation')
+          assert '_begin_bootstrap_client_gate' not in client_gate.__all__
+          assert '_finalize_bootstrap_client_gate' not in client_gate.__all__
+          print('PASS: External Bootstrap is the only exported production cutover surface')
