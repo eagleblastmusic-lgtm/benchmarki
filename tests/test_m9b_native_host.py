@@ -8,7 +8,8 @@ from pathlib import Path
 import pytest
 
 from bdb_vnext.composition import BROWSER_EXTENSION_ID, GENERATION_ID, NATIVE_HOST_NAME, PROTOCOL_GENERATION
-from bdb_vnext.m9b_activation import activate, record_clients_verified
+import bdb_vnext.m9b_activation as m9b
+from bdb_vnext.m9b_activation import record_clients_verified
 from bdb_vnext.m9b_native_host import (
     M9B_NATIVE_CONFIG_SCHEMA,
     M9B_NATIVE_REQUEST_SCHEMA,
@@ -162,10 +163,14 @@ def test_runtime_local_m9b_active_alone_cannot_open_production_route(tmp_path: P
         native_manifest_digest=NATIVE_DIGEST,
         activation_id="m9b-native-negative",
     )
-    activate(
+    m9b._begin_bootstrap_client_gate(
         config.runtime_root,
         expected_activation_id=verified.activation_id,
-        enable_canonical_intake=lambda: None,
+    )
+    m9b._finalize_bootstrap_client_gate(
+        config.runtime_root,
+        expected_activation_id=verified.activation_id,
+        canonical_intake_is_enabled=lambda: True,
     )
     opened = False
 
