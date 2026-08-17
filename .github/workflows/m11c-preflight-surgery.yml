@@ -1,0 +1,140 @@
+name: M11c one-shot preflight ordering repair
+
+on:
+  push:
+    branches: [agent/m11c-final-cutover-source]
+    paths:
+      - '.github/workflows/m11c-preflight-surgery.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.event.head_commit.message == 'M11c: stage exact public apply preflight ordering repair'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/m11c-final-cutover-source
+          fetch-depth: 0
+
+      - name: Replace only the public Windows apply boundary
+        shell: python {0}
+        run: |
+          from pathlib import Path
+          import re
+
+          path = Path('bdb_vnext/m11c_cutover.py')
+          source = path.read_text(encoding='utf-8')
+          replacement = '''def apply_windows_cutover(
+              *,
+              authority_root: str | Path,
+              cutover_id: str,
+              expected_plan_sha256: str,
+              operator_approved: bool,
+          ) -> dict[str, Any]:
+              """The only production-scoped M11c effect entrypoint; never runs off Windows."""
+
+              if os.name != "nt":
+                  _fail("windows_required", "production M11c cutover requires Windows")
+              if operator_approved is not True:
+                  _fail("operator_approval_required", "M11c cutover requires explicit operator approval")
+
+              authority = _absolute_path(authority_root, field="authority_root")
+              checked_cutover_id = _check_id(cutover_id, "cutover_id")
+              expected = _check_digest(expected_plan_sha256, "expected_plan_sha256")
+              plan = _load_plan(authority, checked_cutover_id)
+              if plan["cutover_plan_sha256"] != expected:
+                  _fail("cutover_plan_stale", "operator approval is bound to a different cutover plan")
+
+              runtime = _absolute_path(plan["runtime_root"], field="runtime_root")
+              legacy = _absolute_path(plan["legacy_runtime_root"], field="legacy_runtime_root")
+              try:
+                  require_client_verification(
+                      runtime_root=runtime,
+                      expected_client_plan_sha256=plan["client_plan_sha256"],
+                  )
+              except M11cClientError as exc:
+                  raise M11cCutoverError(exc.code, str(exc)) from exc
+
+              observed = observe_bootstrap_activation(authority_root=authority)
+              if observed["status"] == "PREPARED":
+                  prepared_query = query_prepared_activation(
+                      authority_root=authority,
+                      preparation_id=plan["preparation_id"],
+                  )
+                  prepared = prepared_query["prepared"]
+                  if (
+                      prepared["preparation_sha256"] != plan["preparation_sha256"]
+                      or prepared["slot_binding"] != plan["slot_binding"]
+                  ):
+                      _fail("prepared_activation_stale", "M11a preparation differs from the approved cutover plan")
+                  backup = verify_backup(prepared["backup"]["path"])
+                  if backup.manifest_sha256 != prepared["backup"]["manifest_sha256"]:
+                      _fail("prepared_backup_stale", "prepared backup identity differs")
+              elif observed["status"] == "ACTIVE":
+                  require_bootstrap_active(authority, expected_source_head=plan["source_head"])
+              else:
+                  _fail("preactivation_state_required", "M11c cutover requires PREPARED or exact ACTIVE state")
+
+              program_data = os.environ.get("PROGRAMDATA")
+              if not program_data:
+                  _fail("programdata_unavailable", "PROGRAMDATA is required for production M11c")
+              witness = build_windows_tcb_witness(
+                  authority_root=authority,
+                  program_data=program_data,
+                  runtime_root=runtime,
+                  legacy_runtime_root=legacy,
+              )
+              if _validate_tcb_witness(
+                  witness,
+                  authority=authority,
+                  runtime=runtime,
+                  legacy=legacy,
+              ) != plan["tcb_witness_sha256"]:
+                  _fail("tcb_witness_stale", "current Windows TCB differs from the approved plan")
+
+              try:
+                  routes = observe_windows_native_routes(runtime_root=runtime)
+                  if routes["target_conflict"] or not routes["target_registered"]:
+                      _fail("target_native_route_unverified", "exact vNext Native route is not registered")
+                  disable_windows_legacy_native_route(runtime_root=runtime)
+              except M11cClientError as exc:
+                  raise M11cCutoverError(exc.code, str(exc)) from exc
+
+              return _apply_cutover(
+                  authority_root=authority,
+                  cutover_id=checked_cutover_id,
+                  expected_plan_sha256=expected,
+                  operator_approved=True,
+                  tcb_witness=witness,
+              )
+          '''
+
+          pattern = r'def apply_windows_cutover\([\s\S]*?\n\n__all__ ='
+          updated, count = re.subn(pattern, replacement + '\n\n__all__ =', source, count=1)
+          assert count == 1, f'expected one public apply replacement, observed {count}'
+          path.write_text(updated, encoding='utf-8', newline='\n')
+
+      - name: Verify source surgery
+        run: |
+          python -m py_compile bdb_vnext/m11c_cutover.py
+          python - <<'PY'
+          from pathlib import Path
+          source = Path('bdb_vnext/m11c_cutover.py').read_text(encoding='utf-8')
+          apply = source.split('def apply_windows_cutover(', 1)[1].split('__all__ =', 1)[0]
+          assert apply.index('cutover_plan_stale') < apply.index('build_windows_tcb_witness')
+          assert apply.index('require_client_verification') < apply.index('build_windows_tcb_witness')
+          assert apply.index('verify_backup') < apply.index('disable_windows_legacy_native_route')
+          assert apply.index('build_windows_tcb_witness') < apply.index('disable_windows_legacy_native_route')
+          PY
+
+      - name: Commit deterministic repair and remove one-shot workflow
+        run: |
+          git config user.name "bdb-vnext-ci"
+          git config user.email "bdb-vnext-ci@users.noreply.github.com"
+          git rm .github/workflows/m11c-preflight-surgery.yml
+          git add bdb_vnext/m11c_cutover.py
+          git commit -m "M11c: preflight all gates before Native route disable"
+          git push origin HEAD:agent/m11c-final-cutover-source
