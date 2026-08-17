@@ -27,6 +27,7 @@ bdb-vnext-bootstrap = "bdb_vnext.bootstrap:main"
 bdb-vnext-bootstrap-admin = "bdb_vnext.m11a_bootstrap_admin:main"
 bdb-vnext-native-host = "bdb_vnext.m9b_native_host:main"
 bdb-vnext-cutover = "bdb_vnext.m11c_cutover_cli:main"
+bdb-vnext-artifact = "bdb_vnext.m11c_native_artifact_cli:main"
 
 [tool.setuptools.packages.find]
 include = [
