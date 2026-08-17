@@ -7,10 +7,10 @@ independent gates to agree:
 2. the M9b Browser/Native client gate is ACTIVE (subordinate route gate), and
 3. the canonical M3c intake switch is enabled (internal writer gate).
 
-Chrome also supplies the caller extension origin on the Native Messaging
-process command line. A successful handshake from the pinned vNext origin may
-publish a bounded M11c client-verification observation in the runtime root; it
-is evidence only and never an activation authority.
+Chrome supplies the caller extension origin on the Native Messaging process
+command line. A successful handshake from that pinned origin may publish a
+bounded M11c client-verification observation only when the Browser also proves
+its exact running packaged bytes match the staged client plan.
 """
 
 from __future__ import annotations
@@ -267,10 +267,14 @@ def handle_message(
             "legacy_spool": False,
         }
         if caller_origin is not None:
+            observation = message.get("browser_observation")
+            if not isinstance(observation, Mapping):
+                _fail("browser_runtime_observation_required", "Chrome handshake must prove exact running Browser package bytes")
             try:
                 verification = record_browser_launch_verification(
                     runtime_root=config.runtime_root,
                     caller_origin=_validate_caller_origin(caller_origin) or "",
+                    browser_observation=observation,
                 )
             except M11cClientError as exc:
                 raise M9bNativeError(exc.code, str(exc)) from exc
