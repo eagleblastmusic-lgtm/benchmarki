@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 import bdb_vnext.m11c_cutover_cli as cli
+from bdb_vnext.bootstrap import BootstrapError
+from bdb_vnext.m11c_windows_clients import M11cClientError
 
 
 PLAN_SHA = "sha256:" + "a" * 64
@@ -69,6 +71,51 @@ def test_stage_clients_requires_verified_artifact_and_never_activates(monkeypatc
     output = json.loads(capsys.readouterr().out)
     assert output["status"] == "STAGED_NOT_ACTIVATED"
     assert output["native_artifact_manifest_sha256"] == artifact.manifest_sha256
+    assert output["production_activation_performed"] is False
+
+
+def test_client_status_missing_browser_witness_is_waiting_not_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "query_client_plan", lambda **_: {"plan": {"client_plan_sha256": PLAN_SHA}})
+    monkeypatch.setattr(
+        cli,
+        "require_client_verification",
+        lambda **_: (_ for _ in ()).throw(BootstrapError("missing_file", "m11c_client_verification is missing")),
+    )
+    monkeypatch.setattr(
+        cli,
+        "observe_windows_native_routes",
+        lambda **_: {"target_registered": True, "legacy_route_present": True},
+    )
+
+    code = cli.main(["client-status", "--runtime-root", "C:/runtime"])
+
+    assert code == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "WAITING_FOR_BROWSER_VERIFICATION"
+    assert output["browser_verification"] is None
+    assert output["production_activation_performed"] is False
+
+
+def test_client_status_does_not_mask_invalid_browser_verification(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "query_client_plan", lambda **_: {"plan": {"client_plan_sha256": PLAN_SHA}})
+    monkeypatch.setattr(
+        cli,
+        "require_client_verification",
+        lambda **_: (_ for _ in ()).throw(M11cClientError("client_plan_mismatch", "browser witness differs")),
+    )
+
+    code = cli.main(["client-status", "--runtime-root", "C:/runtime"])
+
+    assert code == 2
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "BLOCKED"
+    assert output["error_code"] == "client_plan_mismatch"
     assert output["production_activation_performed"] is False
 
 
