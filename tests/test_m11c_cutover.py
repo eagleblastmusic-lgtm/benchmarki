@@ -24,7 +24,12 @@ from bdb_vnext.m11a_windows_tcb import (
     default_windows_authority_root,
 )
 from bdb_vnext.m3c_admission import CanonicalVNextAdmissionAuthority
-from bdb_vnext.m9b_activation import read_activation
+from bdb_vnext.m9b_activation import (
+    M9bActivationError,
+    activate,
+    read_activation,
+    record_clients_verified,
+)
 
 
 HEAD = "a" * 40
@@ -277,6 +282,53 @@ def test_apply_promotes_same_external_pointer_and_closes_all_three_gates(tmp_pat
         assert authority.admission_enabled is True
     finally:
         authority.close()
+
+
+def test_apply_resumes_same_cutover_after_crash_window_left_client_gate_activating(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    plan = _plan(fixture)
+    verified = record_clients_verified(
+        fixture["runtime"],
+        m9a_report=_m9a_report(),
+        source_head=HEAD,
+        source_tree=TREE,
+        browser_bundle_digest=BROWSER_DIGEST,
+        native_manifest_digest=NATIVE_DIGEST,
+        activation_id="m9b-final-1",
+    )
+    authority = CanonicalVNextAdmissionAuthority.open(fixture["runtime"], legacy_root=fixture["legacy"])
+    try:
+        authority.disable_intake()
+
+        def crash_after_intake() -> None:
+            authority.enable_intake()
+            raise RuntimeError("simulated crash before external slot switch")
+
+        with pytest.raises(M9bActivationError):
+            activate(
+                fixture["runtime"],
+                expected_activation_id=verified.activation_id,
+                enable_canonical_intake=crash_after_intake,
+            )
+        assert authority.admission_enabled is True
+    finally:
+        authority.close()
+
+    interrupted = read_activation(fixture["runtime"])
+    assert interrupted is not None and interrupted.state == "ACTIVATING"
+    assert m11c.observe_bootstrap_activation(authority_root=fixture["authority"])["status"] == "PREPARED"
+
+    resumed = m11c._apply_cutover(
+        authority_root=fixture["authority"],
+        cutover_id="final-1",
+        expected_plan_sha256=plan["cutover_plan_sha256"],
+        operator_approved=True,
+        tcb_witness=fixture["witness"],
+    )
+
+    assert resumed["status"] == "ACTIVE"
+    assert read_activation(fixture["runtime"]).state == "ACTIVE"  # type: ignore[union-attr]
+    assert m11c.require_bootstrap_active(fixture["authority"])["status"] == "ACTIVE"
 
 
 def test_apply_is_idempotent_after_exact_completed_cutover(tmp_path: Path) -> None:
