@@ -209,7 +209,7 @@ def _off_snapshot(root: Path) -> ControlCenterSnapshot:
 def _read_only_actions() -> tuple[ActionPredicate, ...]:
     return tuple(
         ActionPredicate(action=action)
-        for action in ("resume", "apply_effect", "publish", "activate", "deploy")
+        for action in ("resume", "apply_effect", "publish", "activate")
     )
 
 

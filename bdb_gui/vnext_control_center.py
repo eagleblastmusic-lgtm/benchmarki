@@ -86,7 +86,7 @@ class VNextControlCenterWindow(QMainWindow):
 
         actions = QHBoxLayout()
         self._action_buttons: list[QPushButton] = []
-        for label in ("Resume", "Apply effect", "Publish", "Activate", "Deploy"):
+        for label in ("Resume", "Apply effect", "Publish", "Activate"):
             button = QPushButton(label)
             button.setEnabled(False)
             button.setToolTip("Unavailable: cc1_read_only")
