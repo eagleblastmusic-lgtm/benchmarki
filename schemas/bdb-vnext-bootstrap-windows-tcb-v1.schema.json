@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:bdb:schema:vnext-bootstrap-windows-tcb:v1",
+  "title": "BDB vNext Windows Bootstrap trust-boundary witness v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "runtime_id",
+    "generation_id",
+    "authority_boundary",
+    "topology",
+    "acl",
+    "candidate_token",
+    "candidate_may_write_authority",
+    "activation_operation_available",
+    "activation_deferred_to",
+    "witness_sha256"
+  ],
+  "properties": {
+    "schema": {"const": "bdb-vnext-bootstrap-windows-tcb-v1"},
+    "runtime_id": {"const": "devmaster.bdb.vnext.runtime"},
+    "generation_id": {"const": "bdb-vnext-g1"},
+    "authority_boundary": {"const": "external_programdata_bootstrap"},
+    "topology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authority_root", "runtime_root", "legacy_runtime_root"],
+      "properties": {
+        "authority_root": {"type": "string", "minLength": 1},
+        "runtime_root": {"type": "string", "minLength": 1},
+        "legacy_runtime_root": {"type": "string", "minLength": 1}
+      }
+    },
+    "acl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "owner_sid", "inheritance_protected", "entries"],
+      "properties": {
+        "schema": {"const": "bdb-vnext-bootstrap-windows-acl-v1"},
+        "owner_sid": {"enum": ["S-1-5-18", "S-1-5-32-544"]},
+        "inheritance_protected": {"const": true},
+        "entries": {
+          "type": "array",
+          "minItems": 3,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["sid", "type", "rights", "inherited"],
+            "properties": {
+              "sid": {"type": "string", "pattern": "^S-[0-9-]+$"},
+              "type": {"enum": ["Allow", "Deny"]},
+              "rights": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "uniqueItems": true
+              },
+              "inherited": {"const": false}
+            }
+          }
+        }
+      }
+    },
+    "candidate_token": {"const": "STANDARD_USER_NON_ELEVATED"},
+    "candidate_may_write_authority": {"const": false},
+    "activation_operation_available": {"const": false},
+    "activation_deferred_to": {"const": "M11c"},
+    "witness_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}

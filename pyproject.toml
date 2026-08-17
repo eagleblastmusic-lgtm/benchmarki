@@ -24,6 +24,7 @@ bdb-control-center = "bdb_gui.app:main"
 bdb-inventory = "bdb_bridge.runtime_inventory:main"
 bdb-vnext-manifest = "bdb_vnext.composition:main"
 bdb-vnext-bootstrap = "bdb_vnext.bootstrap:main"
+bdb-vnext-bootstrap-admin = "bdb_vnext.m11a_bootstrap_admin:main"
 
 [tool.setuptools.packages.find]
 include = [
