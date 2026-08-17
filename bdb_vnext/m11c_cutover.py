@@ -1,16 +1,16 @@
 """M11c external Bootstrap cutover authority for BDB Next.
 
-M11a deliberately cannot promote CANDIDATE.  M11c is the one source module
+M11a deliberately cannot promote CANDIDATE. M11c is the one source module
 allowed to replace the external ``slot-state.json`` pre-activation v1 document
-with the post-cutover v2 document.  The same ProgramData Bootstrap root remains
+with the post-cutover v2 document. The same ProgramData Bootstrap root remains
 the physical activation authority; no second ACTIVE pointer is introduced.
 
 The M9b activation record is only a subordinate Browser/Native client gate.
 Production admission must require both the M11c external ACTIVE state and the
-M9b ACTIVE gate, plus the canonical M3c intake switch.  Therefore writing an
-M9b record alone never grants production authority.
+M9b ACTIVE gate, plus the canonical M3c intake switch. Writing an M9b record
+alone therefore never grants production authority.
 
-Importing this module is inert.  The public effectful entrypoint is explicitly
+Importing this module is inert. The public effectful entrypoint is explicitly
 Windows/operator scoped and re-observes the real ProgramData ACL before any
 cutover write.
 """
@@ -21,13 +21,12 @@ import hashlib
 import os
 import re
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, NoReturn
 
 from bdb_shared.evidence import canonical_json_bytes, semantic_digest
 from bdb_vnext.bootstrap import (
-    BootstrapError,
     BootstrapLock,
     _absolute_path,
     _load_json,
@@ -44,22 +43,18 @@ from bdb_vnext.m11a_bootstrap_slots import (
     _publish,
     _reobserve,
     _replace_state,
-    _state,
     _state_path,
     _supports,
     query_slot_authority,
 )
 from bdb_vnext.m11a_prepared_activation import query_prepared_activation
-from bdb_vnext.m11a_windows_tcb import (
-    WINDOWS_TCB_SCHEMA,
-    build_windows_tcb_witness,
-)
+from bdb_vnext.m11a_windows_tcb import WINDOWS_TCB_SCHEMA, build_windows_tcb_witness
 from bdb_vnext.m3c_admission import CanonicalVNextAdmissionAuthority
 from bdb_vnext.m9b_activation import (
     ActivationRecord,
     M9bActivationError,
-    activate as activate_client_gate,
-    finalize_interrupted_activation,
+    _begin_bootstrap_client_gate,
+    _finalize_bootstrap_client_gate,
     read_activation,
     record_clients_verified,
     validate_m9a_freeze_report,
@@ -527,6 +522,50 @@ def _ensure_client_gate(runtime: Path, plan: Mapping[str, Any]) -> ActivationRec
     return current
 
 
+def _verify_active_health(
+    *,
+    active: Mapping[str, Any],
+    legacy: Path,
+) -> None:
+    active_doc = active["slots"]["ACTIVE"]
+    bundle = inspect_runtime_bundle(
+        active_doc["bundle_root"],
+        expected_role=active_doc["bundle_role"],
+        expected_sha256=active_doc["bundle_sha256"],
+        legacy_runtime_root=legacy,
+    )
+    health = run_health_check(
+        bundle,
+        required_control_schema=active["state"]["required_control_schema"],
+        legacy_runtime_root=legacy,
+        timeout_seconds=10.0,
+    )
+    if health.get("status") != "READY":
+        _fail("active_health_failed", "external ACTIVE bundle is not READY")
+
+
+def _begin_client_gate(runtime: Path, activation_id: str) -> ActivationRecord:
+    try:
+        return _begin_bootstrap_client_gate(runtime, expected_activation_id=activation_id)
+    except M9bActivationError as exc:
+        raise M11cCutoverError(exc.code, str(exc)) from exc
+
+
+def _finalize_client_gate(
+    runtime: Path,
+    activation_id: str,
+    authority: CanonicalVNextAdmissionAuthority,
+) -> ActivationRecord:
+    try:
+        return _finalize_bootstrap_client_gate(
+            runtime,
+            expected_activation_id=activation_id,
+            canonical_intake_is_enabled=lambda: authority.admission_enabled,
+        )
+    except M9bActivationError as exc:
+        raise M11cCutoverError(exc.code, str(exc)) from exc
+
+
 def _apply_cutover(
     *,
     authority_root: str | Path,
@@ -558,12 +597,11 @@ def _apply_cutover(
         try:
             if observed["status"] == "ACTIVE":
                 active = require_bootstrap_active(authority, expected_source_head=plan["source_head"])
+                _verify_active_health(active=active, legacy=legacy)
                 if client_gate.state == "ACTIVATING":
-                    client_gate = finalize_interrupted_activation(
-                        runtime,
-                        expected_activation_id=client_gate.activation_id,
-                        canonical_intake_is_enabled=lambda: m3c.admission_enabled,
-                    )
+                    if m3c.admission_enabled is not True:
+                        _fail("canonical_intake_not_enabled", "external ACTIVE exists but M3c intake is not enabled")
+                    client_gate = _finalize_client_gate(runtime, client_gate.activation_id, m3c)
                 if client_gate.state != "ACTIVE" or m3c.admission_enabled is not True:
                     _fail("cutover_incomplete", "external ACTIVE exists but subordinate gates are not ACTIVE")
                 return {
@@ -590,65 +628,25 @@ def _apply_cutover(
 
             if client_gate.state == "CLIENTS_VERIFIED":
                 m3c.disable_intake()
-
-                def switch_under_client_fence() -> None:
-                    m3c.enable_intake()
-                    promoted = _publish_external_activation(
-                        authority=authority,
-                        plan=plan,
-                        prepared_query=prepared_query,
-                    )
-                    active_doc = promoted["slots"]["ACTIVE"]
-                    bundle = inspect_runtime_bundle(
-                        active_doc["bundle_root"],
-                        expected_role=active_doc["bundle_role"],
-                        expected_sha256=active_doc["bundle_sha256"],
-                        legacy_runtime_root=legacy,
-                    )
-                    run_health_check(
-                        bundle,
-                        required_control_schema=promoted["state"]["required_control_schema"],
-                        legacy_runtime_root=legacy,
-                        timeout_seconds=10.0,
-                    )
-
-                try:
-                    client_gate = activate_client_gate(
-                        runtime,
-                        expected_activation_id=client_gate.activation_id,
-                        enable_canonical_intake=switch_under_client_fence,
-                    )
-                except M9bActivationError as exc:
-                    raise M11cCutoverError(exc.code, str(exc)) from exc
+                client_gate = _begin_client_gate(runtime, client_gate.activation_id)
+                m3c.enable_intake()
+                active = _publish_external_activation(
+                    authority=authority,
+                    plan=plan,
+                    prepared_query=prepared_query,
+                )
+                _verify_active_health(active=active, legacy=legacy)
+                client_gate = _finalize_client_gate(runtime, client_gate.activation_id, m3c)
             elif client_gate.state == "ACTIVATING":
                 if m3c.admission_enabled is not True:
                     m3c.enable_intake()
-                observed = observe_bootstrap_activation(authority_root=authority)
-                if observed["status"] == "PREPARED":
-                    _publish_external_activation(
-                        authority=authority,
-                        plan=plan,
-                        prepared_query=prepared_query,
-                    )
-                active = require_bootstrap_active(authority, expected_source_head=plan["source_head"])
-                active_doc = active["slots"]["ACTIVE"]
-                bundle = inspect_runtime_bundle(
-                    active_doc["bundle_root"],
-                    expected_role=active_doc["bundle_role"],
-                    expected_sha256=active_doc["bundle_sha256"],
-                    legacy_runtime_root=legacy,
+                active = _publish_external_activation(
+                    authority=authority,
+                    plan=plan,
+                    prepared_query=prepared_query,
                 )
-                run_health_check(
-                    bundle,
-                    required_control_schema=active["state"]["required_control_schema"],
-                    legacy_runtime_root=legacy,
-                    timeout_seconds=10.0,
-                )
-                client_gate = finalize_interrupted_activation(
-                    runtime,
-                    expected_activation_id=client_gate.activation_id,
-                    canonical_intake_is_enabled=lambda: m3c.admission_enabled,
-                )
+                _verify_active_health(active=active, legacy=legacy)
+                client_gate = _finalize_client_gate(runtime, client_gate.activation_id, m3c)
             else:
                 _fail("client_gate_state_conflict", "M9b client gate is ACTIVE before external Bootstrap cutover")
 
