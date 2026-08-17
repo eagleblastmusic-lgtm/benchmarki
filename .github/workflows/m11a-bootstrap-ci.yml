@@ -35,15 +35,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
-
       - name: Install test dependencies
         run: python -m pip install --disable-pip-version-check -e ".[dev]"
-
       - name: Compile M11a source
         run: >-
           python -m py_compile
@@ -55,7 +52,6 @@ jobs:
           tests/test_m11a_prepared_activation.py
           tests/test_m11a_windows_tcb.py
           tests/test_m11a_bootstrap_admin.py
-
       - name: Validate M11a JSON schemas
         shell: python {0}
         run: |
@@ -69,19 +65,14 @@ jobs:
           ):
               json.loads(path.read_text(encoding='utf-8'))
               print(f'validated {path}')
-
       - name: Prepare hosted-Windows Bootstrap TCB fixture
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $root = Join-Path $env:RUNNER_TEMP 'BartoszDevBridge-Next\bootstrap'
-          ./scripts/Set-BDBVNextBootstrapAuthorityAcl.ps1 `
-            -Root $root `
-            -Apply `
-            -AllowNonProgramDataForTest
+          ./scripts/Set-BDBVNextBootstrapAuthorityAcl.ps1 -Root $root -Apply -AllowNonProgramDataForTest
           "BDB_VNEXT_TCB_FIXTURE=$root" >> $env:GITHUB_ENV
           "BDB_VNEXT_TCB_PROGRAMDATA=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
-
       - name: Run M11a + M1b gate
         run: >-
           python -m pytest -q
@@ -90,18 +81,18 @@ jobs:
           tests/test_m11a_windows_tcb.py
           tests/test_m11a_bootstrap_admin.py
           tests/test_vnext_bootstrap.py
-
-      - name: Verify installed admin CLI has no activation verb
+      - name: Verify installed admin CLI has pre-staging but no activation verb
         shell: python {0}
         run: |
           import argparse
           import bdb_vnext.m11a_bootstrap_admin as admin
           parser = admin._parser()
           action = next(item for item in parser._actions if isinstance(item, argparse._SubParsersAction))
-          assert set(action.choices) == {'status', 'verify-tcb', 'prepare'}
-          assert 'activate' not in action.choices and 'switch' not in action.choices
-          print('Bootstrap admin entrypoint is installed and M11a has no activation verb')
-
+          expected = {'status', 'verify-tcb', 'initialize', 'stage-candidate', 'discard-candidate', 'prepare'}
+          assert set(action.choices) == expected
+          for forbidden in ('activate', 'switch', 'install', 'start', 'stop'):
+              assert forbidden not in action.choices
+          print('Bootstrap admin has only TCB-gated pre-staging verbs; activation remains unavailable')
       - name: Run impacted M9b + M3 regression
         run: >-
           python -m pytest -q
@@ -111,7 +102,6 @@ jobs:
           tests/test_vnext_m3a_submission.py
           tests/test_vnext_m3b_browser_admission.py
           tests/test_vnext_m3c_admission.py
-
       - name: Prove no M11a activation export
         shell: python {0}
         run: |
@@ -123,6 +113,5 @@ jobs:
           assert not hasattr(prepared, 'activate_prepared_candidate')
           assert not hasattr(windows_tcb, 'activate_candidate')
           assert not hasattr(admin, 'activate')
-          query_actions = {'activate_candidate': False}
-          assert query_actions['activate_candidate'] is False
-          print('M11a remains build-only; activation is not exported')
+          assert {'activate_candidate': False}['activate_candidate'] is False
+          print('M11a remains non-activating; final activation is M11c-only')
