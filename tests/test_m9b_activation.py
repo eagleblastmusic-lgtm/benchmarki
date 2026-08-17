@@ -6,11 +6,10 @@ from pathlib import Path
 import pytest
 
 from bdb_shared.evidence import semantic_digest
+import bdb_vnext.m9b_activation as m9b
 from bdb_vnext.m9b_activation import (
     M9bActivationError,
-    activate,
     activation_path,
-    finalize_interrupted_activation,
     read_activation,
     record_clients_verified,
     require_active,
@@ -54,6 +53,13 @@ def _verified(root: Path, *, activation_id: str = "m9b-test-activation"):
     )
 
 
+def test_m9b_no_longer_exports_product_activation_helpers() -> None:
+    assert not hasattr(m9b, "activate")
+    assert not hasattr(m9b, "finalize_interrupted_activation")
+    assert "_begin_bootstrap_client_gate" not in m9b.__all__
+    assert "_finalize_bootstrap_client_gate" not in m9b.__all__
+
+
 def test_missing_activation_is_explicitly_not_active(tmp_path: Path) -> None:
     assert read_activation(tmp_path) is None
     with pytest.raises(M9bActivationError) as exc:
@@ -83,83 +89,46 @@ def test_clients_verified_keeps_writer_and_intake_off(tmp_path: Path) -> None:
     assert record.state == "CLIENTS_VERIFIED"
     assert record.writer_enabled is False
     assert record.intake_enabled is False
-    observed = read_activation(tmp_path)
-    assert observed == record
+    assert read_activation(tmp_path) == record
     with pytest.raises(M9bActivationError) as exc:
         require_active(tmp_path)
     assert exc.value.code == "vnext_not_active"
 
 
-def test_activation_callback_runs_behind_activating_external_fence(tmp_path: Path) -> None:
+def test_private_bootstrap_begin_keeps_route_fail_closed(tmp_path: Path) -> None:
     record = _verified(tmp_path)
-    observed_during_callback: list[str] = []
-
-    def enable() -> None:
-        current = read_activation(tmp_path)
-        assert current is not None
-        observed_during_callback.append(current.state)
-        with pytest.raises(M9bActivationError) as exc:
-            require_active(tmp_path)
-        assert exc.value.code == "vnext_not_active"
-
-    active = activate(
+    activating = m9b._begin_bootstrap_client_gate(
         tmp_path,
         expected_activation_id=record.activation_id,
-        enable_canonical_intake=enable,
     )
-    assert observed_during_callback == ["ACTIVATING"]
-    assert active.state == "ACTIVE"
-    assert active.writer_enabled is True
-    assert active.intake_enabled is True
-    assert require_active(tmp_path) == active
-
-
-def test_enable_failure_leaves_external_route_fail_closed_in_activating(tmp_path: Path) -> None:
-    record = _verified(tmp_path)
-
-    def fail() -> None:
-        raise RuntimeError("simulated intake failure")
-
+    assert activating.state == "ACTIVATING"
+    assert activating.writer_enabled is False
+    assert activating.intake_enabled is False
     with pytest.raises(M9bActivationError) as exc:
-        activate(
-            tmp_path,
-            expected_activation_id=record.activation_id,
-            enable_canonical_intake=fail,
-        )
-    assert exc.value.code == "canonical_intake_enable_failed"
-    current = read_activation(tmp_path)
-    assert current is not None
-    assert current.state == "ACTIVATING"
-    assert current.writer_enabled is False
-    assert current.intake_enabled is False
-    with pytest.raises(M9bActivationError):
         require_active(tmp_path)
+    assert exc.value.code == "vnext_not_active"
 
 
-def test_interrupted_activation_can_finalize_only_after_intake_is_observed_enabled(tmp_path: Path) -> None:
+def test_private_bootstrap_finalize_requires_observed_m3c_intake(tmp_path: Path) -> None:
     record = _verified(tmp_path)
-
-    with pytest.raises(M9bActivationError):
-        activate(
-            tmp_path,
-            expected_activation_id=record.activation_id,
-            enable_canonical_intake=lambda: (_ for _ in ()).throw(RuntimeError("crash")),
-        )
+    m9b._begin_bootstrap_client_gate(tmp_path, expected_activation_id=record.activation_id)
 
     with pytest.raises(M9bActivationError) as exc:
-        finalize_interrupted_activation(
+        m9b._finalize_bootstrap_client_gate(
             tmp_path,
             expected_activation_id=record.activation_id,
             canonical_intake_is_enabled=lambda: False,
         )
     assert exc.value.code == "canonical_intake_not_enabled"
 
-    active = finalize_interrupted_activation(
+    active = m9b._finalize_bootstrap_client_gate(
         tmp_path,
         expected_activation_id=record.activation_id,
         canonical_intake_is_enabled=lambda: True,
     )
     assert active.state == "ACTIVE"
+    assert active.writer_enabled is True
+    assert active.intake_enabled is True
     assert require_active(tmp_path) == active
 
 
