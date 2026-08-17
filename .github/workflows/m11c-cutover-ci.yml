@@ -75,7 +75,15 @@ jobs:
               print(f'validated {path}')
 
       - name: Run complete M11c source and hardening gate
-        run: python -m pytest -q tests/test_m11c_*.py
+        shell: python {0}
+        run: |
+          from pathlib import Path
+          import subprocess
+          import sys
+          files = sorted(Path('tests').glob('test_m11c_*.py'))
+          assert files, 'M11c hardening suite is empty'
+          print('\n'.join(str(path) for path in files))
+          subprocess.run([sys.executable, '-m', 'pytest', '-q', *map(str, files)], check=True)
 
       - name: Prove installed vNext operator entrypoints exist
         shell: python {0}
