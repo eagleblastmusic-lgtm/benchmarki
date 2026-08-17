@@ -95,6 +95,12 @@ evidence. In particular, absence of a currently visible OS process does not
 retroactively prove a Journal writer candidate is harmless, and old unresolved
 rows are not bulk-classified merely because they are old.
 
+The next bounded local observation should reuse the already-created sanitized
+R0a reports. It should read only source `errors`, Journal writer-candidate
+facts, spool entry identities and unresolved counts needed to satisfy the
+multi-profile inspection obligations. It should not rerun or mutate the legacy
+stores merely to obtain data already present in the reports.
+
 ## Archive candidate
 
 The preflight checks only whether the evidence set contains complete observed
