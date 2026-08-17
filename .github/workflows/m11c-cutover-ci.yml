@@ -49,6 +49,7 @@ jobs:
         run: >-
           python -m py_compile
           bdb_vnext/m11c_cutover.py
+          bdb_vnext/m11c_cutover_cli.py
           bdb_vnext/m11c_windows_clients.py
           bdb_vnext/m11a_bootstrap_slots.py
           bdb_vnext/m11a_prepared_activation.py
@@ -56,11 +57,9 @@ jobs:
           bdb_vnext/m9b_activation.py
           bdb_vnext/m9b_native_host.py
           bdb_vnext/m3c_admission.py
-          tests/test_m11c_cutover.py
-          tests/test_m11c_windows_apply.py
-          tests/test_m11c_windows_clients.py
-          tests/test_m9b_activation.py
-          tests/test_m9b_native_host.py
+
+      - name: Validate Browser service worker syntax
+        run: node --check browser_extension_vnext/transport_worker.js
 
       - name: Validate M11c schemas
         shell: python {0}
@@ -75,20 +74,19 @@ jobs:
               json.loads(path.read_text(encoding='utf-8'))
               print(f'validated {path}')
 
-      - name: Run M11c source cutover gate
-        run: python -m pytest -q tests/test_m11c_cutover.py tests/test_m11c_windows_clients.py
+      - name: Run complete M11c source and hardening gate
+        run: python -m pytest -q tests/test_m11c_*.py
 
-      - name: Run public Windows ProgramData/ACL apply proof
-        if: runner.os == 'Windows'
-        run: python -m pytest -q tests/test_m11c_windows_apply.py
-
-      - name: Prove installed vNext Native Host entrypoint exists
+      - name: Prove installed vNext operator entrypoints exist
         shell: python {0}
         run: |
           import shutil
-          path = shutil.which('bdb-vnext-native-host') or shutil.which('bdb-vnext-native-host.exe')
-          assert path, 'installed bdb-vnext-native-host entrypoint is missing'
-          print(path)
+          native = shutil.which('bdb-vnext-native-host') or shutil.which('bdb-vnext-native-host.exe')
+          cutover = shutil.which('bdb-vnext-cutover') or shutil.which('bdb-vnext-cutover.exe')
+          assert native, 'installed bdb-vnext-native-host entrypoint is missing'
+          assert cutover, 'installed bdb-vnext-cutover entrypoint is missing'
+          print(native)
+          print(cutover)
 
       - name: Run M11a + M9b + M3c regression
         run: >-
