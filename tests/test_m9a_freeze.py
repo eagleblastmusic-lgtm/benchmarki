@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from bdb_vnext.m9a_freeze import M9aFreezeError, ProfileSpec, _parse_profile_spec, _validate_probe
+from bdb_vnext.m9a_freeze import (
+    M9aFreezeError,
+    ProfileSpec,
+    _native_registry_suffixes,
+    _parse_profile_spec,
+    _validate_probe,
+)
 
 
 DIGEST = "sha256:" + "1" * 64
@@ -97,6 +103,13 @@ def test_unknown_spool_class_blocks_freeze() -> None:
 
     with pytest.raises(M9aFreezeError, match="unsafe spool classes"):
         _validate_probe(profile, probe)
+
+
+def test_native_registry_suffixes_are_exact() -> None:
+    assert _native_registry_suffixes() == (
+        ("chrome", r"Software\Google\Chrome\NativeMessagingHosts\com.bartosz.dev_bridge"),
+        ("edge", r"Software\Microsoft\Edge\NativeMessagingHosts\com.bartosz.dev_bridge"),
+    )
 
 
 def test_profile_cli_spec_binds_path_and_probe_digest() -> None:
