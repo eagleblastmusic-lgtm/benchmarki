@@ -11,23 +11,51 @@ from bdb_vnext.composition import default_vnext_runtime_root
 
 from .version import APPLICATION_VERSION
 
+
 SMOKE_SCHEMA = "bdb-control-center-smoke-v1"
 
+
 def _default_workspaces_root() -> Path:
-    """Deprecated CLI compatibility only; it is not a CC1 semantic source."""
+    """Legacy compatibility root; it is not a CC1 semantic source."""
+
     local_app_data = os.environ.get("LOCALAPPDATA")
     if local_app_data:
         return Path(local_app_data) / "BartoszDevBridge" / "workspaces"
     return Path.home() / ".local" / "share" / "BartoszDevBridge" / "workspaces"
 
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="BDB Control Center — canonical vNext CC1")
-    parser.add_argument("--runtime-root", default=str(default_vnext_runtime_root()), help="Existing vNext runtime root. CC1 never creates or repairs it.")
-    parser.add_argument("--workspaces-root", default=str(_default_workspaces_root()), help="Deprecated legacy compatibility argument. It is reported only and is never used as a semantic source by CC1.")
-    parser.add_argument("--headless-smoke", action="store_true", help="Run the vNext GUI shell through an offscreen read-only bootstrap and exit")
+    parser.add_argument(
+        "--runtime-root",
+        default=str(default_vnext_runtime_root()),
+        help="Existing vNext runtime root. CC1 never creates or repairs it.",
+    )
+    parser.add_argument(
+        "--workspaces-root",
+        default=str(_default_workspaces_root()),
+        help=(
+            "Legacy compatibility root. It is ignored by the default vNext CC1 path "
+            "and used only with --legacy-control-center."
+        ),
+    )
+    parser.add_argument(
+        "--legacy-control-center",
+        action="store_true",
+        help=(
+            "Explicitly launch the frozen legacy Control Center. This is an operator "
+            "choice, never an automatic fallback from vNext."
+        ),
+    )
+    parser.add_argument(
+        "--headless-smoke",
+        action="store_true",
+        help="Run the selected GUI shell through an offscreen bootstrap and exit",
+    )
     parser.add_argument("--json-out", help="Optional path for the headless smoke report")
     parser.add_argument("--smoke-timeout-ms", type=int, default=15_000)
     return parser
+
 
 def _render_report(report: dict[str, Any], output_path: str | None) -> None:
     report.setdefault("application_version", APPLICATION_VERSION)
@@ -38,47 +66,157 @@ def _render_report(report: dict[str, Any], output_path: str | None) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(rendered + "\n", encoding="utf-8")
 
+
+def _legacy_window(*, args: argparse.Namespace, application: Any, workspaces_root: str) -> Any:
+    """Construct the frozen legacy product only after an explicit CLI opt-in."""
+
+    from .bootstrap import BootstrapService
+    from .operations import ProjectOperationsService
+    from .session_history_window import (
+        SessionProjectControlCenterWindow,
+        SessionTrayProjectControlCenterWindow,
+    )
+    from .tray import TrayController
+
+    tray_controller: TrayController | None = None
+    if args.headless_smoke:
+        window = SessionProjectControlCenterWindow(
+            bootstrap_service=BootstrapService(),
+            operations_service=ProjectOperationsService(),
+            workspaces_root=workspaces_root,
+            auto_load_status=not args.headless_smoke,
+        )
+    else:
+        window = SessionTrayProjectControlCenterWindow(
+            bootstrap_service=BootstrapService(),
+            operations_service=ProjectOperationsService(),
+            workspaces_root=workspaces_root,
+            auto_load_status=not args.headless_smoke,
+        )
+        tray_controller = TrayController(application, window)
+        window.install_tray_controller(tray_controller)
+        tray_controller.start()
+    window._cc1_legacy_tray_controller = tray_controller
+    return window
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if not 1_000 <= args.smoke_timeout_ms <= 120_000:
-        report = {"schema": SMOKE_SCHEMA, "status": "failed", "application_version": APPLICATION_VERSION, "error_code": "invalid_smoke_timeout", "error": "smoke-timeout-ms must be between 1000 and 120000"}
-        _render_report(report, args.json_out); return 2
+        report = {
+            "schema": SMOKE_SCHEMA,
+            "status": "failed",
+            "application_version": APPLICATION_VERSION,
+            "error_code": "invalid_smoke_timeout",
+            "error": "smoke-timeout-ms must be between 1000 and 120000",
+        }
+        _render_report(report, args.json_out)
+        return 2
+
     if args.headless_smoke:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
     try:
         import PySide6
         from PySide6.QtCore import QTimer, qVersion
         from PySide6.QtWidgets import QApplication
+
         from .vnext_control_center import VNextControlCenterWindow
     except ImportError as error:
-        report = {"schema": SMOKE_SCHEMA, "status": "failed", "application_version": APPLICATION_VERSION, "error_code": "pyside6_missing", "error": str(error), "install_hint": 'python -m pip install -e ".[gui]"'}
-        _render_report(report, args.json_out); return 2
+        report = {
+            "schema": SMOKE_SCHEMA,
+            "status": "failed",
+            "application_version": APPLICATION_VERSION,
+            "error_code": "pyside6_missing",
+            "error": str(error),
+            "install_hint": 'python -m pip install -e ".[gui]"',
+        }
+        _render_report(report, args.json_out)
+        return 2
+
     runtime_root = str(Path(args.runtime_root).expanduser().absolute())
     workspaces_root = str(Path(args.workspaces_root).expanduser().resolve(strict=False))
     application = QApplication.instance() or QApplication(["bdb-control-center"])
     application.setApplicationName("BDB Control Center")
     application.setApplicationVersion(APPLICATION_VERSION)
     application.setOrganizationName("Bartosz Dev Bridge")
-    application.setQuitOnLastWindowClosed(True)
-    window = VNextControlCenterWindow(runtime_root=runtime_root)
-    report: dict[str, Any] = {}; timed_out = False
+    application.setQuitOnLastWindowClosed(
+        not (args.legacy_control_center and not args.headless_smoke)
+    )
+
+    if args.legacy_control_center:
+        window = _legacy_window(
+            args=args,
+            application=application,
+            workspaces_root=workspaces_root,
+        )
+    else:
+        window = VNextControlCenterWindow(runtime_root=runtime_root)
+
+    report: dict[str, Any] = {}
+    timed_out = False
+
     def finish_smoke() -> None:
-        if not args.headless_smoke or report: return
+        if not args.headless_smoke or report:
+            return
         report.update(window.smoke_report())
-        report.update({"schema": SMOKE_SCHEMA, "status": "success" if report["bootstrap_ok"] else "failed", "application_version": APPLICATION_VERSION, "runtime_root": runtime_root, "workspaces_root": workspaces_root, "qt_version": qVersion(), "pyside_version": PySide6.__version__, "python_version": platform.python_version(), "qt_platform": os.environ.get("QT_QPA_PLATFORM") or "native", "tray_created": False})
-        window.close(); QTimer.singleShot(0, application.quit)
+        report.update(
+            {
+                "schema": SMOKE_SCHEMA,
+                "status": "success" if report["bootstrap_ok"] else "failed",
+                "application_version": APPLICATION_VERSION,
+                "runtime_root": runtime_root,
+                "workspaces_root": workspaces_root,
+                "legacy_control_center": bool(args.legacy_control_center),
+                "qt_version": qVersion(),
+                "pyside_version": PySide6.__version__,
+                "python_version": platform.python_version(),
+                "qt_platform": os.environ.get("QT_QPA_PLATFORM") or "native",
+                "tray_created": False,
+            }
+        )
+        window.close()
+        QTimer.singleShot(0, application.quit)
+
     def fail_timeout() -> None:
         nonlocal timed_out
-        if not args.headless_smoke or report: return
+        if not args.headless_smoke or report:
+            return
         timed_out = True
-        report.update({"schema": SMOKE_SCHEMA, "status": "failed", "application_version": APPLICATION_VERSION, "error_code": "bootstrap_timeout", "runtime_root": runtime_root, "bootstrap_completed": False, "mutation_operations_invoked": 0, "legacy_fallback": False, "tray_created": False})
-        window.close(); application.quit()
+        report.update(
+            {
+                "schema": SMOKE_SCHEMA,
+                "status": "failed",
+                "application_version": APPLICATION_VERSION,
+                "error_code": "bootstrap_timeout",
+                "runtime_root": runtime_root,
+                "bootstrap_completed": False,
+                "mutation_operations_invoked": 0,
+                "legacy_fallback": False,
+                "tray_created": False,
+            }
+        )
+        window.close()
+        application.quit()
+
     if args.headless_smoke:
-        window.dashboard_ready.connect(finish_smoke); QTimer.singleShot(args.smoke_timeout_ms, fail_timeout)
-    window.show(); window.start_bootstrap(); exit_code = int(application.exec())
+        window.dashboard_ready.connect(finish_smoke)
+        QTimer.singleShot(args.smoke_timeout_ms, fail_timeout)
+
+    window.show()
+    window.start_bootstrap()
+    exit_code = int(application.exec())
+
     if args.headless_smoke:
-        report.setdefault("schema", SMOKE_SCHEMA); report.setdefault("status", "failed"); report.setdefault("application_version", APPLICATION_VERSION); report["event_loop_exit_code"] = exit_code; report["timed_out"] = timed_out; _render_report(report, args.json_out); return 0 if report.get("status") == "success" and exit_code == 0 else 1
+        report.setdefault("schema", SMOKE_SCHEMA)
+        report.setdefault("status", "failed")
+        report.setdefault("application_version", APPLICATION_VERSION)
+        report["event_loop_exit_code"] = exit_code
+        report["timed_out"] = timed_out
+        _render_report(report, args.json_out)
+        return 0 if report.get("status") == "success" and exit_code == 0 else 1
     return exit_code
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
