@@ -1,10 +1,14 @@
 """Read-only canonical vNext projection boundary for Control Center CC1.
 
-This module is intentionally a projection/client boundary, not a writer.  It
-observes only an already-existing, externally sealed vNext Control DB.  A
-missing DB is represented as the expected build-only OFF state.  Corrupt or
-partial identity fails closed.  No schema creation, migration, lifecycle
+This module is intentionally a projection/client boundary, not a writer. It
+observes only an already-existing, externally sealed vNext Control DB. A
+missing DB is represented as the expected build-only OFF state. Corrupt or
+partial identity fails closed. No schema creation, migration, lifecycle
 transition, resume, retry or external effect is available from this surface.
+
+The adapter never invents a singular "current" Candidate/Evidence/Publication.
+When a WorkItem has multiple related records, every bounded canonical record is
+shown. Selection remains a domain-authority concern outside CC1.
 """
 
 from __future__ import annotations
@@ -32,6 +36,7 @@ CC1_WORK_SCHEMA = "bdb-vnext-cc1-work-projection-v1"
 CC1_AUTHORITY_ID = "devmaster.bdb.vnext.control-center-query"
 CC1_ACTION_REASON = "cc1_read_only"
 CC1_MAX_WORK_ITEMS = 500
+CC1_MAX_RELATED_RECORDS = 50
 SYSTEM_STATES = frozenset({"OFF", "ON", "PAUSED", "DEGRADED"})
 
 
@@ -51,9 +56,13 @@ def _json_mapping(value: object) -> dict[str, Any] | None:
     if value is None:
         return None
     try:
-        raw = bytes(value) if isinstance(value, (bytes, bytearray, memoryview)) else str(value).encode("utf-8")
+        raw = (
+            bytes(value)
+            if isinstance(value, (bytes, bytearray, memoryview))
+            else str(value).encode("utf-8")
+        )
         document = json.loads(raw.decode("utf-8"))
-    except (TypeError, ValueError, UnicodeError, json.JSONDecodeError):
+    except (TypeError, ValueError, UnicodeError):
         _fail("projection_corrupt", "canonical Control DB contains an invalid JSON projection")
     if not isinstance(document, dict):
         _fail("projection_corrupt", "canonical Control DB projection must be an object")
@@ -88,21 +97,10 @@ def _row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return {str(key): row[key] for key in row.keys()}
 
 
-def _base_repository_projection(candidate: Mapping[str, Any] | None) -> dict[str, Any] | None:
-    if candidate is None:
-        return None
-    base = _json_mapping(candidate.get("base_view_json"))
-    candidate_view = _json_mapping(candidate.get("candidate_view_json"))
-    if base is None and candidate_view is None:
-        return None
-    return {
-        "base": base,
-        "candidate": candidate_view,
-        "base_tree_digest": candidate.get("base_tree_digest"),
-        "planned_tree_digest": candidate.get("planned_tree_digest"),
-        "observed_tree_digest": candidate.get("observed_tree_digest"),
-        "manifest_digest": candidate.get("manifest_digest"),
-    }
+def _rows_dict(rows: list[sqlite3.Row]) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        item for item in (_row_dict(row) for row in rows) if item is not None
+    )
 
 
 @dataclass(frozen=True)
@@ -215,8 +213,11 @@ def _read_only_actions() -> tuple[ActionPredicate, ...]:
     )
 
 
-def _candidate_for_work(connection: sqlite3.Connection, work_id: str) -> dict[str, Any] | None:
-    row = connection.execute(
+def _candidates_for_work(
+    connection: sqlite3.Connection,
+    work_id: str,
+) -> tuple[dict[str, Any], ...]:
+    rows = connection.execute(
         """
         SELECT candidate_id,effect_id,work_id,task_id,state,effect_certainty,
                base_view_json,workspace_generation,config_digest,lease_id,fence,
@@ -224,76 +225,120 @@ def _candidate_for_work(connection: sqlite3.Connection, work_id: str) -> dict[st
                candidate_view_json,manifest_digest
         FROM m4b_candidate_effects
         WHERE work_id=?
-        ORDER BY rowid DESC
-        LIMIT 1
+        ORDER BY candidate_id
+        LIMIT ?
         """,
-        (work_id,),
-    ).fetchone()
-    return _row_dict(row)
+        (work_id, CC1_MAX_RELATED_RECORDS),
+    ).fetchall()
+    return _rows_dict(rows)
 
 
-def _effect_projection(candidate: Mapping[str, Any] | None) -> dict[str, Any] | None:
-    if candidate is None:
+def _effect_projection(
+    candidates: tuple[dict[str, Any], ...],
+) -> dict[str, Any] | None:
+    if not candidates:
         return None
     return {
-        "candidate_id": candidate.get("candidate_id"),
-        "effect_id": candidate.get("effect_id"),
-        "state": candidate.get("state"),
-        "effect_certainty": candidate.get("effect_certainty"),
-        "lease_id": candidate.get("lease_id"),
-        "fence": candidate.get("fence"),
-        "workspace_generation": candidate.get("workspace_generation"),
-        "config_digest": candidate.get("config_digest"),
+        "selection": "ALL_CANONICAL_CANDIDATES",
+        "items": [
+            {
+                "candidate_id": candidate.get("candidate_id"),
+                "effect_id": candidate.get("effect_id"),
+                "state": candidate.get("state"),
+                "effect_certainty": candidate.get("effect_certainty"),
+                "lease_id": candidate.get("lease_id"),
+                "fence": candidate.get("fence"),
+                "workspace_generation": candidate.get("workspace_generation"),
+                "config_digest": candidate.get("config_digest"),
+            }
+            for candidate in candidates
+        ],
     }
+
+
+def _repository_projection(
+    candidates: tuple[dict[str, Any], ...],
+) -> dict[str, Any] | None:
+    if not candidates:
+        return None
+    items: list[dict[str, Any]] = []
+    for candidate in candidates:
+        items.append(
+            {
+                "candidate_id": candidate.get("candidate_id"),
+                "base": _json_mapping(candidate.get("base_view_json")),
+                "candidate": _json_mapping(candidate.get("candidate_view_json")),
+                "base_tree_digest": candidate.get("base_tree_digest"),
+                "planned_tree_digest": candidate.get("planned_tree_digest"),
+                "observed_tree_digest": candidate.get("observed_tree_digest"),
+                "manifest_digest": candidate.get("manifest_digest"),
+            }
+        )
+    return {"selection": "ALL_CANONICAL_CANDIDATES", "items": items}
+
+
+def _candidate_view_id(candidate: Mapping[str, Any]) -> str | None:
+    value = candidate.get("manifest_digest")
+    if isinstance(value, str) and value:
+        return value
+    candidate_view = _json_mapping(candidate.get("candidate_view_json"))
+    if candidate_view is None:
+        return None
+    value = candidate_view.get("view_id") or candidate_view.get("manifest_digest")
+    return value if isinstance(value, str) and value else None
 
 
 def _evidence_projection(
     connection: sqlite3.Connection,
-    candidate: Mapping[str, Any] | None,
+    candidates: tuple[dict[str, Any], ...],
 ) -> dict[str, Any] | None:
-    if candidate is None:
+    items: list[dict[str, Any]] = []
+    for candidate in candidates:
+        candidate_view_id = _candidate_view_id(candidate)
+        if candidate_view_id is None:
+            continue
+        evidence_rows = connection.execute(
+            """
+            SELECT evidence_id,request_id,primary_subject_kind,candidate_view_id,
+                   raw_digest,checker_id,checker_version,checker_code_digest,
+                   observation_started_at,observation_finished_at,completeness,
+                   applicability,status,created_at
+            FROM m4c_evidence_records
+            WHERE candidate_view_id=?
+            ORDER BY evidence_id
+            LIMIT ?
+            """,
+            (candidate_view_id, CC1_MAX_RELATED_RECORDS),
+        ).fetchall()
+        for evidence in _rows_dict(evidence_rows):
+            evaluation_rows = connection.execute(
+                """
+                SELECT evaluation_id,evidence_id,evaluator_id,evaluator_version,
+                       evaluator_code_digest,config_digest,result,applicability,created_at
+                FROM m4c_evaluations
+                WHERE evidence_id=?
+                ORDER BY evaluation_id
+                LIMIT ?
+                """,
+                (evidence["evidence_id"], CC1_MAX_RELATED_RECORDS),
+            ).fetchall()
+            items.append(
+                {
+                    "candidate_id": candidate.get("candidate_id"),
+                    "record": evidence,
+                    "evaluations": list(_rows_dict(evaluation_rows)),
+                }
+            )
+    if not items:
         return None
-    candidate_view_id = candidate.get("manifest_digest")
-    if not candidate_view_id:
-        candidate_view = _json_mapping(candidate.get("candidate_view_json"))
-        if candidate_view is not None:
-            candidate_view_id = candidate_view.get("view_id") or candidate_view.get("manifest_digest")
-    if not isinstance(candidate_view_id, str) or not candidate_view_id:
-        return None
-    evidence = connection.execute(
-        """
-        SELECT evidence_id,request_id,primary_subject_kind,candidate_view_id,
-               raw_digest,checker_id,checker_version,checker_code_digest,
-               observation_started_at,observation_finished_at,completeness,
-               applicability,status,created_at
-        FROM m4c_evidence_records
-        WHERE candidate_view_id=?
-        ORDER BY created_at DESC,evidence_id DESC
-        LIMIT 1
-        """,
-        (candidate_view_id,),
-    ).fetchone()
-    if evidence is None:
-        return None
-    record = _row_dict(evidence)
-    assert record is not None
-    evaluation = connection.execute(
-        """
-        SELECT evaluation_id,evidence_id,evaluator_id,evaluator_version,
-               evaluator_code_digest,config_digest,result,applicability,created_at
-        FROM m4c_evaluations
-        WHERE evidence_id=?
-        ORDER BY created_at DESC,evaluation_id DESC
-        LIMIT 1
-        """,
-        (record["evidence_id"],),
-    ).fetchone()
-    result: dict[str, Any] = {"record": record, "evaluation": _row_dict(evaluation)}
-    return result
+    return {"selection": "ALL_CANONICAL_EVIDENCE", "items": items}
 
 
-def _publication_projection(connection: sqlite3.Connection, work_id: str) -> dict[str, Any] | None:
-    row = connection.execute(
+def _publication_projection(
+    connection: sqlite3.Connection,
+    work_id: str,
+) -> dict[str, Any] | None:
+    rows = connection.execute(
         """
         SELECT publication_id,request_id,task_id,work_id,intent_revision_id,
                result_digest,candidate_id,candidate_view_id,evidence_id,
@@ -302,23 +347,29 @@ def _publication_projection(connection: sqlite3.Connection, work_id: str) -> dic
         FROM n4_publications
         WHERE work_id=?
         ORDER BY sequence DESC
-        LIMIT 1
+        LIMIT ?
         """,
-        (work_id,),
-    ).fetchone()
-    return _row_dict(row)
+        (work_id, CC1_MAX_RELATED_RECORDS),
+    ).fetchall()
+    items = _rows_dict(rows)
+    if not items:
+        return None
+    return {"selection": "ALL_CANONICAL_PUBLICATIONS", "items": list(items)}
 
 
-def _work_projection(connection: sqlite3.Connection, row: sqlite3.Row) -> ControlCenterWorkProjection:
+def _work_projection(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+) -> ControlCenterWorkProjection:
     work = _row_dict(row)
     assert work is not None
     work_id = str(work["work_id"])
-    candidate = _candidate_for_work(connection, work_id)
+    candidates = _candidates_for_work(connection, work_id)
     return ControlCenterWorkProjection(
         work=work,
-        effect=_effect_projection(candidate),
-        evidence=_evidence_projection(connection, candidate),
-        repository=_base_repository_projection(candidate),
+        effect=_effect_projection(candidates),
+        evidence=_evidence_projection(connection, candidates),
+        repository=_repository_projection(candidates),
         publication=_publication_projection(connection, work_id),
     )
 

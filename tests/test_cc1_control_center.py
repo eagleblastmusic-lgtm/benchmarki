@@ -64,20 +64,45 @@ def test_status_vector_accepts_control_center_states(state: str) -> None:
 def test_work_projection_preserves_domain_vectors_without_action_authority() -> None:
     projection = ControlCenterWorkProjection(
         work={"work_id": "work-1", "task_id": "task-1", "kind": "engineering", "disposition": "WAITING"},
-        effect={"effect_id": "effect-1", "state": "POSSIBLE", "effect_certainty": "POSSIBLE"},
-        evidence={"record": {"evidence_id": "ev-1"}, "evaluation": {"result": "INCONCLUSIVE"}},
-        repository={"base": {"view_id": "sha256:" + "1" * 64}, "candidate": None},
+        effect={
+            "selection": "ALL_CANONICAL_CANDIDATES",
+            "items": [{"effect_id": "effect-1", "state": "POSSIBLE", "effect_certainty": "POSSIBLE"}],
+        },
+        evidence={
+            "selection": "ALL_CANONICAL_EVIDENCE",
+            "items": [
+                {
+                    "candidate_id": "candidate-1",
+                    "record": {"evidence_id": "ev-1"},
+                    "evaluations": [{"result": "INCONCLUSIVE"}],
+                }
+            ],
+        },
+        repository={
+            "selection": "ALL_CANONICAL_CANDIDATES",
+            "items": [{"candidate_id": "candidate-1", "base": {"view_id": "sha256:" + "1" * 64}, "candidate": None}],
+        },
         publication=None,
     )
 
     document = projection.as_dict()
 
     assert document["work"]["disposition"] == "WAITING"
-    assert document["effect"]["effect_certainty"] == "POSSIBLE"
-    assert document["evidence"]["evaluation"]["result"] == "INCONCLUSIVE"
-    assert document["repository"]["base"]["view_id"].startswith("sha256:")
+    assert document["effect"]["items"][0]["effect_certainty"] == "POSSIBLE"
+    assert document["evidence"]["items"][0]["evaluations"][0]["result"] == "INCONCLUSIVE"
+    assert document["repository"]["items"][0]["base"]["view_id"].startswith("sha256:")
     assert document["publication"] is None
     assert "projection_digest" in document
+
+
+def test_projection_never_invents_a_current_candidate() -> None:
+    source = (
+        Path(__file__).resolve().parents[1] / "bdb_vnext" / "control_center_query.py"
+    ).read_text(encoding="utf-8")
+
+    assert "ORDER BY rowid" not in source
+    assert "latest candidate" not in source.lower()
+    assert "ALL_CANONICAL_CANDIDATES" in source
 
 
 def test_query_module_has_no_mutation_vocabulary() -> None:
