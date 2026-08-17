@@ -8,6 +8,7 @@ on:
       - 'bdb_vnext/m11a_*.py'
       - 'bdb_vnext/m9b_*.py'
       - 'bdb_vnext/m3c_admission.py'
+      - 'scripts/Set-BDBVNextBootstrapAuthorityAcl.ps1'
       - 'schemas/bdb-vnext-bootstrap-slot-state-v2.schema.json'
       - 'schemas/bdb-vnext-m11c-*.schema.json'
       - 'tests/test_m11c_*.py'
@@ -53,6 +54,7 @@ jobs:
           bdb_vnext/m9b_native_host.py
           bdb_vnext/m3c_admission.py
           tests/test_m11c_cutover.py
+          tests/test_m11c_windows_apply.py
           tests/test_m9b_activation.py
           tests/test_m9b_native_host.py
 
@@ -70,6 +72,10 @@ jobs:
 
       - name: Run M11c source cutover gate
         run: python -m pytest -q tests/test_m11c_cutover.py
+
+      - name: Run public Windows ProgramData/ACL apply proof
+        if: runner.os == 'Windows'
+        run: python -m pytest -q tests/test_m11c_windows_apply.py
 
       - name: Run M11a + M9b + M3c regression
         run: >-
