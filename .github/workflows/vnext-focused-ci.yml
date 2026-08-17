@@ -32,7 +32,7 @@ jobs:
       - name: Install focused test dependencies
         run: python -m pip install --disable-pip-version-check -e ".[dev]"
 
-      - name: Compile current P1/P2 modules
+      - name: Compile current build-only closure modules
         run: |
           python -m py_compile \
             bdb_vnext/m5a_effects.py \
@@ -41,9 +41,11 @@ jobs:
             bdb_vnext/m6c_validation_authority.py \
             bdb_vnext/m7a_git_cas.py \
             bdb_vnext/m7b_checkout_sync.py \
-            bdb_vnext/m7c_promotion_authority.py
+            bdb_vnext/m7c_promotion_authority.py \
+            bdb_vnext/engineering_intelligence.py \
+            bdb_vnext/code_intelligence.py
 
-      - name: Run focused P1/P2 contracts
+      - name: Run focused build-only closure contracts
         run: |
           python -m pytest \
             tests/test_vnext_m5a_effects.py \
@@ -54,6 +56,7 @@ jobs:
             tests/test_vnext_m7a_git_cas.py \
             tests/test_vnext_m7b_checkout_sync.py \
             tests/test_vnext_m7c_promotion_authority.py \
+            tests/test_vnext_m8b_rebuildability_contract.py \
             tests/test_vnext_engineering_loop.py \
             -q
 
