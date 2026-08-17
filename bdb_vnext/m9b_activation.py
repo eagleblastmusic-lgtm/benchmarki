@@ -1,18 +1,19 @@
-"""M9b external generation activation contract.
+"""M9b Browser/Native client-gate record for the isolated Next generation.
 
-This module owns only the external product-activation fence for the isolated
-vNext generation.  It does not own Task/Work/effect state and it never reads or
-writes legacy semantic stores.  Checkout/import is inert: state changes happen
-only through explicit functions below.
+Before M11c this record modeled the final external activation fence.  The
+frozen M11c contract deliberately removes that authority: the ProgramData
+Bootstrap slot state is now the sole product activation truth.  M9b remains a
+subordinate route gate that binds exact Browser/Native/freeze/source identity.
 
-The activation transition is deliberately two phase::
+The client-gate transition remains two phase::
 
     CLIENTS_VERIFIED -> ACTIVATING -> ACTIVE
 
-A Native/Browser adapter must require ``ACTIVE`` before accepting user-facing
-production work.  Therefore a crash after the canonical intake kill switch is
-opened but before the final activation record is durable remains fail closed:
-the external adapter still sees ``ACTIVATING`` and rejects intake.
+but there is intentionally no public ``activate`` helper anymore.  M11c alone
+coordinates the private gate transition with the external slot switch and M3c
+intake.  Even a forged/runtime-local M9b ACTIVE record cannot open production
+admission because Native also requires the independent M11c Bootstrap ACTIVE
+state.
 """
 
 from __future__ import annotations
@@ -75,23 +76,23 @@ def _stable_read(path: Path, *, max_bytes: int = 64 * 1024) -> bytes:
     try:
         before = path.stat(follow_symlinks=False)
     except OSError as exc:
-        raise M9bActivationError("activation_read_failed", "M9b activation record cannot be inspected") from exc
+        raise M9bActivationError("activation_read_failed", "M9b client-gate record cannot be inspected") from exc
     if path.is_symlink() or not path.is_file() or before.st_size > max_bytes:
-        _fail("activation_record_invalid", "M9b activation record must be a bounded regular file")
+        _fail("activation_record_invalid", "M9b client-gate record must be a bounded regular file")
     try:
         payload = path.read_bytes()
         after = path.stat(follow_symlinks=False)
     except OSError as exc:
-        raise M9bActivationError("activation_read_failed", "M9b activation record cannot be read") from exc
+        raise M9bActivationError("activation_read_failed", "M9b client-gate record cannot be read") from exc
     if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
         after.st_dev,
         after.st_ino,
         after.st_size,
         after.st_mtime_ns,
     ):
-        _fail("activation_record_unstable", "M9b activation record changed during observation")
+        _fail("activation_record_unstable", "M9b client-gate record changed during observation")
     if len(payload) > max_bytes:
-        _fail("activation_record_invalid", "M9b activation record exceeds its bounded size")
+        _fail("activation_record_invalid", "M9b client-gate record exceeds its bounded size")
     return payload
 
 
@@ -120,9 +121,9 @@ class ActivationRecord:
 
     def __post_init__(self) -> None:
         if self.schema != M9B_ACTIVATION_SCHEMA:
-            _fail("activation_schema_mismatch", "M9b activation schema differs")
+            _fail("activation_schema_mismatch", "M9b client-gate schema differs")
         if self.state not in M9B_STATES:
-            _fail("activation_state_invalid", "M9b activation state is unsupported")
+            _fail("activation_state_invalid", "M9b client-gate state is unsupported")
         if not isinstance(self.activation_id, str) or not self.activation_id.startswith("m9b-") or len(self.activation_id) > 96:
             _fail("activation_identity_invalid", "M9b activation identity is invalid")
         _sha40(self.source_head, field="source_head")
@@ -131,16 +132,16 @@ class ActivationRecord:
         _sha256(self.browser_bundle_digest, field="browser_bundle_digest")
         _sha256(self.native_manifest_digest, field="native_manifest_digest")
         if self.generation_id != GENERATION_ID or self.config_generation != CONFIG_GENERATION:
-            _fail("generation_identity_mismatch", "M9b activation generation identity differs")
+            _fail("generation_identity_mismatch", "M9b generation identity differs")
         if self.protocol_generation != PROTOCOL_GENERATION:
-            _fail("protocol_generation_mismatch", "M9b activation protocol generation differs")
+            _fail("protocol_generation_mismatch", "M9b protocol generation differs")
         if self.browser_extension_id != BROWSER_EXTENSION_ID or self.native_host_name != NATIVE_HOST_NAME:
             _fail("client_identity_mismatch", "M9b Browser/Native identity differs")
         if self.rollback_mode != M9B_ROLLBACK_MODE:
             _fail("rollback_mode_mismatch", "M9b rollback class differs")
         expected_enabled = self.state == "ACTIVE"
         if self.writer_enabled is not expected_enabled or self.intake_enabled is not expected_enabled:
-            _fail("activation_flags_invalid", "M9b writer/intake flags do not match activation state")
+            _fail("activation_flags_invalid", "M9b writer/intake flags do not match client-gate state")
 
     def as_dict(self) -> dict[str, Any]:
         document = {
@@ -187,10 +188,10 @@ class ActivationRecord:
             "record_digest",
         }
         if set(document) != expected_keys:
-            _fail("activation_record_invalid", "M9b activation record fields differ")
+            _fail("activation_record_invalid", "M9b client-gate record fields differ")
         supplied_digest = document.pop("record_digest")
         if supplied_digest != _record_digest(document):
-            _fail("activation_digest_mismatch", "M9b activation record digest differs")
+            _fail("activation_digest_mismatch", "M9b client-gate record digest differs")
         return cls(
             activation_id=document["activation_id"],
             state=document["state"],
@@ -218,16 +219,18 @@ def read_activation(runtime_root: str | Path) -> ActivationRecord | None:
     try:
         document = json.loads(_stable_read(path).decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError) as exc:
-        raise M9bActivationError("activation_record_invalid", "M9b activation record is not valid JSON") from exc
+        raise M9bActivationError("activation_record_invalid", "M9b client-gate record is not valid JSON") from exc
     if not isinstance(document, Mapping):
-        _fail("activation_record_invalid", "M9b activation record must be an object")
+        _fail("activation_record_invalid", "M9b client-gate record must be an object")
     return ActivationRecord.from_mapping(document)
 
 
 def require_active(runtime_root: str | Path) -> ActivationRecord:
+    """Require only the subordinate M9b client gate, never product activation."""
+
     record = read_activation(runtime_root)
     if record is None or record.state != "ACTIVE" or not record.writer_enabled or not record.intake_enabled:
-        _fail("vnext_not_active", "vNext external writer/intake is not ACTIVE")
+        _fail("vnext_not_active", "vNext Browser/Native client gate is not ACTIVE")
     return record
 
 
@@ -263,7 +266,7 @@ def _atomic_write(path: Path, record: ActivationRecord) -> None:
             temporary.unlink(missing_ok=True)
         except OSError:
             pass
-        raise M9bActivationError("activation_write_failed", "M9b activation record could not be written atomically") from exc
+        raise M9bActivationError("activation_write_failed", "M9b client-gate record could not be written atomically") from exc
 
 
 def record_clients_verified(
@@ -276,11 +279,11 @@ def record_clients_verified(
     native_manifest_digest: str,
     activation_id: str | None = None,
 ) -> ActivationRecord:
-    """Persist exact client/freeze evidence while keeping writer/intake OFF."""
+    """Persist exact client/freeze evidence while keeping the route gate OFF."""
 
     path = activation_path(runtime_root)
     if read_activation(runtime_root) is not None:
-        _fail("activation_already_exists", "M9b activation record already exists")
+        _fail("activation_already_exists", "M9b client-gate record already exists")
     record = ActivationRecord(
         activation_id=activation_id or f"m9b-{secrets.token_hex(16)}",
         state="CLIENTS_VERIFIED",
@@ -296,13 +299,12 @@ def record_clients_verified(
     return record
 
 
-def activate(
+def _begin_bootstrap_client_gate(
     runtime_root: str | Path,
     *,
     expected_activation_id: str,
-    enable_canonical_intake: Callable[[], None],
 ) -> ActivationRecord:
-    """Move a verified generation to ACTIVE through a fail-closed two-phase fence."""
+    """M11c-private transition to ACTIVATING; not a product activation API."""
 
     current = read_activation(runtime_root)
     if current is None:
@@ -310,8 +312,7 @@ def activate(
     if current.activation_id != expected_activation_id:
         _fail("activation_identity_mismatch", "M9b activation identity changed")
     if current.state != "CLIENTS_VERIFIED":
-        _fail("activation_state_conflict", "M9b activation is not at CLIENTS_VERIFIED")
-
+        _fail("activation_state_conflict", "M9b client gate is not at CLIENTS_VERIFIED")
     activating = ActivationRecord(
         activation_id=current.activation_id,
         state="ACTIVATING",
@@ -324,42 +325,22 @@ def activate(
         intake_enabled=False,
     )
     _atomic_write(activation_path(runtime_root), activating)
-    try:
-        enable_canonical_intake()
-    except Exception as exc:
-        raise M9bActivationError(
-            "canonical_intake_enable_failed",
-            "canonical intake could not be enabled; external route remains fail-closed in ACTIVATING",
-        ) from exc
-
-    active = ActivationRecord(
-        activation_id=current.activation_id,
-        state="ACTIVE",
-        source_head=current.source_head,
-        source_tree=current.source_tree,
-        m9a_freeze_digest=current.m9a_freeze_digest,
-        browser_bundle_digest=current.browser_bundle_digest,
-        native_manifest_digest=current.native_manifest_digest,
-        writer_enabled=True,
-        intake_enabled=True,
-    )
-    _atomic_write(activation_path(runtime_root), active)
-    return active
+    return activating
 
 
-def finalize_interrupted_activation(
+def _finalize_bootstrap_client_gate(
     runtime_root: str | Path,
     *,
     expected_activation_id: str,
     canonical_intake_is_enabled: Callable[[], bool],
 ) -> ActivationRecord:
-    """Recover only the known crash window after canonical intake became enabled."""
+    """M11c-private finalization after external Bootstrap ACTIVE is proven."""
 
     current = read_activation(runtime_root)
     if current is None or current.activation_id != expected_activation_id or current.state != "ACTIVATING":
-        _fail("activation_state_conflict", "M9b activation is not an expected interrupted ACTIVATING state")
+        _fail("activation_state_conflict", "M9b client gate is not the expected ACTIVATING state")
     if canonical_intake_is_enabled() is not True:
-        _fail("canonical_intake_not_enabled", "canonical intake is not enabled; activation cannot be finalized")
+        _fail("canonical_intake_not_enabled", "canonical intake is not enabled; client gate cannot finalize")
     active = ActivationRecord(
         activation_id=current.activation_id,
         state="ACTIVE",
@@ -382,9 +363,7 @@ __all__ = [
     "M9B_ROLLBACK_MODE",
     "M9B_STATES",
     "M9bActivationError",
-    "activate",
     "activation_path",
-    "finalize_interrupted_activation",
     "read_activation",
     "record_clients_verified",
     "require_active",
