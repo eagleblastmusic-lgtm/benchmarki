@@ -30,7 +30,8 @@ from bdb_vnext.m11c_windows_clients import (
     query_client_plan,
     require_client_verification,
 )
-from bdb_vnext.m9a_handoff import M9aHandoffError, revalidate_side_by_side_digest
+from bdb_vnext.m9a_handoff import M9aHandoffError, revalidate_side_by_side_digest, verify_side_by_side_archive
+from bdb_vnext.m3c_admission import scan_supported_vnext_admission_paths
 from bdb_vnext.m9b_activation import M9bActivationError, read_activation
 
 
@@ -467,6 +468,17 @@ def capture_compatibility_zero(
     except M9aHandoffError as exc:
         raise M12aCompatibilityError(exc.code, str(exc)) from exc
     runtime_zero = first == second == freeze_digest
+    archive_verification = verify_side_by_side_archive(
+        runtime_root=runtime,
+        freeze_digest=freeze_digest,
+    )
+    archive_readable = archive_verification.get("archive_readable") is True
+    admission_scan = scan_supported_vnext_admission_paths()
+    admission_exclusive = (
+        admission_scan.get("pass") is True
+        and admission_scan.get("legacy_paths_supported") is False
+        and admission_scan.get("alternate_accepting_writers") == []
+    )
 
     active_source = _sha40(active.get("source_commit"), "active_source_commit")
     source_scan = scan_active_python_closure(repo_root=repo, source_commit=active_source)
@@ -506,18 +518,13 @@ def capture_compatibility_zero(
             "usage_zero": browser_scan["compatibility_usage_zero"],
             "disposition": "REMOVE_ANY_STALE_FALLBACK_SURFACES_IN_M12B",
         },
+        {
+            "bridge_id": "alternate-admission-writers",
+            "usage_zero": admission_exclusive,
+            "disposition": "RETAIN_ONLY_CANONICAL_M3C_WRITER_IN_M12B",
+        },
     ]
     compatibility_zero = all(item["usage_zero"] is True for item in bridge_matrix)
-    archive_readable = all(
-        (
-            runtime
-            / "evidence"
-            / "m9a-side-by-side"
-            / "objects"
-            / f"{ref[7:]}.json"
-        ).is_file()
-        for ref in (freeze_digest,)
-    )
     pass_closed = (
         compatibility_zero
         and archive_readable
@@ -541,7 +548,9 @@ def capture_compatibility_zero(
         "m9a_freeze_digest": freeze_digest,
         "runtime_zero_observed": runtime_zero,
         "archive_readable": archive_readable,
+        "m9a_archive_verification": archive_verification,
         "native_route_exclusive": routes.get("legacy_route_present") is False and routes.get("target_registered") is True,
+        "admission_path_scan": admission_scan,
         "active_python_closure": source_scan,
         "active_browser_closure": browser_scan,
         "source_only_legacy_surfaces": source_disposition,
