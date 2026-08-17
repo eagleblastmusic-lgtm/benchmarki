@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -50,6 +50,7 @@ _WRITE_RIGHTS = frozenset(
 )
 _REQUIRED_WRITERS = frozenset({SYSTEM_SID, ADMINISTRATORS_SID})
 _LOW_PRIVILEGE = frozenset({USERS_SID, AUTHENTICATED_USERS_SID, EVERYONE_SID})
+_MAX_ACL_OUTPUT_BYTES = 64 * 1024
 
 
 class M11aWindowsTcbError(RuntimeError):
@@ -137,6 +138,16 @@ def validate_acl_witness(value: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _powershell_executable() -> str:
+    # Prefer the same modern PowerShell used by the packaging/CI surface, but
+    # retain Windows PowerShell as a supported fallback on stock installations.
+    for candidate in ("pwsh.exe", "powershell.exe"):
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+    _fail("powershell_unavailable", "PowerShell is required for Windows ACL observation")
+
+
 def query_windows_acl(path: str | Path) -> dict[str, Any]:
     """Read one Windows ACL into a locale-independent SID-based witness."""
 
@@ -148,7 +159,8 @@ def query_windows_acl(path: str | Path) -> dict[str, Any]:
     script = r'''
 $ErrorActionPreference = 'Stop'
 $acl = Get-Acl -LiteralPath $env:BDB_VNEXT_TCB_PATH
-$owner = ([System.Security.Principal.NTAccount]$acl.Owner).Translate([System.Security.Principal.SecurityIdentifier]).Value
+$ownerIdentity = New-Object System.Security.Principal.NTAccount($acl.Owner)
+$owner = $ownerIdentity.Translate([System.Security.Principal.SecurityIdentifier]).Value
 $entries = @($acl.Access | ForEach-Object {
   $sid = $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
   $rights = @($_.FileSystemRights.ToString().Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -160,7 +172,7 @@ $entries = @($acl.Access | ForEach-Object {
     environment["BDB_VNEXT_TCB_PATH"] = str(target)
     try:
         completed = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            [_powershell_executable(), "-NoProfile", "-NonInteractive", "-Command", script],
             env=environment,
             stdin=subprocess.DEVNULL,
             capture_output=True,
@@ -169,8 +181,14 @@ $entries = @($acl.Access | ForEach-Object {
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise M11aWindowsTcbError("acl_observation_failed", "Windows ACL observation could not run") from exc
+    if len(completed.stdout) > _MAX_ACL_OUTPUT_BYTES or len(completed.stderr) > _MAX_ACL_OUTPUT_BYTES:
+        _fail("acl_observation_unbounded", "Windows ACL observation exceeded its bounded output contract")
     if completed.returncode != 0:
-        _fail("acl_observation_failed", "Windows ACL observation returned a failure")
+        diagnostic = completed.stderr.decode("utf-8", errors="replace").strip().replace("\r", " ").replace("\n", " ")
+        if len(diagnostic) > 512:
+            diagnostic = diagnostic[:512] + "…"
+        suffix = f": {diagnostic}" if diagnostic else ""
+        _fail("acl_observation_failed", "Windows ACL observation returned a failure" + suffix)
     try:
         value = json.loads(completed.stdout.decode("utf-8-sig"))
     except (UnicodeError, json.JSONDecodeError) as exc:
