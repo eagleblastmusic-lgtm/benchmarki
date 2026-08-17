@@ -7,6 +7,8 @@ import platform
 from pathlib import Path
 from typing import Any, Sequence
 
+from bdb_vnext.composition import default_vnext_runtime_root
+
 from .version import APPLICATION_VERSION
 
 
@@ -14,6 +16,8 @@ SMOKE_SCHEMA = "bdb-control-center-smoke-v1"
 
 
 def _default_workspaces_root() -> Path:
+    """Deprecated CLI compatibility only; it is not a CC1 semantic source."""
+
     local_app_data = os.environ.get("LOCALAPPDATA")
     if local_app_data:
         return Path(local_app_data) / "BartoszDevBridge" / "workspaces"
@@ -21,16 +25,24 @@ def _default_workspaces_root() -> Path:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="BDB Control Center")
+    parser = argparse.ArgumentParser(description="BDB Control Center — canonical vNext CC1")
+    parser.add_argument(
+        "--runtime-root",
+        default=str(default_vnext_runtime_root()),
+        help="Existing vNext runtime root. CC1 never creates or repairs it.",
+    )
     parser.add_argument(
         "--workspaces-root",
         default=str(_default_workspaces_root()),
-        help="Directory containing prepared BDB workspace folders",
+        help=(
+            "Deprecated legacy compatibility argument. It is reported only and is never "
+            "used as a semantic source by CC1."
+        ),
     )
     parser.add_argument(
         "--headless-smoke",
         action="store_true",
-        help="Run the production GUI shell through an offscreen bootstrap and exit",
+        help="Run the vNext GUI shell through an offscreen read-only bootstrap and exit",
     )
     parser.add_argument("--json-out", help="Optional path for the headless smoke report")
     parser.add_argument("--smoke-timeout-ms", type=int, default=15_000)
@@ -68,13 +80,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         from PySide6.QtCore import QTimer, qVersion
         from PySide6.QtWidgets import QApplication
 
-        from .bootstrap import BootstrapService
-        from .operations import ProjectOperationsService
-        from .session_history_window import (
-            SessionProjectControlCenterWindow,
-            SessionTrayProjectControlCenterWindow,
-        )
-        from .tray import TrayController
+        from .vnext_control_center import VNextControlCenterWindow
     except ImportError as error:
         report = {
             "schema": SMOKE_SCHEMA,
@@ -87,6 +93,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _render_report(report, args.json_out)
         return 2
 
+    runtime_root = str(Path(args.runtime_root).expanduser().absolute())
     workspaces_root = str(Path(args.workspaces_root).expanduser().resolve(strict=False))
     application = QApplication.instance() or QApplication(["bdb-control-center"])
     application.setApplicationName("BDB Control Center")
@@ -94,25 +101,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     application.setOrganizationName("Bartosz Dev Bridge")
     application.setQuitOnLastWindowClosed(args.headless_smoke)
 
-    tray_controller: TrayController | None = None
-    if args.headless_smoke:
-        window = SessionProjectControlCenterWindow(
-            bootstrap_service=BootstrapService(),
-            operations_service=ProjectOperationsService(),
-            workspaces_root=workspaces_root,
-            auto_load_status=not args.headless_smoke,
-        )
-    else:
-        window = SessionTrayProjectControlCenterWindow(
-            bootstrap_service=BootstrapService(),
-            operations_service=ProjectOperationsService(),
-            workspaces_root=workspaces_root,
-            auto_load_status=not args.headless_smoke,
-        )
-        tray_controller = TrayController(application, window)
-        window.install_tray_controller(tray_controller)
-        tray_controller.start()
-
+    window = VNextControlCenterWindow(runtime_root=runtime_root)
     report: dict[str, Any] = {}
     timed_out = False
 
@@ -125,6 +114,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "schema": SMOKE_SCHEMA,
                 "status": "success" if report["bootstrap_ok"] else "failed",
                 "application_version": APPLICATION_VERSION,
+                "runtime_root": runtime_root,
                 "workspaces_root": workspaces_root,
                 "qt_version": qVersion(),
                 "pyside_version": PySide6.__version__,
@@ -147,9 +137,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "status": "failed",
                 "application_version": APPLICATION_VERSION,
                 "error_code": "bootstrap_timeout",
-                "workspaces_root": workspaces_root,
+                "runtime_root": runtime_root,
                 "bootstrap_completed": False,
                 "mutation_operations_invoked": 0,
+                "legacy_fallback": False,
                 "tray_created": False,
             }
         )
