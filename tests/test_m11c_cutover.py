@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 import bdb_vnext.m11c_cutover as m11c
+import bdb_vnext.m9b_activation as m9b
 from bdb_vnext.bootstrap import BUNDLE_SCHEMA, HEALTH_SCHEMA
 from bdb_vnext.composition import RUNTIME_ID, observe_bundle
 from bdb_vnext.m11a_bootstrap_slots import (
@@ -24,12 +25,7 @@ from bdb_vnext.m11a_windows_tcb import (
     default_windows_authority_root,
 )
 from bdb_vnext.m3c_admission import CanonicalVNextAdmissionAuthority
-from bdb_vnext.m9b_activation import (
-    M9bActivationError,
-    activate,
-    read_activation,
-    record_clients_verified,
-)
+from bdb_vnext.m9b_activation import read_activation, record_clients_verified
 
 
 HEAD = "a" * 40
@@ -201,7 +197,6 @@ def _plan(fixture: dict[str, object]) -> dict[str, object]:
 def test_cutover_plan_is_exact_and_does_not_activate(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
     active_before = fixture["staged"]["state"]["active_manifest_sha256"]  # type: ignore[index]
-
     plan = _plan(fixture)
 
     observed = m11c.observe_bootstrap_activation(authority_root=fixture["authority"])
@@ -217,10 +212,8 @@ def test_cutover_plan_is_exact_and_does_not_activate(tmp_path: Path) -> None:
 
 def test_plan_rejects_candidate_not_explicitly_certified(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path, candidate_known_good=False)
-
     with pytest.raises(m11c.M11cCutoverError) as caught:
         _plan(fixture)
-
     assert caught.value.code == "candidate_not_certified"
     assert m11c.observe_bootstrap_activation(authority_root=fixture["authority"])["status"] == "PREPARED"
 
@@ -228,7 +221,6 @@ def test_plan_rejects_candidate_not_explicitly_certified(tmp_path: Path) -> None
 def test_apply_requires_exact_plan_and_explicit_operator_approval(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
     plan = _plan(fixture)
-
     with pytest.raises(m11c.M11cCutoverError) as not_approved:
         m11c._apply_cutover(
             authority_root=fixture["authority"],
@@ -298,18 +290,11 @@ def test_apply_resumes_same_cutover_after_crash_window_left_client_gate_activati
     )
     authority = CanonicalVNextAdmissionAuthority.open(fixture["runtime"], legacy_root=fixture["legacy"])
     try:
-        authority.disable_intake()
-
-        def crash_after_intake() -> None:
-            authority.enable_intake()
-            raise RuntimeError("simulated crash before external slot switch")
-
-        with pytest.raises(M9bActivationError):
-            activate(
-                fixture["runtime"],
-                expected_activation_id=verified.activation_id,
-                enable_canonical_intake=crash_after_intake,
-            )
+        m9b._begin_bootstrap_client_gate(
+            fixture["runtime"],
+            expected_activation_id=verified.activation_id,
+        )
+        authority.enable_intake()
         assert authority.admission_enabled is True
     finally:
         authority.close()
@@ -325,10 +310,51 @@ def test_apply_resumes_same_cutover_after_crash_window_left_client_gate_activati
         operator_approved=True,
         tcb_witness=fixture["witness"],
     )
-
     assert resumed["status"] == "ACTIVE"
     assert read_activation(fixture["runtime"]).state == "ACTIVE"  # type: ignore[union-attr]
     assert m11c.require_bootstrap_active(fixture["authority"])["status"] == "ACTIVE"
+
+
+def test_apply_resumes_after_external_switch_before_client_gate_finalize(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    plan = _plan(fixture)
+    verified = record_clients_verified(
+        fixture["runtime"],
+        m9a_report=_m9a_report(),
+        source_head=HEAD,
+        source_tree=TREE,
+        browser_bundle_digest=BROWSER_DIGEST,
+        native_manifest_digest=NATIVE_DIGEST,
+        activation_id="m9b-final-1",
+    )
+    authority = CanonicalVNextAdmissionAuthority.open(fixture["runtime"], legacy_root=fixture["legacy"])
+    try:
+        m9b._begin_bootstrap_client_gate(fixture["runtime"], expected_activation_id=verified.activation_id)
+        authority.enable_intake()
+        prepared_query = m11c.query_prepared_activation(
+            authority_root=fixture["authority"],
+            preparation_id="prep-final",
+        )
+        m11c._publish_external_activation(
+            authority=Path(fixture["authority"]),
+            plan=plan,
+            prepared_query=prepared_query,
+        )
+    finally:
+        authority.close()
+
+    assert m11c.require_bootstrap_active(fixture["authority"])["status"] == "ACTIVE"
+    assert read_activation(fixture["runtime"]).state == "ACTIVATING"  # type: ignore[union-attr]
+
+    resumed = m11c._apply_cutover(
+        authority_root=fixture["authority"],
+        cutover_id="final-1",
+        expected_plan_sha256=plan["cutover_plan_sha256"],
+        operator_approved=True,
+        tcb_witness=fixture["witness"],
+    )
+    assert resumed["status"] == "ACTIVE"
+    assert read_activation(fixture["runtime"]).state == "ACTIVE"  # type: ignore[union-attr]
 
 
 def test_apply_is_idempotent_after_exact_completed_cutover(tmp_path: Path) -> None:
@@ -348,7 +374,6 @@ def test_apply_is_idempotent_after_exact_completed_cutover(tmp_path: Path) -> No
         operator_approved=True,
         tcb_witness=fixture["witness"],
     )
-
     assert first["bootstrap"]["state"]["state_sha256"] == second["bootstrap"]["state"]["state_sha256"]
     assert second["client_gate"]["state"] == "ACTIVE"
 
@@ -363,7 +388,6 @@ def test_m11a_reader_cannot_mutate_after_m11c_replaces_slot_state_v1(tmp_path: P
         operator_approved=True,
         tcb_witness=fixture["witness"],
     )
-
     with pytest.raises(Exception):
         query_slot_authority(authority_root=fixture["authority"])
     assert m11c.require_bootstrap_active(fixture["authority"])["status"] == "ACTIVE"
