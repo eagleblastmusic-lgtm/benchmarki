@@ -1,58 +1,98 @@
-# M11a Bootstrap Slots + Compatibility — source candidate tranches 1–2
+# M11a Bootstrap Slots + Compatibility — closure record
 
-Status: **SOURCE CANDIDATE / BUILD-ONLY / M11a NOT DONE**
+Status: **M11a PASS / BUILD-ONLY / NOT ACTIVATED**
 
-These tranches implement the source-level core of Sequence 37 by evolving the existing M1b external bootstrap floor into an exact external slot and preparation substrate for BDB Next. They do not perform installation, runtime start/stop, Browser/Native registration, product activation, or any CANDIDATE -> ACTIVE switch.
+M11a evolves the existing M1b external bootstrap/recovery floor into the BDB Next external activation substrate required before M11b. It does not perform Browser/Native installation, runtime start/stop, writer/intake activation, or any `CANDIDATE -> ACTIVE` switch.
 
-## Added in tranche 1 — exact external slots
+## Exact closure basis
 
-- external, content-addressed `ACTIVE` / `PREVIOUS` / `CANDIDATE` slot manifests;
-- exact bundle digest and source-commit binding using the existing M1b bundle inspector;
+- canonical base after M9b and concurrency hardening: `317501b687896a154672636c2511229c0bd22e05`;
+- M11a source head before this closure-record commit: `326c5cd5ede87b2b6e7615d07242dcd109d5ba0a`;
+- M11a source tree at that gate: `9df3ee82fa5252f1b67d6f6a227d754199d72d68`;
+- dedicated `M11a Bootstrap CI` run `32055362952`: Ubuntu PASS and Windows PASS;
+- trusted `BDB vNext CI` run `32055362910`: PASS;
+- production Browser/Native/runtime/writer/intake activation remains OFF.
+
+The closure commit itself must receive the same trusted/dedicated CI before merge; the IDs above are the substantive implementation gate immediately preceding the documentation-only closure update.
+
+## External ACTIVE/PREVIOUS/CANDIDATE substrate
+
+- content-addressed `ACTIVE` / `PREVIOUS` / `CANDIDATE` slot manifests;
+- exact bundle digest and source-commit binding using the M1b bundle inspector;
 - exact compatibility identity for protocol generation, Control Store schema, supported Control DB schema range, Content Store schema, and explicit capabilities;
 - external slot state under the Bootstrap authority root, outside the vNext Control DB;
-- read-only query that re-observes backing bundle bytes and fails closed if they move;
-- bounded CANDIDATE staging and discard while preserving the exact ACTIVE pointer;
-- explicit query contract showing `activate_candidate = false` and `activation_deferred_to = M11c`;
-- focused tests for exact ACTIVE identity, staging, compatibility rejection, candidate self-activation rejection, moving bundle rejection, retained immutable evidence, and duplicate staging.
+- read-only query re-observes backing bundle bytes and fails closed if they move;
+- CANDIDATE staging/discard preserves the exact ACTIVE pointer;
+- incompatible, hostile/self-activating or duplicate candidate staging is rejected;
+- query contract always reports `activate_candidate = false` and `activation_deferred_to = M11c`.
 
-## Added in tranche 2 — prepared activation preflight
+## Prepared activation / recovery substrate
 
 - immutable prepared-activation evidence outside the Control DB;
-- exact binding to `slot_state_sha256` and the current ACTIVE/PREVIOUS/CANDIDATE manifest digests;
-- PREVIOUS is mandatory for preparation and must remain independently inspectable and compatible;
-- independent bounded PREVIOUS health witness before preparation can complete;
-- coordinated M1b runtime backup published under the external Bootstrap authority root;
-- backup re-verification after publication and on every prepared-activation query;
-- recovery target identity recorded without restoring into or mutating the production runtime;
-- post-backup slot re-observation proving ACTIVE and the prepared slot state did not move during preparation;
-- prepared query fails closed if slot bytes, slot state, or backup identity become stale/tampered;
-- explicit `activate_candidate = false`; no activation function is exported.
+- exact binding to `slot_state_sha256` and current ACTIVE/PREVIOUS/CANDIDATE manifest digests;
+- PREVIOUS is mandatory and independently inspectable/compatible;
+- bounded PREVIOUS health witness is required before preparation completes;
+- coordinated M1b runtime backup is published and independently re-verified;
+- recovery target identity is recorded without mutating production runtime;
+- post-backup slot re-observation proves ACTIVE/state did not move during preparation;
+- stale slot state, moving bundle, failed PREVIOUS health, non-quiesced runtime and backup tamper all fail closed;
+- no preparation operation can switch ACTIVE.
 
-## CI authority
+## Windows Bootstrap TCB
 
-Trusted `BDB vNext CI` is now installed on the canonical `bdb-vnext` base. Pull requests to `bdb-vnext` are validated on GitHub-hosted Windows and Ubuntu runners. This replaces routine local operator test loops; local Windows execution is reserved for machine-specific runtime/registry/Chrome/ACL/cold-start evidence that GitHub-hosted runners cannot establish for the user's installation.
+M11a defines an external Windows authority boundary at `%PROGRAMDATA%\BartoszDevBridge-Next\bootstrap`.
 
-## Frozen safety properties
+The machine-checked policy requires:
 
-- candidate business logic never chooses the ACTIVE pointer;
-- M1b `candidate_may_write_final_pointer = false` remains enforced for staged candidates;
-- production activation remains `OFF`;
-- prepared activation is evidence/preflight only, not authority to switch;
-- Legacy remains a separate side-by-side product and is not disabled or reinterpreted by this unit;
-- the external slot state records only BDB Next identities; it is not a global Legacy activation authority;
-- mutable backing bundle bytes invalidate the slot on query instead of silently retaining authority;
-- a stale/tampered backup cannot remain a valid prepared activation.
+- protected ACL inheritance;
+- owner = SYSTEM or BUILTIN\Administrators by SID;
+- write-capable ACEs only for SYSTEM (`S-1-5-18`) and Administrators (`S-1-5-32-544`);
+- ordinary Users (`S-1-5-32-545`) receive read/execute only;
+- Authenticated Users / Everyone / Users cannot receive a write-capable allow ACE;
+- runtime, Legacy and mutable candidate roots cannot overlap the authority root;
+- candidate/runtime token contract is standard non-elevated;
+- `candidate_may_write_authority = false` and `activation_operation_available = false`.
 
-## Explicitly not done yet
+The dedicated Windows Actions job creates a real NTFS fixture, applies the SID-based ACL with `icacls`, reads it back through PowerShell, converts identities to SIDs and validates the resulting witness. This is platform-targeted M11a evidence, not a claim that the user's production machine has already been modified.
 
-- no supported-Windows permissions/ACL proof for the external Bootstrap authority root;
-- no packaged external launcher/start/stop integration proof;
-- no stale PID/process reachability proof against the real Windows packaging surface;
-- no real platform test that candidate code cannot write Bootstrap authority files;
-- no fault injection or activation crash matrix (M11b);
-- no final activation pointer writer or CANDIDATE -> ACTIVE transition (M11c);
-- no production install, registration, or cutover.
+## External admin/actions contract
 
-## Next M11a loop
+Installed entrypoint: `bdb-vnext-bootstrap-admin`.
 
-Use trusted GitHub Actions for source/regression validation, then add the platform-targeted Windows Bootstrap authority/permissions/launcher preflight required by M11a DONE. Only after that proof is green should M11a be closed and M11b begin.
+M11a exposes exactly:
+
+- `status` — revalidate exact external slot/preparation state;
+- `verify-tcb` — verify ProgramData topology + real ACL witness;
+- `prepare` — verify TCB first, then create prepared-activation evidence.
+
+There is deliberately no `activate`, `switch`, install, start or stop verb. CI inspects the installed parser and module exports to prove the activation operation is absent. Effectful activation/start-stop authority belongs to M11c after M11b PASS.
+
+## Failure ownership boundary
+
+Handled in M11a:
+
+- missing/corrupt/moved exact subjects fail closed through manifest/digest revalidation;
+- compatibility mismatch blocks staging/preparation;
+- concurrent authority mutation is serialized by external Bootstrap OS lock;
+- backup, health and authority publication failures remain typed/blocking;
+- stale preparation cannot be reused after slot/backup drift;
+- candidate self-activation is rejected by bundle contract, actions surface and Windows authority boundary.
+
+Deferred to M11b by design:
+
+- kill/crash after every durable activation boundary;
+- pointer torn-write/reboot/AV lock/disk-full matrix across an actual switch algorithm;
+- start/stop/health-ACK loss and previous-corrupt recovery combinations;
+- forward-only boundary fault classification.
+
+Those are activation-fault experiments, not missing M11a source authority.
+
+## Side-by-side product boundary
+
+Legacy remains an independent product. The Bootstrap root and slot authority described here are BDB Next-specific. M11a does not disable, uninstall or reinterpret Legacy and does not grant Next authority over unrelated Legacy subjects.
+
+## M11a DONE decision
+
+M11a is closed when the documentation-only closure commit receives the same Windows/Ubuntu dedicated and trusted CI gates. A real user-machine `%PROGRAMDATA%` install/ACL/registry/Chrome change is intentionally **not** part of this build-only closure and must be freshly revalidated at the later M11c production cutover.
+
+Next unit after final green closure CI: **M11b Activation Fault Matrix**.
