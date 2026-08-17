@@ -1,14 +1,16 @@
 """Dedicated BDB Next Native Messaging transport.
 
-The Native Host owns transport only.  Production admission requires three
+The Native Host owns transport only. Production admission requires three
 independent gates to agree:
 
 1. the M11c external ProgramData Bootstrap is ACTIVE (activation authority),
 2. the M9b Browser/Native client gate is ACTIVE (subordinate route gate), and
 3. the canonical M3c intake switch is enabled (internal writer gate).
 
-No single runtime-local record can therefore self-activate BDB Next.  There is
-no legacy receipt/spool/alias fallback.
+Chrome also supplies the caller extension origin on the Native Messaging
+process command line. A successful handshake from the pinned vNext origin may
+publish a bounded M11c client-verification observation in the runtime root; it
+is evidence only and never an activation authority.
 """
 
 from __future__ import annotations
@@ -27,14 +29,10 @@ from bdb_vnext.composition import (
     GENERATION_ID,
     NATIVE_HOST_NAME,
     PROTOCOL_GENERATION,
-    default_legacy_runtime_root,
     default_vnext_runtime_root,
 )
-from bdb_vnext.m11c_cutover import (
-    M11cCutoverError,
-    observe_bootstrap_activation,
-    require_bootstrap_active,
-)
+from bdb_vnext.m11c_cutover import M11cCutoverError, observe_bootstrap_activation, require_bootstrap_active
+from bdb_vnext.m11c_windows_clients import M11cClientError, record_browser_launch_verification
 from bdb_vnext.m3a_submission import M3aError, ShadowSubmissionRequest
 from bdb_vnext.m3c_admission import CanonicalVNextAdmissionAuthority, M3cError
 from bdb_vnext.m9b_activation import M9bActivationError, read_activation, require_active
@@ -73,6 +71,18 @@ def _overlaps(left: Path, right: Path) -> bool:
     except ValueError:
         return False
     return common in {os.fspath(left), os.fspath(right)}
+
+
+def _expected_origin() -> str:
+    return f"chrome-extension://{BROWSER_EXTENSION_ID}/"
+
+
+def _validate_caller_origin(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if value != _expected_origin():
+        _fail("browser_origin_mismatch", "Native Messaging caller is not the pinned vNext extension")
+    return value
 
 
 @dataclass(frozen=True)
@@ -201,10 +211,7 @@ def _activation_projection(config: VNextNativeConfig) -> dict[str, Any]:
             "writer_enabled": False,
             "intake_enabled": False,
         }
-    bootstrap_matches = (
-        bootstrap["status"] == "ACTIVE"
-        and bootstrap["slots"]["ACTIVE"]["source_commit"] == client.source_head
-    )
+    bootstrap_matches = bootstrap["status"] == "ACTIVE" and bootstrap["slots"]["ACTIVE"]["source_commit"] == client.source_head
     effective = client.state == "ACTIVE" and client.writer_enabled and client.intake_enabled and bootstrap_matches
     return {
         "state": client.state,
@@ -228,7 +235,12 @@ def _base_response(config: VNextNativeConfig, request_id: str, *, status: str = 
     }
 
 
-def handle_message(config: VNextNativeConfig, message: Mapping[str, Any]) -> dict[str, Any]:
+def handle_message(
+    config: VNextNativeConfig,
+    message: Mapping[str, Any],
+    *,
+    caller_origin: str | None = None,
+) -> dict[str, Any]:
     if message.get("schema") != M9B_NATIVE_REQUEST_SCHEMA:
         _fail("unsupported_schema", "Native request schema differs")
     request_id = _bounded_text(message.get("request_id"), field="request_id", maximum=128)
@@ -254,21 +266,24 @@ def handle_message(config: VNextNativeConfig, message: Mapping[str, Any]) -> dic
             "legacy_receipts": False,
             "legacy_spool": False,
         }
+        if caller_origin is not None:
+            try:
+                verification = record_browser_launch_verification(
+                    runtime_root=config.runtime_root,
+                    caller_origin=_validate_caller_origin(caller_origin) or "",
+                )
+            except M11cClientError as exc:
+                raise M9bNativeError(exc.code, str(exc)) from exc
+            response["client_verification_sha256"] = verification["verification_sha256"]
         return response
 
     try:
         client_gate = require_active(config.runtime_root)
-        require_bootstrap_active(
-            config.bootstrap_authority_root,
-            expected_source_head=client_gate.source_head,
-        )
+        require_bootstrap_active(config.bootstrap_authority_root, expected_source_head=client_gate.source_head)
     except (M9bActivationError, M11cCutoverError) as exc:
         raise M9bNativeError(exc.code, str(exc)) from exc
 
-    authority = CanonicalVNextAdmissionAuthority.open(
-        config.runtime_root,
-        legacy_root=config.legacy_runtime_root,
-    )
+    authority = CanonicalVNextAdmissionAuthority.open(config.runtime_root, legacy_root=config.legacy_runtime_root)
     try:
         if authority.admission_enabled is not True:
             _fail("canonical_intake_disabled", "M3c canonical intake kill switch is not enabled")
@@ -326,7 +341,17 @@ def _error_response(config: VNextNativeConfig, request_id: str, exc: BaseExcepti
     return response
 
 
-def serve(config: VNextNativeConfig, stdin: BinaryIO, stdout: BinaryIO) -> int:
+def serve(
+    config: VNextNativeConfig,
+    stdin: BinaryIO,
+    stdout: BinaryIO,
+    *,
+    caller_origin: str | None = None,
+) -> int:
+    try:
+        caller_origin = _validate_caller_origin(caller_origin)
+    except M9bNativeError:
+        return 2
     while True:
         try:
             message = read_native_message(stdin)
@@ -334,8 +359,8 @@ def serve(config: VNextNativeConfig, stdin: BinaryIO, stdout: BinaryIO) -> int:
                 return 0
             request_id = str(message.get("request_id") or "invalid-request")[:128]
             try:
-                response = handle_message(config, message)
-            except (M9bNativeError, M3aError, M3cError, M9bActivationError, M11cCutoverError) as exc:
+                response = handle_message(config, message, caller_origin=caller_origin)
+            except (M9bNativeError, M3aError, M3cError, M9bActivationError, M11cCutoverError, M11cClientError) as exc:
                 response = _error_response(config, request_id, exc)
             write_native_message(stdout, response)
         except M9bNativeError:
@@ -344,17 +369,33 @@ def serve(config: VNextNativeConfig, stdin: BinaryIO, stdout: BinaryIO) -> int:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="BDB Next dedicated Native Messaging host")
+    parser.add_argument("caller_origin", nargs="?", help="Chrome Native Messaging caller origin")
+    parser.add_argument("--parent-window", dest="parent_window", default=None)
     parser.add_argument("--config", default=str(default_vnext_native_config_path()))
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+def _set_windows_binary_stdio() -> None:
+    if os.name != "nt":
+        return
     try:
+        import msvcrt
+
+        msvcrt.setmode(sys.stdin.fileno(), os.O_BINARY)
+        msvcrt.setmode(sys.stdout.fileno(), os.O_BINARY)
+    except (AttributeError, OSError):
+        _fail("native_stdio_invalid", "Native Messaging stdio could not be set to binary mode")
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        args = _parser().parse_args(argv)
         config = VNextNativeConfig.from_json(args.config)
-    except M9bNativeError:
+        _validate_caller_origin(args.caller_origin)
+        _set_windows_binary_stdio()
+    except (M9bNativeError, SystemExit):
         return 2
-    return serve(config, sys.stdin.buffer, sys.stdout.buffer)
+    return serve(config, sys.stdin.buffer, sys.stdout.buffer, caller_origin=args.caller_origin)
 
 
 if __name__ == "__main__":
