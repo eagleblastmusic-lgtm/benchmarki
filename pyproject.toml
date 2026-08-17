@@ -25,6 +25,7 @@ bdb-inventory = "bdb_bridge.runtime_inventory:main"
 bdb-vnext-manifest = "bdb_vnext.composition:main"
 bdb-vnext-bootstrap = "bdb_vnext.bootstrap:main"
 bdb-vnext-bootstrap-admin = "bdb_vnext.m11a_bootstrap_admin:main"
+bdb-vnext-native-host = "bdb_vnext.m9b_native_host:main"
 
 [tool.setuptools.packages.find]
 include = [
