@@ -6,13 +6,13 @@ with the post-cutover v2 document. The same ProgramData Bootstrap root remains
 the physical activation authority; no second ACTIVE pointer is introduced.
 
 The M9b activation record is only a subordinate Browser/Native client gate.
-Production admission must require both the M11c external ACTIVE state and the
-M9b ACTIVE gate, plus the canonical M3c intake switch. Writing an M9b record
-alone therefore never grants production authority.
+Production admission must require the M11c external ACTIVE state, the M9b
+ACTIVE gate, the canonical M3c intake switch and an exact Browser->Native
+client verification bound to the immutable M11c client plan.
 
 Importing this module is inert. The public effectful entrypoint is explicitly
-Windows/operator scoped and re-observes the real ProgramData ACL before any
-cutover write.
+Windows/operator scoped and re-observes the real ProgramData ACL and Native
+Messaging route before any product activation write.
 """
 
 from __future__ import annotations
@@ -49,6 +49,13 @@ from bdb_vnext.m11a_bootstrap_slots import (
 )
 from bdb_vnext.m11a_prepared_activation import query_prepared_activation
 from bdb_vnext.m11a_windows_tcb import WINDOWS_TCB_SCHEMA, build_windows_tcb_witness
+from bdb_vnext.m11c_windows_clients import (
+    M11cClientError,
+    disable_windows_legacy_native_route,
+    observe_windows_native_routes,
+    query_client_plan,
+    require_client_verification,
+)
 from bdb_vnext.m3c_admission import CanonicalVNextAdmissionAuthority
 from bdb_vnext.m9b_activation import (
     ActivationRecord,
@@ -182,6 +189,7 @@ def _load_plan(authority: Path, cutover_id: str) -> dict[str, Any]:
         "preparation_sha256",
         "candidate_bundle_sha256",
         "m9a_freeze_digest",
+        "client_plan_sha256",
         "browser_bundle_digest",
         "native_manifest_digest",
         "tcb_witness_sha256",
@@ -225,6 +233,16 @@ def prepare_cutover_plan(
     freeze_digest = validate_m9a_freeze_report(m9a_report)
     browser_digest = _check_digest(browser_bundle_digest, "browser_bundle_digest")
     native_digest = _check_digest(native_manifest_digest, "native_manifest_digest")
+    try:
+        client_plan = query_client_plan(runtime_root=runtime)["plan"]
+    except M11cClientError as exc:
+        raise M11cCutoverError(exc.code, str(exc)) from exc
+    if client_plan["source_head"] != source_head or client_plan["source_tree"] != source_tree:
+        _fail("client_plan_source_mismatch", "staged Browser/Native clients bind a different source subject")
+    if client_plan["browser_bundle_digest"] != browser_digest:
+        _fail("browser_bundle_mismatch", "Browser digest differs from the staged client plan")
+    if client_plan["native_manifest_sha256"] != native_digest:
+        _fail("native_manifest_mismatch", "Native manifest digest differs from the staged client plan")
     tcb_digest = _validate_tcb_witness(
         tcb_witness,
         authority=authority,
@@ -284,6 +302,7 @@ def prepare_cutover_plan(
             "source_head": source_head,
             "source_tree": source_tree,
             "m9a_freeze_digest": freeze_digest,
+            "client_plan_sha256": client_plan["client_plan_sha256"],
             "browser_bundle_digest": browser_digest,
             "native_manifest_digest": native_digest,
             "tcb_witness_sha256": tcb_digest,
@@ -506,6 +525,13 @@ def _minimal_freeze_report(plan: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _ensure_client_gate(runtime: Path, plan: Mapping[str, Any]) -> ActivationRecord:
+    try:
+        require_client_verification(
+            runtime_root=runtime,
+            expected_client_plan_sha256=plan["client_plan_sha256"],
+        )
+    except M11cClientError as exc:
+        raise M11cCutoverError(exc.code, str(exc)) from exc
     current = read_activation(runtime)
     if current is None:
         return record_clients_verified(
@@ -522,11 +548,7 @@ def _ensure_client_gate(runtime: Path, plan: Mapping[str, Any]) -> ActivationRec
     return current
 
 
-def _verify_active_health(
-    *,
-    active: Mapping[str, Any],
-    legacy: Path,
-) -> None:
+def _verify_active_health(*, active: Mapping[str, Any], legacy: Path) -> None:
     active_doc = active["slots"]["ACTIVE"]
     bundle = inspect_runtime_bundle(
         active_doc["bundle_root"],
@@ -588,6 +610,13 @@ def _apply_cutover(
             _fail("cutover_plan_stale", "operator approval is bound to a different cutover plan")
         runtime = _absolute_path(plan["runtime_root"], field="runtime_root")
         legacy = _absolute_path(plan["legacy_runtime_root"], field="legacy_runtime_root")
+        try:
+            require_client_verification(
+                runtime_root=runtime,
+                expected_client_plan_sha256=plan["client_plan_sha256"],
+            )
+        except M11cClientError as exc:
+            raise M11cCutoverError(exc.code, str(exc)) from exc
         if _validate_tcb_witness(tcb_witness, authority=authority, runtime=runtime, legacy=legacy) != plan["tcb_witness_sha256"]:
             _fail("tcb_witness_stale", "current Windows TCB differs from the approved plan")
 
@@ -733,6 +762,13 @@ def apply_windows_cutover(
         runtime_root=plan["runtime_root"],
         legacy_runtime_root=plan["legacy_runtime_root"],
     )
+    try:
+        routes = observe_windows_native_routes(runtime_root=plan["runtime_root"])
+        if routes["target_conflict"] or not routes["target_registered"]:
+            _fail("target_native_route_unverified", "exact vNext Native route is not registered")
+        disable_windows_legacy_native_route(runtime_root=plan["runtime_root"])
+    except M11cClientError as exc:
+        raise M11cCutoverError(exc.code, str(exc)) from exc
     return _apply_cutover(
         authority_root=authority,
         cutover_id=cutover_id,
