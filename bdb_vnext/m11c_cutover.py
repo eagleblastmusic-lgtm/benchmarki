@@ -57,6 +57,11 @@ from bdb_vnext.m11c_windows_clients import (
     query_client_plan,
     require_client_verification,
 )
+from bdb_vnext.m9a_handoff import (
+    M9aHandoffError,
+    revalidate_side_by_side_digest,
+    verify_side_by_side_report,
+)
 from bdb_vnext.m3c_admission import CanonicalVNextAdmissionAuthority
 from bdb_vnext.m9b_activation import (
     ActivationRecord,
@@ -715,6 +720,15 @@ def prepare_windows_cutover_plan(
     program_data = os.environ.get("PROGRAMDATA")
     if not program_data:
         _fail("programdata_unavailable", "PROGRAMDATA is required for production M11c")
+    try:
+        freeze_digest = verify_side_by_side_report(runtime_root=runtime_root, report=m9a_report)
+        revalidate_side_by_side_digest(
+            runtime_root=runtime_root,
+            legacy_runtime_root=legacy_runtime_root,
+            freeze_digest=freeze_digest,
+        )
+    except M9aHandoffError as exc:
+        raise M11cCutoverError(exc.code, str(exc)) from exc
     prepared = query_prepared_activation(authority_root=authority_root, preparation_id=preparation_id)
     candidate = prepared["slots"]["slots"]["CANDIDATE"]
     if not isinstance(candidate, Mapping):
@@ -770,6 +784,15 @@ def apply_windows_cutover(
             expected_client_plan_sha256=plan["client_plan_sha256"],
         )
     except (M11cClientError, BootstrapError) as exc:
+        raise M11cCutoverError(exc.code, str(exc)) from exc
+
+    try:
+        revalidate_side_by_side_digest(
+            runtime_root=runtime,
+            legacy_runtime_root=legacy,
+            freeze_digest=plan["m9a_freeze_digest"],
+        )
+    except M9aHandoffError as exc:
         raise M11cCutoverError(exc.code, str(exc)) from exc
 
     observed = observe_bootstrap_activation(authority_root=authority)
