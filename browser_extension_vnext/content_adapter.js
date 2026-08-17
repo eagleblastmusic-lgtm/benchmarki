@@ -14,10 +14,13 @@ function parseSubmission(block) {
     if (!value || typeof value !== "object" || Array.isArray(value) || value.schema !== SUBMISSION_SCHEMA) {
       return null;
     }
-    for (const field of ["intent_revision", "intent", "conversation_binding", "consumer_binding"]) {
+    for (const field of ["submission_key", "intent_revision", "intent", "conversation_binding", "consumer_binding"]) {
       if (!(field in value)) {
         return null;
       }
+    }
+    if (typeof value.submission_key !== "string" || value.submission_key.length === 0) {
+      return null;
     }
     return value;
   } catch (_error) {
@@ -27,12 +30,13 @@ function parseSubmission(block) {
 
 function requestFromSubmission(value) {
   const request = {
+    submission_key: value.submission_key,
     intent_revision: value.intent_revision,
     intent: value.intent,
     conversation_binding: value.conversation_binding,
     consumer_binding: value.consumer_binding
   };
-  for (const field of ["submission_key", "task_id", "expected_intent_revision_id"]) {
+  for (const field of ["task_id", "expected_intent_revision_id"]) {
     if (typeof value[field] === "string" && value[field].length > 0) {
       request[field] = value[field];
     }
@@ -54,21 +58,17 @@ function decorate(block, submission) {
     return;
   }
   decorated.add(block);
-
   const host = block.closest("pre") || block.parentElement;
   if (!(host instanceof HTMLElement)) {
     return;
   }
-
   const panel = document.createElement("div");
   panel.className = "bdb-vnext-panel";
-
   const button = document.createElement("button");
   button.type = "button";
   button.className = "bdb-vnext-submit";
   button.textContent = "BDB vNext: Submit";
   button.setAttribute("aria-label", "Submit this request to the canonical BDB vNext generation");
-
   const output = document.createElement("div");
   output.className = "bdb-vnext-output";
   output.setAttribute("role", "status");
@@ -121,7 +121,6 @@ function scan(root = document) {
 }
 
 scan(document);
-
 const observer = new MutationObserver((records) => {
   for (const record of records) {
     for (const node of record.addedNodes) {
@@ -131,7 +130,6 @@ const observer = new MutationObserver((records) => {
     }
   }
 });
-
 if (document.documentElement) {
   observer.observe(document.documentElement, { childList: true, subtree: true });
 }
