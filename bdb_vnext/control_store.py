@@ -148,10 +148,23 @@ def seal_path_for_database(database_path: str | Path) -> Path:
 def _read_seal(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
-    try:
-        document = json.loads(path.read_bytes().decode("utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ControlStoreError("control_seal_corrupt", "Control DB external seal is not valid canonical JSON") from exc
+    deadline = time.monotonic() + (CONTROL_BUSY_TIMEOUT_MS / 1000) + 0.5
+    while True:
+        try:
+            payload = path.read_bytes()
+        except OSError as exc:
+            # Windows may briefly deny a reader while another process atomically
+            # replaces the final seal. Retry only that transport-level sharing
+            # window; malformed bytes below remain immediately fail-closed.
+            if time.monotonic() < deadline:
+                time.sleep(0.005)
+                continue
+            raise ControlStoreError("control_seal_corrupt", "Control DB external seal is not valid canonical JSON") from exc
+        try:
+            document = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ControlStoreError("control_seal_corrupt", "Control DB external seal is not valid canonical JSON") from exc
+        break
     if not isinstance(document, dict) or document.get("schema") != CONTROL_SEAL_SCHEMA:
         _fail("control_seal_mismatch", "Control DB external seal schema differs")
     return document

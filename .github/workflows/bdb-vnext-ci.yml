@@ -20,9 +20,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Some exact-source contracts resolve historical committed subjects.
-          # Keep those objects available without turning machine-specific N6
-          # experiments into a universal PR gate.
           fetch-depth: 0
 
       - uses: actions/setup-python@v5
@@ -58,6 +55,15 @@ jobs:
           existing = [item for item in tests if Path(item).is_file()]
           if existing:
               raise SystemExit(subprocess.call(['python', '-m', 'pytest', '-q', *existing]))
+
+      - name: Run focused Control Store race contract when present
+        shell: python {0}
+        run: |
+          import subprocess
+          from pathlib import Path
+          test = Path('tests/test_control_seal_read_retry.py')
+          if test.is_file():
+              raise SystemExit(subprocess.call(['python', '-m', 'pytest', '-q', str(test)]))
 
       - name: Run M9b/M3 portable regression gate
         run: >-
