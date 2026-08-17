@@ -56,14 +56,18 @@ jobs:
           if existing:
               raise SystemExit(subprocess.call(['python', '-m', 'pytest', '-q', *existing]))
 
-      - name: Run focused Control Store race contract when present
+      - name: Run focused Control Store race contracts when present
         shell: python {0}
         run: |
           import subprocess
           from pathlib import Path
-          test = Path('tests/test_control_seal_read_retry.py')
-          if test.is_file():
-              raise SystemExit(subprocess.call(['python', '-m', 'pytest', '-q', str(test)]))
+          tests = [
+              Path('tests/test_control_seal_read_retry.py'),
+              Path('tests/test_control_seal_write_retry.py'),
+          ]
+          existing = [str(item) for item in tests if item.is_file()]
+          if existing:
+              raise SystemExit(subprocess.call(['python', '-m', 'pytest', '-q', *existing]))
 
       - name: Run M9b/M3 portable regression gate
         run: >-
