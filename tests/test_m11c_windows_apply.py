@@ -8,18 +8,28 @@ from pathlib import Path
 import pytest
 
 import bdb_vnext.m11c_cutover as m11c
-from test_m11c_cutover import (
-    BROWSER_DIGEST,
-    FREEZE_DIGEST,
-    HEAD,
-    NATIVE_DIGEST,
-    TREE,
-    _fixture,
-    _m9a_report,
+from bdb_vnext.m11c_windows_clients import (
+    TARGET_REGISTRY_SUBKEY,
+    register_windows_target_native_host,
 )
+from test_m11c_cutover import FREEZE_DIGEST, HEAD, TREE, _fixture, _m9a_report
 
 
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="M11c public apply is Windows-only")
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_test_target_native_route():
+    yield
+    if os.name != "nt":
+        return
+    import winreg
+
+    for view in (winreg.KEY_WOW64_32KEY, winreg.KEY_WOW64_64KEY):
+        try:
+            winreg.DeleteKeyEx(winreg.HKEY_CURRENT_USER, TARGET_REGISTRY_SUBKEY, view, 0)
+        except (FileNotFoundError, OSError):
+            pass
 
 
 def _powershell() -> str:
@@ -52,12 +62,16 @@ def _harden_real_acl(authority: Path) -> None:
     assert completed.returncode == 0, completed.stderr.decode("utf-8", errors="replace")
 
 
-def test_public_windows_prepare_and_apply_reobserve_real_acl(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_public_windows_prepare_and_apply_reobserve_real_acl_and_native_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     fixture = _fixture(tmp_path)
     authority = Path(fixture["authority"])
     program_data = Path(fixture["program_data"])
+    client_plan = fixture["client_plan"]
     _harden_real_acl(authority)
     monkeypatch.setenv("PROGRAMDATA", str(program_data))
+    routes = register_windows_target_native_host(runtime_root=fixture["runtime"])
+    assert routes["target_registered"] is True
+    assert routes["target_conflict"] is False
 
     prepared = m11c.prepare_windows_cutover_plan(
         authority_root=authority,
@@ -68,10 +82,11 @@ def test_public_windows_prepare_and_apply_reobserve_real_acl(tmp_path: Path, mon
         source_head=HEAD,
         source_tree=TREE,
         m9a_report=_m9a_report(),
-        browser_bundle_digest=BROWSER_DIGEST,
-        native_manifest_digest=NATIVE_DIGEST,
+        browser_bundle_digest=client_plan["browser_bundle_digest"],
+        native_manifest_digest=client_plan["native_manifest_sha256"],
     )
     plan = prepared["plan"]
+    assert plan["client_plan_sha256"] == client_plan["client_plan_sha256"]
     assert plan["tcb_witness_sha256"].startswith("sha256:")
     assert plan["m9a_freeze_digest"] == FREEZE_DIGEST
     assert m11c.observe_bootstrap_activation(authority_root=authority)["status"] == "PREPARED"
@@ -94,6 +109,7 @@ def test_public_windows_apply_rejects_wrong_programdata_after_plan(tmp_path: Pat
     fixture = _fixture(tmp_path)
     authority = Path(fixture["authority"])
     program_data = Path(fixture["program_data"])
+    client_plan = fixture["client_plan"]
     _harden_real_acl(authority)
     monkeypatch.setenv("PROGRAMDATA", str(program_data))
 
@@ -106,8 +122,8 @@ def test_public_windows_apply_rejects_wrong_programdata_after_plan(tmp_path: Pat
         source_head=HEAD,
         source_tree=TREE,
         m9a_report=_m9a_report(),
-        browser_bundle_digest=BROWSER_DIGEST,
-        native_manifest_digest=NATIVE_DIGEST,
+        browser_bundle_digest=client_plan["browser_bundle_digest"],
+        native_manifest_digest=client_plan["native_manifest_sha256"],
     )
     plan = prepared["plan"]
 
