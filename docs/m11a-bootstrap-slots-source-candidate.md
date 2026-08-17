@@ -6,15 +6,15 @@ M11a evolves the existing M1b external bootstrap/recovery floor into the BDB Nex
 
 ## Exact closure basis
 
-- canonical base after M9b and Windows concurrency hardening: `ff565224c982aec62c5eb430bce79c261dbbac67`;
-- M11a source merge head before this closure-record update: `8cbbe93a716e0a029396618a0963f2d74756a806`;
-- M11a source tree at that gate: `9a48c2495c29c9511a73162245cb831d433c35ab`;
-- prior substantive dedicated `M11a Bootstrap CI` run `32055362952`: Ubuntu PASS and Windows PASS, including real hosted-Windows SID/ACL readback;
-- prior substantive trusted `BDB vNext CI` run `32055362910`: PASS;
-- canonical Control Store seal-read hardening PR #85: focused contract + portable regression PASS on Ubuntu and Windows in run `32056199104`;
+- canonical base after M9b and complete Windows Control Store concurrency hardening: `ed58e9e4781312b6f82d7b050a4e2fa14b141536`;
+- M11a source merge head before this closure-record update: `9b83477f0e222904f9f331bfc736bddd5c13fb6f`;
+- M11a source tree at that gate: `394d22d03f0732c667894511bfe0f7066c145335`;
+- substantive dedicated `M11a Bootstrap CI` evidence includes Windows + Ubuntu slot/preparation/TCB/admin validation and real hosted-Windows SID/ACL readback;
+- trusted `BDB vNext CI` independently validates portable M11a/M1b, M9b/M3 and focused Control Store seal read/write race contracts on Windows + Ubuntu;
+- Control Store read-side sharing fix PR #85 and writer-side publication fix PR #86 are both merged into the canonical base;
 - production Browser/Native/runtime/writer/intake activation remains OFF.
 
-This final closure-record commit must receive the same trusted/dedicated M11a gates before merge. The evidence above records the substantive implementation and the additional Windows concurrency fix now inherited from canonical `bdb-vnext`.
+This documentation-only closure commit must receive the same dedicated and trusted CI gates before merge.
 
 ## External ACTIVE/PREVIOUS/CANDIDATE substrate
 
@@ -54,7 +54,7 @@ The machine-checked policy requires:
 - candidate/runtime token contract is standard non-elevated;
 - `candidate_may_write_authority = false` and `activation_operation_available = false`.
 
-The dedicated Windows Actions job creates a real NTFS fixture, applies the SID-based ACL with `icacls`, reads it back through PowerShell, converts identities to SIDs and validates the resulting witness. This is platform-targeted M11a evidence, not a claim that the user's production machine has already been modified.
+The dedicated Windows Actions job creates a real NTFS fixture, establishes explicit SYSTEM/Admin/Users ACEs before removing inheritance to avoid transient lockout, sets the owner, re-applies the exact final ACL, reads it back through PowerShell, converts identities to SIDs and validates the resulting witness. This is platform-targeted M11a evidence, not a claim that the user's production machine has already been modified.
 
 ## External admin/actions contract
 
@@ -75,7 +75,7 @@ Handled in M11a:
 - missing/corrupt/moved exact subjects fail closed through manifest/digest revalidation;
 - compatibility mismatch blocks staging/preparation;
 - concurrent authority mutation is serialized by external Bootstrap OS lock;
-- coordinated Control Store config/seal publication is concurrency-safe on Windows, including bounded retry of transient final-seal sharing violations;
+- coordinated Control Store config/seal publication is concurrency-safe on Windows, including bounded retry of transient final-seal read and atomic-publication sharing violations;
 - backup, health and authority publication failures remain typed/blocking;
 - stale preparation cannot be reused after slot/backup drift;
 - candidate self-activation is rejected by bundle contract, actions surface and Windows authority boundary.
