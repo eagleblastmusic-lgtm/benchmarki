@@ -61,7 +61,9 @@ def test_native_admission_requires_external_bootstrap_and_target_identity() -> N
     assert "require_bootstrap_active" in source
     assert "canonical_intake_disabled" in source
     assert "bootstrap_authority_root" in source
-    assert NATIVE_HOST_NAME in source
+    assert "NATIVE_HOST_NAME" in source
+    assert "BROWSER_EXTENSION_ID" in source
+    assert NATIVE_HOST_NAME == "com.bartosz.dev_bridge.vnext"
     assert "legacy_fallback" in source
     assert '"legacy_fallback": False' in source
 
