@@ -13,10 +13,11 @@ from .version import APPLICATION_VERSION
 
 
 SMOKE_SCHEMA = "bdb-control-center-smoke-v1"
+LEGACY_CONTROL_CENTER_RETIRED_CODE = "legacy_control_center_retired_cc2"
 
 
 def _default_workspaces_root() -> Path:
-    """Legacy compatibility root; it is not a CC1 semantic source."""
+    """Retained CLI-compatibility value; CC2 never reads it as active state."""
 
     local_app_data = os.environ.get("LOCALAPPDATA")
     if local_app_data:
@@ -25,34 +26,34 @@ def _default_workspaces_root() -> Path:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="BDB Control Center — canonical vNext CC1")
+    parser = argparse.ArgumentParser(description="BDB Control Center — canonical vNext projection")
     parser.add_argument(
         "--runtime-root",
         default=str(default_vnext_runtime_root()),
-        help="Existing vNext runtime root. CC1 never creates or repairs it.",
+        help="Existing vNext runtime root. Control Center never creates or repairs it.",
     )
     parser.add_argument(
         "--workspaces-root",
         default=str(_default_workspaces_root()),
         help=(
-            "Legacy compatibility root. It is ignored by the default vNext CC1 path "
-            "and used only with --legacy-control-center."
+            "Retired legacy CLI compatibility argument. CC2 ignores this path and "
+            "never interprets it as active/current state."
         ),
     )
     parser.add_argument(
         "--legacy-control-center",
         action="store_true",
         help=(
-            "Explicitly launch the frozen legacy Control Center. This is an operator "
-            "choice, never an automatic fallback from vNext."
+            "Retired by CC2. The flag is retained only as a fail-closed CLI tombstone; "
+            "it never imports or launches legacy Control Center semantics."
         ),
     )
     parser.add_argument(
         "--headless-smoke",
         action="store_true",
-        help="Run the selected GUI shell through an offscreen bootstrap and exit",
+        help="Run the canonical vNext GUI shell through an offscreen bootstrap and exit",
     )
-    parser.add_argument("--json-out", help="Optional path for the headless smoke report")
+    parser.add_argument("--json-out", help="Optional path for the headless/fail-closed report")
     parser.add_argument("--smoke-timeout-ms", type=int, default=15_000)
     return parser
 
@@ -67,37 +68,24 @@ def _render_report(report: dict[str, Any], output_path: str | None) -> None:
         path.write_text(rendered + "\n", encoding="utf-8")
 
 
-def _legacy_window(*, args: argparse.Namespace, application: Any, workspaces_root: str) -> Any:
-    """Construct the frozen legacy product only after an explicit CLI opt-in."""
-
-    from .bootstrap import BootstrapService
-    from .operations import ProjectOperationsService
-    from .session_history_window import (
-        SessionProjectControlCenterWindow,
-        SessionTrayProjectControlCenterWindow,
-    )
-    from .tray import TrayController
-
-    tray_controller: TrayController | None = None
-    if args.headless_smoke:
-        window = SessionProjectControlCenterWindow(
-            bootstrap_service=BootstrapService(),
-            operations_service=ProjectOperationsService(),
-            workspaces_root=workspaces_root,
-            auto_load_status=not args.headless_smoke,
-        )
-    else:
-        window = SessionTrayProjectControlCenterWindow(
-            bootstrap_service=BootstrapService(),
-            operations_service=ProjectOperationsService(),
-            workspaces_root=workspaces_root,
-            auto_load_status=not args.headless_smoke,
-        )
-        tray_controller = TrayController(application, window)
-        window.install_tray_controller(tray_controller)
-        tray_controller.start()
-    window._cc1_legacy_tray_controller = tray_controller
-    return window
+def _retired_legacy_report() -> dict[str, Any]:
+    return {
+        "schema": SMOKE_SCHEMA,
+        "status": "failed",
+        "application_version": APPLICATION_VERSION,
+        "error_code": LEGACY_CONTROL_CENTER_RETIRED_CODE,
+        "error": (
+            "CC2 retired active legacy Control Center interpretation after M9a. "
+            "Legacy state is archive-only/non-authority and cannot be launched as current state."
+        ),
+        "legacy_control_center": True,
+        "legacy_active_interpretation": False,
+        "legacy_fallback": False,
+        "archive_only": True,
+        "read_only": True,
+        "mutation_operations_invoked": 0,
+        "vnext_activation_allowed": False,
+    }
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -112,6 +100,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
         _render_report(report, args.json_out)
         return 2
+
+    # CC2 is a hard semantic boundary: the historical switch may remain parseable
+    # for CLI compatibility, but it must fail before PySide or any legacy GUI module
+    # can be imported. There is no active legacy fallback after M9a PASS_CLOSED.
+    if args.legacy_control_center:
+        _render_report(_retired_legacy_report(), args.json_out)
+        return 3
 
     if args.headless_smoke:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -130,6 +125,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "error_code": "pyside6_missing",
             "error": str(error),
             "install_hint": 'python -m pip install -e ".[gui]"',
+            "legacy_fallback": False,
         }
         _render_report(report, args.json_out)
         return 2
@@ -140,18 +136,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     application.setApplicationName("BDB Control Center")
     application.setApplicationVersion(APPLICATION_VERSION)
     application.setOrganizationName("Bartosz Dev Bridge")
-    application.setQuitOnLastWindowClosed(
-        not (args.legacy_control_center and not args.headless_smoke)
-    )
+    application.setQuitOnLastWindowClosed(True)
 
-    if args.legacy_control_center:
-        window = _legacy_window(
-            args=args,
-            application=application,
-            workspaces_root=workspaces_root,
-        )
-    else:
-        window = VNextControlCenterWindow(runtime_root=runtime_root)
+    window = VNextControlCenterWindow(runtime_root=runtime_root)
 
     report: dict[str, Any] = {}
     timed_out = False
@@ -167,7 +154,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "application_version": APPLICATION_VERSION,
                 "runtime_root": runtime_root,
                 "workspaces_root": workspaces_root,
-                "legacy_control_center": bool(args.legacy_control_center),
+                "legacy_control_center": False,
+                "legacy_active_interpretation": False,
                 "qt_version": qVersion(),
                 "pyside_version": PySide6.__version__,
                 "python_version": platform.python_version(),
@@ -193,6 +181,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "bootstrap_completed": False,
                 "mutation_operations_invoked": 0,
                 "legacy_fallback": False,
+                "legacy_active_interpretation": False,
                 "tray_created": False,
             }
         )
@@ -211,6 +200,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         report.setdefault("schema", SMOKE_SCHEMA)
         report.setdefault("status", "failed")
         report.setdefault("application_version", APPLICATION_VERSION)
+        report.setdefault("legacy_fallback", False)
+        report.setdefault("legacy_active_interpretation", False)
         report["event_loop_exit_code"] = exit_code
         report["timed_out"] = timed_out
         _render_report(report, args.json_out)
