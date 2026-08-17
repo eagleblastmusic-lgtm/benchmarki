@@ -1,0 +1,59 @@
+name: M11b Windows Evidence
+
+on:
+  pull_request:
+    branches: [bdb-vnext]
+    paths:
+      - 'bdb_vnext/m11b_*.py'
+      - 'tests/test_m11b_*.py'
+      - '.github/workflows/m11b-evidence-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-evidence:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+
+      - name: Execute matrix into retained pytest temp root
+        run: >-
+          python -m pytest -q
+          --basetemp=.m11b-evidence
+          tests/test_m11b_fault_matrix.py
+          tests/test_m11b_windows_faults.py
+          tests/test_m11b_fault_catalog.py
+
+      - name: Inventory retained durable witnesses
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -LiteralPath .m11b-evidence -Recurse -File |
+            Sort-Object FullName
+          if (-not $files) { throw 'No M11b evidence files were retained.' }
+          $files | ForEach-Object {
+            $relative = [System.IO.Path]::GetRelativePath((Get-Location).Path, $_.FullName)
+            $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+            "$relative sha256:$sha"
+          } | Set-Content -Encoding utf8 .m11b-evidence-inventory.txt
+          Get-Content .m11b-evidence-inventory.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: m11b-windows-fault-evidence-${{ github.sha }}
+          path: |
+            .m11b-evidence/
+            .m11b-evidence-inventory.txt
+          if-no-files-found: error
+          retention-days: 30
