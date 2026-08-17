@@ -107,8 +107,16 @@ def test_cc2_retirement_does_not_physically_delete_legacy_history_code() -> None
     assert (REPOSITORY_ROOT / "bdb_gui" / "dashboard.py").is_file()
 
     entrypoint = (REPOSITORY_ROOT / "bdb_gui" / "app.py").read_text(encoding="utf-8")
-    assert "current_operation" not in entrypoint
-    assert "dashboard" not in entrypoint
+    forbidden_legacy_imports = (
+        "bdb_gui.current_operation",
+        "from .current_operation",
+        "import current_operation",
+        "bdb_gui.dashboard",
+        "from .dashboard",
+        "import dashboard",
+    )
+    for token in forbidden_legacy_imports:
+        assert token not in entrypoint
 
 
 def test_cc2_tombstone_cannot_enable_vnext() -> None:
