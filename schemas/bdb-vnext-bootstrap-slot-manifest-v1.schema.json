@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:bdb:schema:vnext-bootstrap-slot-manifest:v1",
+  "title": "BDB vNext M11a external bootstrap slot manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "runtime_id",
+    "generation_id",
+    "slot",
+    "bundle_root",
+    "bundle_id",
+    "bundle_role",
+    "source_commit",
+    "bundle_sha256",
+    "known_good",
+    "compatibility",
+    "manifest_sha256"
+  ],
+  "properties": {
+    "schema": {"const": "bdb-vnext-bootstrap-slot-manifest-v1"},
+    "runtime_id": {"const": "devmaster.bdb.vnext.runtime"},
+    "generation_id": {"const": "bdb-vnext-g1"},
+    "slot": {"enum": ["ACTIVE", "PREVIOUS", "CANDIDATE"]},
+    "bundle_root": {"type": "string", "minLength": 1},
+    "bundle_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "bundle_role": {"enum": ["candidate", "recovery"]},
+    "source_commit": {"type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"},
+    "bundle_sha256": {"$ref": "#/$defs/digest"},
+    "known_good": {"type": "boolean"},
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_generation",
+        "control_store_schema",
+        "supported_control_schema",
+        "content_store_schema",
+        "capabilities"
+      ],
+      "properties": {
+        "protocol_generation": {"const": "bdb-vnext-protocol-v1"},
+        "control_store_schema": {"const": "bdb-vnext-control-store-v1"},
+        "supported_control_schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["min", "max"],
+          "properties": {
+            "min": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+            "max": {"type": "integer", "minimum": 0, "maximum": 2147483647}
+          }
+        },
+        "content_store_schema": {"const": "bdb-vnext-content-store-v1"},
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:+/-]{0,127}$"}
+        }
+      }
+    },
+    "manifest_sha256": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}
