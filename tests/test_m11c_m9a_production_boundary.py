@@ -44,11 +44,19 @@ def test_windows_prepare_rejects_unverified_m9a_before_tcb_or_preparation(monkey
 
 
 def test_windows_apply_revalidates_m9a_before_bootstrap_tcb_or_route_effect(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(m11c.os, "name", "nt")
-    monkeypatch.setenv("PROGRAMDATA", str(tmp_path / "ProgramData"))
     authority = tmp_path / "authority"
     runtime = tmp_path / "runtime"
     legacy = tmp_path / "legacy"
+    monkeypatch.setattr(m11c.os, "name", "nt")
+    monkeypatch.setenv("PROGRAMDATA", str(tmp_path / "ProgramData"))
+
+    exact_paths = {
+        "authority_root": authority,
+        "runtime_root": runtime,
+        "legacy_runtime_root": legacy,
+    }
+    monkeypatch.setattr(m11c, "_absolute_path", lambda _value, *, field: exact_paths[field])
+
     plan = {
         "cutover_plan_sha256": SHA,
         "runtime_root": str(runtime),
