@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "Bartosz Dev Bridge vNext",
+  "version": "1.0.0",
+  "description": "Target-only BDB vNext Browser transport with canonical admission recovery and no Browser lifecycle authority.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAs3HN3IpsMUnEyuyB3nfMIZXBKM3pIgCAYdU2aEwmsN7e6eNEI1i6l/+pSOXe3WGmhg7FWdK68U1Ir/47mkLmYq80rg26QDcvHkeMjzkVJJ1r+JN/wLP0EpjY0/Y0f6RrEGduD07RyxIakYI5LQO6KMURzx6WW31dqkSnR0JatwFsfHwcYcfxNR189XEHuaO2EtX9cBTcScAbqdiGr2U0ysdK3a7nDjZQmO9x0zms6Bqz5X6ayIVLZKvXLtbaSbKR1cP5K8Rrpk9+8y0Zhut1kXYGxCWCl+TEWeyA4FHmoqeLEuZ69uSwYonnsbiHHsreqYTOIcWi1y1/wUupMXeIEQIDAQAB",
+  "permissions": [
+    "nativeMessaging",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://chatgpt.com/*"
+  ],
+  "background": {
+    "service_worker": "transport_worker.js"
+  },
+  "action": {
+    "default_title": "BDB vNext status",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "content_adapter.js"
+      ],
+      "css": [
+        "content_adapter.css"
+      ],
+      "run_at": "document_idle",
+      "world": "ISOLATED"
+    }
+  ]
+}
