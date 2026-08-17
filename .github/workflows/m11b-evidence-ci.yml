@@ -55,5 +55,6 @@ jobs:
           path: |
             .m11b-evidence/
             .m11b-evidence-inventory.txt
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 30
