@@ -75,17 +75,24 @@ Both have an existing Journal and non-empty direct spool. Both inventories are
 candidate, one spool entry and one unresolved Command/Session while the OS
 process observation did not see a BDB process; that mismatch requires bounded
 writer-candidate reconciliation rather than assuming either side is correct.
-The second profile reports zero active-writer candidates but fourteen spool
+The second profile reports zero active-writer candidates, fourteen spool
 entries and a large unresolved legacy set including effects and manual
 reconciliation. For both profiles the receipt source is invalid/incomplete; the
 promoter source is unavailable/incomplete for `bartosz-dev-bridge` and
 invalid/incomplete for `bdb-self`.
 
-No source candidate may transform those facts into `TERMINAL`, `DRAINED`,
-`FENCED` or `NO_LIVE_COLLISION_CAPABILITY` without additional evidence. In
-particular, absence of a currently visible OS process does not retroactively
-prove a Journal writer candidate is harmless, and old unresolved rows are not
-bulk-classified merely because they are old.
+The original single-profile classifier source at commit
+`6337bac0fe64a0f4739edd2a5a6c3a61c9d58bab` passed its 13 focused Windows tests.
+A later `ModuleNotFoundError` came from invoking the same test file while the
+working directory was outside the repository and is therefore a runner/cwd
+error, not contrary source evidence. The multi-profile aggregation added after
+that observation requires its own focused local run before this PR can advance.
+
+No source candidate may transform the observed facts into `TERMINAL`,
+`DRAINED`, `FENCED` or `NO_LIVE_COLLISION_CAPABILITY` without additional
+evidence. In particular, absence of a currently visible OS process does not
+retroactively prove a Journal writer candidate is harmless, and old unresolved
+rows are not bulk-classified merely because they are old.
 
 ## Archive candidate
 
