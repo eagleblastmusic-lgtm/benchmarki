@@ -1,10 +1,14 @@
-"""Dedicated M9b Native Messaging transport for the active vNext generation.
+"""Dedicated BDB Next Native Messaging transport.
 
-This host is intentionally separate from ``bdb_bridge.native_host``.  It has no
-legacy repository aliases, receipt store, spool, wake event, Session/Command
-model or legacy fallback.  It transports bounded canonical admission messages
-to the M3c authority and refuses production submission unless the independent
-M9b external activation fence is ``ACTIVE``.
+The Native Host owns transport only.  Production admission requires three
+independent gates to agree:
+
+1. the M11c external ProgramData Bootstrap is ACTIVE (activation authority),
+2. the M9b Browser/Native client gate is ACTIVE (subordinate route gate), and
+3. the canonical M3c intake switch is enabled (internal writer gate).
+
+No single runtime-local record can therefore self-activate BDB Next.  There is
+no legacy receipt/spool/alias fallback.
 """
 
 from __future__ import annotations
@@ -26,12 +30,17 @@ from bdb_vnext.composition import (
     default_legacy_runtime_root,
     default_vnext_runtime_root,
 )
+from bdb_vnext.m11c_cutover import (
+    M11cCutoverError,
+    observe_bootstrap_activation,
+    require_bootstrap_active,
+)
 from bdb_vnext.m3a_submission import M3aError, ShadowSubmissionRequest
 from bdb_vnext.m3c_admission import CanonicalVNextAdmissionAuthority, M3cError
 from bdb_vnext.m9b_activation import M9bActivationError, read_activation, require_active
 
 
-M9B_NATIVE_CONFIG_SCHEMA = "bdb-vnext-native-host-config-v1"
+M9B_NATIVE_CONFIG_SCHEMA = "bdb-vnext-native-host-config-v2"
 M9B_NATIVE_REQUEST_SCHEMA = "bdb-vnext-native-request-v1"
 M9B_NATIVE_RESPONSE_SCHEMA = "bdb-vnext-native-response-v1"
 M9B_NATIVE_MAX_MESSAGE_BYTES = 1024 * 1024
@@ -58,10 +67,19 @@ def default_vnext_native_config_path() -> Path:
     return default_vnext_runtime_root() / "config" / "native-host.json"
 
 
+def _overlaps(left: Path, right: Path) -> bool:
+    try:
+        common = os.path.commonpath((os.fspath(left), os.fspath(right)))
+    except ValueError:
+        return False
+    return common in {os.fspath(left), os.fspath(right)}
+
+
 @dataclass(frozen=True)
 class VNextNativeConfig:
     runtime_root: Path
     legacy_runtime_root: Path
+    bootstrap_authority_root: Path
     generation_id: str = GENERATION_ID
     protocol_generation: str = PROTOCOL_GENERATION
     native_host_name: str = NATIVE_HOST_NAME
@@ -77,16 +95,14 @@ class VNextNativeConfig:
             _fail("client_identity_mismatch", "vNext Native config client identity differs")
         runtime = self.runtime_root.expanduser().absolute()
         legacy = self.legacy_runtime_root.expanduser().absolute()
-        try:
-            if os.path.commonpath([os.fspath(runtime), os.fspath(legacy)]) in {
-                os.fspath(runtime),
-                os.fspath(legacy),
-            }:
-                _fail("runtime_overlap", "vNext and legacy runtime roots must be isolated")
-        except ValueError:
-            pass
+        bootstrap = self.bootstrap_authority_root.expanduser().absolute()
+        if _overlaps(runtime, legacy):
+            _fail("runtime_overlap", "vNext and legacy runtime roots must be isolated")
+        if _overlaps(bootstrap, runtime) or _overlaps(bootstrap, legacy):
+            _fail("bootstrap_overlap", "external Bootstrap authority must be isolated from runtime roots")
         object.__setattr__(self, "runtime_root", runtime)
         object.__setattr__(self, "legacy_runtime_root", legacy)
+        object.__setattr__(self, "bootstrap_authority_root", bootstrap)
 
     @classmethod
     def from_json(cls, path: str | Path) -> "VNextNativeConfig":
@@ -107,16 +123,19 @@ class VNextNativeConfig:
             "browser_extension_id",
             "runtime_root",
             "legacy_runtime_root",
+            "bootstrap_authority_root",
         }
         if set(document) != expected_keys:
             _fail("invalid_config", "vNext Native config fields differ")
         runtime = Path(_bounded_text(document["runtime_root"], field="runtime_root", maximum=4096))
         legacy = Path(_bounded_text(document["legacy_runtime_root"], field="legacy_runtime_root", maximum=4096))
-        if not runtime.is_absolute() or not legacy.is_absolute():
-            _fail("invalid_config", "vNext Native runtime roots must be absolute")
+        bootstrap = Path(_bounded_text(document["bootstrap_authority_root"], field="bootstrap_authority_root", maximum=4096))
+        if not runtime.is_absolute() or not legacy.is_absolute() or not bootstrap.is_absolute():
+            _fail("invalid_config", "vNext Native roots must be absolute")
         return cls(
             runtime_root=runtime,
             legacy_runtime_root=legacy,
+            bootstrap_authority_root=bootstrap,
             generation_id=document["generation_id"],
             protocol_generation=document["protocol_generation"],
             native_host_name=document["native_host_name"],
@@ -133,6 +152,7 @@ class VNextNativeConfig:
             "browser_extension_id": self.browser_extension_id,
             "runtime_root": str(self.runtime_root),
             "legacy_runtime_root": str(self.legacy_runtime_root),
+            "bootstrap_authority_root": str(self.bootstrap_authority_root),
         }
 
 
@@ -168,23 +188,31 @@ def _assert_protocol(message: Mapping[str, Any], config: VNextNativeConfig) -> N
 
 def _activation_projection(config: VNextNativeConfig) -> dict[str, Any]:
     try:
-        activation = read_activation(config.runtime_root)
-    except M9bActivationError as exc:
+        client = read_activation(config.runtime_root)
+        bootstrap = observe_bootstrap_activation(authority_root=config.bootstrap_authority_root)
+    except (M9bActivationError, M11cCutoverError) as exc:
         raise M9bNativeError(exc.code, str(exc)) from exc
-    if activation is None:
+    if client is None:
         return {
             "state": "OFF",
             "activation_id": None,
+            "bootstrap_state": bootstrap["status"],
             "production_acceptance": False,
             "writer_enabled": False,
             "intake_enabled": False,
         }
+    bootstrap_matches = (
+        bootstrap["status"] == "ACTIVE"
+        and bootstrap["slots"]["ACTIVE"]["source_commit"] == client.source_head
+    )
+    effective = client.state == "ACTIVE" and client.writer_enabled and client.intake_enabled and bootstrap_matches
     return {
-        "state": activation.state,
-        "activation_id": activation.activation_id,
-        "production_acceptance": activation.state == "ACTIVE",
-        "writer_enabled": activation.writer_enabled,
-        "intake_enabled": activation.intake_enabled,
+        "state": client.state,
+        "activation_id": client.activation_id,
+        "bootstrap_state": bootstrap["status"],
+        "production_acceptance": bool(effective),
+        "writer_enabled": client.writer_enabled,
+        "intake_enabled": client.intake_enabled,
     }
 
 
@@ -221,6 +249,7 @@ def handle_message(config: VNextNativeConfig, message: Mapping[str, Any]) -> dic
         response["capabilities"] = {
             "canonical_admission": True,
             "canonical_lookup": True,
+            "external_bootstrap_authority": True,
             "legacy_fallback": False,
             "legacy_receipts": False,
             "legacy_spool": False,
@@ -228,8 +257,12 @@ def handle_message(config: VNextNativeConfig, message: Mapping[str, Any]) -> dic
         return response
 
     try:
-        require_active(config.runtime_root)
-    except M9bActivationError as exc:
+        client_gate = require_active(config.runtime_root)
+        require_bootstrap_active(
+            config.bootstrap_authority_root,
+            expected_source_head=client_gate.source_head,
+        )
+    except (M9bActivationError, M11cCutoverError) as exc:
         raise M9bNativeError(exc.code, str(exc)) from exc
 
     authority = CanonicalVNextAdmissionAuthority.open(
@@ -302,7 +335,7 @@ def serve(config: VNextNativeConfig, stdin: BinaryIO, stdout: BinaryIO) -> int:
             request_id = str(message.get("request_id") or "invalid-request")[:128]
             try:
                 response = handle_message(config, message)
-            except (M9bNativeError, M3aError, M3cError, M9bActivationError) as exc:
+            except (M9bNativeError, M3aError, M3cError, M9bActivationError, M11cCutoverError) as exc:
                 response = _error_response(config, request_id, exc)
             write_native_message(stdout, response)
         except M9bNativeError:
@@ -310,7 +343,7 @@ def serve(config: VNextNativeConfig, stdin: BinaryIO, stdout: BinaryIO) -> int:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="BDB vNext M9b dedicated Native Messaging host")
+    parser = argparse.ArgumentParser(description="BDB Next dedicated Native Messaging host")
     parser.add_argument("--config", default=str(default_vnext_native_config_path()))
     return parser
 
