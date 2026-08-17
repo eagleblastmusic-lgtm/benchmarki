@@ -42,14 +42,16 @@ jobs:
           python-version: '3.12'
           cache: pip
 
-      - name: Install test dependencies
-        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+      - name: Install test and release dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev,release]"
 
       - name: Compile cutover sources
         run: >-
           python -m py_compile
           bdb_vnext/m11c_cutover.py
           bdb_vnext/m11c_cutover_cli.py
+          bdb_vnext/m11c_native_artifact.py
+          bdb_vnext/m11c_native_artifact_cli.py
           bdb_vnext/m11c_windows_clients.py
           bdb_vnext/m11a_bootstrap_slots.py
           bdb_vnext/m11a_prepared_activation.py
@@ -91,10 +93,13 @@ jobs:
           import shutil
           native = shutil.which('bdb-vnext-native-host') or shutil.which('bdb-vnext-native-host.exe')
           cutover = shutil.which('bdb-vnext-cutover') or shutil.which('bdb-vnext-cutover.exe')
+          artifact = shutil.which('bdb-vnext-artifact') or shutil.which('bdb-vnext-artifact.exe')
           assert native, 'installed bdb-vnext-native-host entrypoint is missing'
           assert cutover, 'installed bdb-vnext-cutover entrypoint is missing'
+          assert artifact, 'installed bdb-vnext-artifact entrypoint is missing'
           print(native)
           print(cutover)
+          print(artifact)
 
       - name: Run M11a + M9b + M3c regression
         run: >-

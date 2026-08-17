@@ -1,8 +1,7 @@
 """Operator CLI for the single M11c External Bootstrap cutover path.
 
-The CLI intentionally separates non-authoritative staging/observation from the
-one production effect boundary. ``apply`` cannot be invoked without an exact
-cutover-plan SHA supplied as explicit operator approval.
+Staging consumes a verified frozen Native Host artifact. The one production
+apply boundary still requires an exact reviewed cutover-plan SHA.
 """
 
 from __future__ import annotations
@@ -20,6 +19,7 @@ from bdb_vnext.m11c_cutover import (
     prepare_windows_cutover_plan,
     query_cutover_plan,
 )
+from bdb_vnext.m11c_native_artifact import M11cArtifactError, verify_native_artifact
 from bdb_vnext.m11c_windows_clients import (
     M11cClientError,
     observe_windows_native_routes,
@@ -50,21 +50,30 @@ def _emit(document: Mapping[str, Any]) -> None:
 
 
 def _stage_clients(args: argparse.Namespace) -> dict[str, Any]:
+    artifact = verify_native_artifact(
+        args.native_host_artifact_manifest,
+        expected_source_head=args.source_head,
+        expected_source_tree=args.source_tree,
+    )
     result = stage_client_plan(
         runtime_root=args.runtime_root,
         legacy_runtime_root=args.legacy_runtime_root,
         bootstrap_authority_root=args.authority_root,
         browser_source_root=args.browser_source_root,
-        native_host_executable=args.native_host_executable,
+        native_host_executable=artifact.executable_path,
         source_head=args.source_head,
         source_tree=args.source_tree,
     )
     plan = result["plan"]
+    if plan["native_host_executable_sha256"] != artifact.executable_sha256:
+        raise M11cArtifactError("client_artifact_binding_mismatch", "client plan does not bind the verified Native Host bytes")
     return {
         "schema": CLI_SCHEMA,
         "action": "stage-clients",
         "status": "STAGED_NOT_ACTIVATED",
         "client_plan_sha256": plan["client_plan_sha256"],
+        "native_artifact_manifest_sha256": artifact.manifest_sha256,
+        "native_executable_sha256": artifact.executable_sha256,
         "browser_extension_id": plan["browser_extension_id"],
         "browser_load_unpacked_root": plan["browser_bundle_root"],
         "browser_operator_action_required": True,
@@ -74,10 +83,7 @@ def _stage_clients(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _register_native(args: argparse.Namespace) -> dict[str, Any]:
-    routes = register_windows_target_native_host(
-        runtime_root=args.runtime_root,
-        replace_existing_target=args.replace_existing_target,
-    )
+    routes = register_windows_target_native_host(runtime_root=args.runtime_root, replace_existing_target=args.replace_existing_target)
     return {
         "schema": CLI_SCHEMA,
         "action": "register-native",
@@ -91,10 +97,7 @@ def _register_native(args: argparse.Namespace) -> dict[str, Any]:
 def _client_status(args: argparse.Namespace) -> dict[str, Any]:
     plan = query_client_plan(runtime_root=args.runtime_root)["plan"]
     try:
-        verification = require_client_verification(
-            runtime_root=args.runtime_root,
-            expected_client_plan_sha256=plan["client_plan_sha256"],
-        )
+        verification = require_client_verification(runtime_root=args.runtime_root, expected_client_plan_sha256=plan["client_plan_sha256"])
     except (M11cClientError, FileNotFoundError):
         verification = None
     try:
@@ -130,13 +133,7 @@ def _prepare(args: argparse.Namespace) -> dict[str, Any]:
         browser_bundle_digest=client_plan["browser_bundle_digest"],
         native_manifest_digest=client_plan["native_manifest_sha256"],
     )
-    return {
-        "schema": CLI_SCHEMA,
-        "action": "prepare",
-        "status": "PREPARED_NOT_ACTIVATED",
-        "cutover_plan": result["plan"],
-        "production_activation_performed": False,
-    }
+    return {"schema": CLI_SCHEMA, "action": "prepare", "status": "PREPARED_NOT_ACTIVATED", "cutover_plan": result["plan"], "production_activation_performed": False}
 
 
 def _status(args: argparse.Namespace) -> dict[str, Any]:
@@ -146,32 +143,12 @@ def _status(args: argparse.Namespace) -> dict[str, Any]:
     except (M11cCutoverError, FileNotFoundError):
         cutover = None
     client_gate = read_activation(args.runtime_root)
-    return {
-        "schema": CLI_SCHEMA,
-        "action": "status",
-        "bootstrap": bootstrap,
-        "cutover_plan": cutover,
-        "client_gate": client_gate.as_dict() if client_gate is not None else None,
-        "production_activation_performed": bootstrap.get("production_activation_performed") is True,
-    }
+    return {"schema": CLI_SCHEMA, "action": "status", "bootstrap": bootstrap, "cutover_plan": cutover, "client_gate": client_gate.as_dict() if client_gate is not None else None, "production_activation_performed": bootstrap.get("production_activation_performed") is True}
 
 
 def _apply(args: argparse.Namespace) -> dict[str, Any]:
-    # The exact plan SHA is the operator's approval token. There is no boolean
-    # --yes shortcut and no implicit discovery of the current plan.
-    result = apply_windows_cutover(
-        authority_root=args.authority_root,
-        cutover_id=args.cutover_id,
-        expected_plan_sha256=args.approve_plan_sha256,
-        operator_approved=True,
-    )
-    return {
-        "schema": CLI_SCHEMA,
-        "action": "apply",
-        "status": result["status"],
-        "result": result,
-        "production_activation_performed": result["production_activation_performed"],
-    }
+    result = apply_windows_cutover(authority_root=args.authority_root, cutover_id=args.cutover_id, expected_plan_sha256=args.approve_plan_sha256, operator_approved=True)
+    return {"schema": CLI_SCHEMA, "action": "apply", "status": result["status"], "result": result, "production_activation_performed": result["production_activation_performed"]}
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -183,18 +160,14 @@ def _parser() -> argparse.ArgumentParser:
     stage.add_argument("--legacy-runtime-root", required=True)
     stage.add_argument("--authority-root", required=True)
     stage.add_argument("--browser-source-root", required=True)
-    stage.add_argument("--native-host-executable", required=True)
+    stage.add_argument("--native-host-artifact-manifest", required=True)
     stage.add_argument("--source-head", required=True)
     stage.add_argument("--source-tree", required=True)
     stage.set_defaults(handler=_stage_clients)
 
     register = sub.add_parser("register-native", help="register only the dedicated vNext Native host")
     register.add_argument("--runtime-root", required=True)
-    register.add_argument(
-        "--replace-existing-target",
-        action="store_true",
-        help="backup and replace an existing conflicting HKCU vNext rehearsal registration; HKLM still blocks",
-    )
+    register.add_argument("--replace-existing-target", action="store_true", help="backup and replace an existing conflicting HKCU vNext rehearsal registration; HKLM still blocks")
     register.set_defaults(handler=_register_native)
 
     client_status = sub.add_parser("client-status", help="observe staged clients and Browser launch witness")
@@ -221,11 +194,7 @@ def _parser() -> argparse.ArgumentParser:
     apply = sub.add_parser("apply", help="perform the one M11c production cutover effect")
     apply.add_argument("--authority-root", required=True)
     apply.add_argument("--cutover-id", required=True)
-    apply.add_argument(
-        "--approve-plan-sha256",
-        required=True,
-        help="exact sha256 from the previously reviewed immutable cutover plan",
-    )
+    apply.add_argument("--approve-plan-sha256", required=True, help="exact sha256 from the previously reviewed immutable cutover plan")
     apply.set_defaults(handler=_apply)
     return parser
 
@@ -236,16 +205,8 @@ def main(argv: list[str] | None = None) -> int:
         result = args.handler(args)
         _emit(result)
         return 0
-    except (M11cCutoverError, M11cClientError, M9bActivationError) as exc:
-        _emit(
-            {
-                "schema": CLI_SCHEMA,
-                "status": "BLOCKED",
-                "error_code": getattr(exc, "code", "cutover_failed"),
-                "error": str(exc),
-                "production_activation_performed": False,
-            }
-        )
+    except (M11cCutoverError, M11cClientError, M11cArtifactError, M9bActivationError) as exc:
+        _emit({"schema": CLI_SCHEMA, "status": "BLOCKED", "error_code": getattr(exc, "code", "cutover_failed"), "error": str(exc), "production_activation_performed": False})
         return 2
 
 

@@ -1,0 +1,74 @@
+name: M11c Pre-staging CI
+
+on:
+  pull_request:
+    branches: [bdb-vnext]
+    paths:
+      - 'bdb_vnext/m11c_native_artifact*.py'
+      - 'bdb_vnext/m11c_cutover_cli.py'
+      - 'bdb_vnext/m11a_bootstrap_admin.py'
+      - 'packaging/windows/vnext_native_host_entry.py'
+      - 'pyproject.toml'
+      - 'tests/test_m11c_*.py'
+      - 'tests/test_m11a_bootstrap_admin.py'
+      - '.github/workflows/m11c-prestaging-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: ${{ matrix.os }} / Python 3.12
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install test and release dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev,release]"
+      - name: Compile pre-staging sources
+        run: >-
+          python -m py_compile
+          bdb_vnext/m11c_native_artifact.py
+          bdb_vnext/m11c_native_artifact_cli.py
+          bdb_vnext/m11c_cutover_cli.py
+          bdb_vnext/m11a_bootstrap_admin.py
+          packaging/windows/vnext_native_host_entry.py
+      - name: Prove operator entrypoints
+        shell: python {0}
+        run: |
+          import shutil
+          for name in ('bdb-vnext-artifact', 'bdb-vnext-bootstrap-admin', 'bdb-vnext-cutover'):
+              assert shutil.which(name) or shutil.which(name + '.exe'), f'{name} is missing'
+      - name: Run pre-staging and M11c regression
+        shell: python {0}
+        run: |
+          from pathlib import Path
+          import subprocess, sys
+          files = sorted(Path('tests').glob('test_m11c_*.py'))
+          files.append(Path('tests/test_m11a_bootstrap_admin.py'))
+          files.append(Path('tests/test_m11a_bootstrap_slots.py'))
+          subprocess.run([sys.executable, '-m', 'pytest', '-q', *map(str, files)], check=True)
+      - name: Prove Bootstrap admin still cannot activate
+        shell: python {0}
+        run: |
+          import argparse
+          import bdb_vnext.m11a_bootstrap_admin as admin
+          parser = admin._parser()
+          action = next(item for item in parser._actions if isinstance(item, argparse._SubParsersAction))
+          assert 'initialize' in action.choices
+          assert 'stage-candidate' in action.choices
+          assert 'discard-candidate' in action.choices
+          assert 'activate' not in action.choices
+          assert 'switch' not in action.choices
+          print('PASS: pre-staging verbs exist; activation remains M11c-only')
