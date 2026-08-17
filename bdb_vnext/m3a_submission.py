@@ -70,7 +70,7 @@ def _text(value: object, *, field: str, pattern: re.Pattern[str] = _IDENTIFIER) 
 
 
 def _digest(value: object, *, field: str) -> str:
-    if not isinstance(value, str) or _DIGEST.fullmatch(value) is None:
+    if not isinstance(value, str) or not _DIGEST.fullmatch(value):
         _fail("invalid_digest", f"{field} must be a lowercase sha256 digest")
     return value
 
@@ -311,15 +311,38 @@ class ShadowSubmissionStore:
             "legacy_dual_write": False,
         }
         expected = canonical_json_bytes(document)
-        if self.config_path.exists():
+        deadline = time.monotonic() + (self._busy_timeout_ms / 1000) + 0.5
+        try:
+            descriptor = os.open(
+                self.config_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError:
+            descriptor = None
+        except OSError as exc:
+            _fail("shadow_config_unavailable", "M3a shadow config could not be created")
+        if descriptor is not None:
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(expected)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except OSError as exc:
+                _fail("shadow_config_unavailable", "M3a shadow config could not be written")
+            return
+        while True:
             try:
                 actual = self.config_path.read_bytes()
+            except FileNotFoundError:
+                actual = None
             except OSError as exc:
                 _fail("shadow_config_unavailable", "M3a shadow config could not be read")
-            if actual != expected:
+            if actual == expected:
+                return
+            if time.monotonic() >= deadline:
                 _fail("shadow_config_mismatch", "M3a shadow config identity differs")
-            return
-        self.config_path.write_bytes(expected)
+            time.sleep(0.005)
 
     def _ensure_schema(self) -> None:
         with self._connection_lock:
