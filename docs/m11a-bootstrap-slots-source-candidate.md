@@ -6,14 +6,15 @@ M11a evolves the existing M1b external bootstrap/recovery floor into the BDB Nex
 
 ## Exact closure basis
 
-- canonical base after M9b and concurrency hardening: `317501b687896a154672636c2511229c0bd22e05`;
-- M11a source head before this closure-record commit: `326c5cd5ede87b2b6e7615d07242dcd109d5ba0a`;
-- M11a source tree at that gate: `9df3ee82fa5252f1b67d6f6a227d754199d72d68`;
-- dedicated `M11a Bootstrap CI` run `32055362952`: Ubuntu PASS and Windows PASS;
-- trusted `BDB vNext CI` run `32055362910`: PASS;
+- canonical base after M9b and Windows concurrency hardening: `ff565224c982aec62c5eb430bce79c261dbbac67`;
+- M11a source merge head before this closure-record update: `8cbbe93a716e0a029396618a0963f2d74756a806`;
+- M11a source tree at that gate: `9a48c2495c29c9511a73162245cb831d433c35ab`;
+- prior substantive dedicated `M11a Bootstrap CI` run `32055362952`: Ubuntu PASS and Windows PASS, including real hosted-Windows SID/ACL readback;
+- prior substantive trusted `BDB vNext CI` run `32055362910`: PASS;
+- canonical Control Store seal-read hardening PR #85: focused contract + portable regression PASS on Ubuntu and Windows in run `32056199104`;
 - production Browser/Native/runtime/writer/intake activation remains OFF.
 
-The closure commit itself must receive the same trusted/dedicated CI before merge; the IDs above are the substantive implementation gate immediately preceding the documentation-only closure update.
+This final closure-record commit must receive the same trusted/dedicated M11a gates before merge. The evidence above records the substantive implementation and the additional Windows concurrency fix now inherited from canonical `bdb-vnext`.
 
 ## External ACTIVE/PREVIOUS/CANDIDATE substrate
 
@@ -74,6 +75,7 @@ Handled in M11a:
 - missing/corrupt/moved exact subjects fail closed through manifest/digest revalidation;
 - compatibility mismatch blocks staging/preparation;
 - concurrent authority mutation is serialized by external Bootstrap OS lock;
+- coordinated Control Store config/seal publication is concurrency-safe on Windows, including bounded retry of transient final-seal sharing violations;
 - backup, health and authority publication failures remain typed/blocking;
 - stale preparation cannot be reused after slot/backup drift;
 - candidate self-activation is rejected by bundle contract, actions surface and Windows authority boundary.
@@ -93,6 +95,6 @@ Legacy remains an independent product. The Bootstrap root and slot authority des
 
 ## M11a DONE decision
 
-M11a is closed when the documentation-only closure commit receives the same Windows/Ubuntu dedicated and trusted CI gates. A real user-machine `%PROGRAMDATA%` install/ACL/registry/Chrome change is intentionally **not** part of this build-only closure and must be freshly revalidated at the later M11c production cutover.
+M11a is closed when this final closure head receives the Windows/Ubuntu dedicated and trusted CI gates. A real user-machine `%PROGRAMDATA%` install/ACL/registry/Chrome change is intentionally **not** part of this build-only closure and must be freshly revalidated at the later M11c production cutover.
 
 Next unit after final green closure CI: **M11b Activation Fault Matrix**.
