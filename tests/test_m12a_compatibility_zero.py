@@ -127,8 +127,12 @@ def test_browser_scan_detects_legacy_host_literal_and_fallback(tmp_path: Path) -
     repo, head = _commit_fixture(
         tmp_path,
         {
-            "browser_extension_vnext/client_files.json": '["worker.js"]\n',
-            "browser_extension_vnext/worker.js": (
+            "browser_extension_vnext/client_files.json": (
+                '{"schema":"bdb-vnext-browser-client-files-v1",'
+                '"files":["client_files.json","manifest.json","transport_worker.js"]}\n'
+            ),
+            "browser_extension_vnext/manifest.json": '{"manifest_version":3}\n',
+            "browser_extension_vnext/transport_worker.js": (
                 'const host = "com.bartosz.dev_bridge";\n'
                 "const legacy_fallback = true;\n"
             ),
@@ -136,8 +140,8 @@ def test_browser_scan_detects_legacy_host_literal_and_fallback(tmp_path: Path) -
     )
     scan = m12a.scan_active_browser_bundle(repo_root=repo, source_commit=head)
     assert scan["compatibility_usage_zero"] is False
-    assert scan["legacy_native_host_references"] == ["browser_extension_vnext/worker.js"]
-    assert scan["legacy_fallback_enabled"] == ["browser_extension_vnext/worker.js"]
+    assert scan["legacy_native_host_references"] == ["browser_extension_vnext/transport_worker.js"]
+    assert scan["legacy_fallback_enabled"] == ["browser_extension_vnext/transport_worker.js"]
 
 
 def test_exact_current_branch_browser_bundle_is_compatibility_zero() -> None:

@@ -242,10 +242,21 @@ def scan_active_browser_bundle(*, repo_root: str | Path, source_commit: str) -> 
     if manifest_raw is None:
         _fail("browser_source_missing", "active Browser client file manifest is missing")
     try:
-        client_files = json.loads(manifest_raw)
+        manifest = json.loads(manifest_raw)
     except json.JSONDecodeError as exc:
         raise M12aCompatibilityError("browser_source_invalid", "Browser client file manifest is invalid") from exc
-    if not isinstance(client_files, list) or not client_files or any(not isinstance(item, str) for item in client_files):
+    if not isinstance(manifest, Mapping) or manifest.get("schema") != "bdb-vnext-browser-client-files-v1":
+        _fail("browser_source_invalid", "Browser client file manifest schema differs")
+    client_files = manifest.get("files")
+    if (
+        not isinstance(client_files, list)
+        or not client_files
+        or any(not isinstance(item, str) or not item or Path(item).name != item for item in client_files)
+        or len(client_files) != len(set(client_files))
+        or "client_files.json" not in client_files
+        or "manifest.json" not in client_files
+        or "transport_worker.js" not in client_files
+    ):
         _fail("browser_source_invalid", "Browser client file manifest has invalid entries")
 
     legacy_host_hits: list[str] = []
