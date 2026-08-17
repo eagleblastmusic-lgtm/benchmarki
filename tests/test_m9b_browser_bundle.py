@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from bdb_vnext.composition import BROWSER_EXTENSION_ID, NATIVE_HOST_NAME, PROTOCOL_GENERATION, _chrome_extension_id
+from bdb_vnext.composition import (
+    BROWSER_EXTENSION_ID,
+    NATIVE_HOST_NAME,
+    PROTOCOL_GENERATION,
+    load_browser_identity,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,10 +22,10 @@ IDENTITY = ROOT / "bdb_vnext" / "browser_identity.json"
 
 def test_target_manifest_is_pinned_to_exact_vnext_identity_and_complete() -> None:
     manifest = json.loads((BUNDLE / "manifest.json").read_text(encoding="utf-8"))
-    identity = json.loads(IDENTITY.read_text(encoding="utf-8"))
+    identity = load_browser_identity(IDENTITY)
     assert manifest["manifest_version"] == 3
     assert manifest["key"] == identity["public_key_spki_der_base64"]
-    assert _chrome_extension_id(manifest["key"]) == BROWSER_EXTENSION_ID
+    assert identity["extension_id"] == BROWSER_EXTENSION_ID
     assert manifest["background"] == {"service_worker": "transport_worker.js"}
     assert manifest["permissions"] == ["nativeMessaging", "storage"]
     referenced = {
