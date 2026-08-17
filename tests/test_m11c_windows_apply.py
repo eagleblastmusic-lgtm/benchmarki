@@ -62,6 +62,17 @@ def _harden_real_acl(authority: Path) -> None:
     assert completed.returncode == 0, completed.stderr.decode("utf-8", errors="replace")
 
 
+def _isolate_m9a_for_acl_route_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These legacy tests prove ACL/route effects, not the M9a evidence producer.
+
+    The real side-by-side archive and its production ordering are covered by
+    test_m11c_m9a_handoff.py and test_m11c_m9a_production_boundary.py.
+    """
+
+    monkeypatch.setattr(m11c, "verify_side_by_side_report", lambda **_: FREEZE_DIGEST)
+    monkeypatch.setattr(m11c, "revalidate_side_by_side_digest", lambda **_: FREEZE_DIGEST)
+
+
 def test_public_windows_prepare_and_apply_reobserve_real_acl_and_native_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     fixture = _fixture(tmp_path)
     authority = Path(fixture["authority"])
@@ -69,6 +80,7 @@ def test_public_windows_prepare_and_apply_reobserve_real_acl_and_native_route(tm
     client_plan = fixture["client_plan"]
     _harden_real_acl(authority)
     monkeypatch.setenv("PROGRAMDATA", str(program_data))
+    _isolate_m9a_for_acl_route_fixture(monkeypatch)
     routes = register_windows_target_native_host(runtime_root=fixture["runtime"])
     assert routes["target_registered"] is True
     assert routes["target_conflict"] is False
@@ -112,6 +124,7 @@ def test_public_windows_apply_rejects_wrong_programdata_after_plan(tmp_path: Pat
     client_plan = fixture["client_plan"]
     _harden_real_acl(authority)
     monkeypatch.setenv("PROGRAMDATA", str(program_data))
+    _isolate_m9a_for_acl_route_fixture(monkeypatch)
 
     prepared = m11c.prepare_windows_cutover_plan(
         authority_root=authority,
