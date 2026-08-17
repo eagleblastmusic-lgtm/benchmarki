@@ -336,18 +336,21 @@ def _archive_single(
     return [_copy_verified_file(source, destination, total_state=total_state)]
 
 
+def _native_registry_suffixes() -> tuple[tuple[str, str], ...]:
+    return (
+        ("chrome", r"Software\Google\Chrome\NativeMessagingHosts" + "\\" + HOST_NAME),
+        ("edge", r"Software\Microsoft\Edge\NativeMessagingHosts" + "\\" + HOST_NAME),
+    )
+
+
 def _registry_state(expected_manifest: Path) -> dict[str, Any]:
     if sys.platform != "win32":
         raise M9aFreezeError("Native Messaging registry inspection requires Windows")
     import winreg
 
-    suffixes = (
-        ("chrome", r"Software\Google\Chrome\NativeMessagingHosts\" + HOST_NAME),
-        ("edge", r"Software\Microsoft\Edge\NativeMessagingHosts\" + HOST_NAME),
-    )
     result: dict[str, Any] = {"hkcu": {}, "hklm": {}}
     for root_name, root in (("hkcu", winreg.HKEY_CURRENT_USER), ("hklm", winreg.HKEY_LOCAL_MACHINE)):
-        for browser, suffix in suffixes:
+        for browser, suffix in _native_registry_suffixes():
             try:
                 with winreg.OpenKey(root, suffix, 0, winreg.KEY_READ) as key:
                     value, _ = winreg.QueryValueEx(key, None)
@@ -390,11 +393,7 @@ def _remove_verified_hkcu_registry_bindings(expected_manifest: Path) -> list[str
     import winreg
 
     removed: list[str] = []
-    suffixes = (
-        ("chrome", r"Software\Google\Chrome\NativeMessagingHosts\" + HOST_NAME),
-        ("edge", r"Software\Microsoft\Edge\NativeMessagingHosts\" + HOST_NAME),
-    )
-    for browser, suffix in suffixes:
+    for browser, suffix in _native_registry_suffixes():
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, suffix, 0, winreg.KEY_READ) as key:
                 value, _ = winreg.QueryValueEx(key, None)
@@ -665,7 +664,6 @@ def execute_freeze(
             _write_report(report_path, report)
 
         registry_after = _registry_state(frozen_manifest)
-        # No supported binding may remain, regardless of the frozen manifest path.
         remaining_bindings = [
             f"{root}/{browser}"
             for root, values in registry_after.items()
