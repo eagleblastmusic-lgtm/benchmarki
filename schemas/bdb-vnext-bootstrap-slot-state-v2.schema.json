@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:bdb:schema:vnext-bootstrap-slot-state:v2",
+  "title": "BDB vNext external bootstrap post-cutover slot state v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "runtime_id",
+    "generation_id",
+    "authority_boundary",
+    "activation_authority",
+    "activation_id",
+    "legacy_runtime_root",
+    "active_manifest_sha256",
+    "previous_manifest_sha256",
+    "candidate_manifest_sha256",
+    "required_control_schema",
+    "required_capabilities",
+    "candidate_may_write_active_pointer",
+    "production_activation_performed",
+    "source_preparation_sha256",
+    "cutover_plan_sha256",
+    "rollback_mode",
+    "state_sha256"
+  ],
+  "properties": {
+    "schema": {"const": "bdb-vnext-bootstrap-slot-state-v2"},
+    "runtime_id": {"const": "devmaster.bdb.vnext.runtime"},
+    "generation_id": {"const": "bdb-vnext-g1"},
+    "authority_boundary": {"const": "external_bootstrap_root"},
+    "activation_authority": {"const": "m11c-external-bootstrap"},
+    "activation_id": {"type": "string", "pattern": "^m11c-[A-Za-z0-9][A-Za-z0-9._-]{0,90}$"},
+    "legacy_runtime_root": {"type": "string", "minLength": 1},
+    "active_manifest_sha256": {"$ref": "#/$defs/digest"},
+    "previous_manifest_sha256": {"$ref": "#/$defs/digest"},
+    "candidate_manifest_sha256": {"type": "null"},
+    "required_control_schema": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+    "required_capabilities": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:+/-]{0,127}$"}},
+    "candidate_may_write_active_pointer": {"const": false},
+    "production_activation_performed": {"const": true},
+    "source_preparation_sha256": {"$ref": "#/$defs/digest"},
+    "cutover_plan_sha256": {"$ref": "#/$defs/digest"},
+    "rollback_mode": {"const": "ROLL_FORWARD_ONLY"},
+    "state_sha256": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}

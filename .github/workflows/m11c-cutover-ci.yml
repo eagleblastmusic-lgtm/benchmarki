@@ -1,0 +1,124 @@
+name: M11c Cutover CI
+
+on:
+  pull_request:
+    branches: [bdb-vnext]
+    paths:
+      - 'bdb_vnext/m11c_*.py'
+      - 'bdb_vnext/m11a_*.py'
+      - 'bdb_vnext/m9b_*.py'
+      - 'bdb_vnext/m3c_admission.py'
+      - 'pyproject.toml'
+      - 'browser_extension_vnext/**'
+      - 'scripts/Set-BDBVNextBootstrapAuthorityAcl.ps1'
+      - 'schemas/bdb-vnext-bootstrap-slot-state-v2.schema.json'
+      - 'schemas/bdb-vnext-m11c-*.schema.json'
+      - 'tests/test_m11c_*.py'
+      - 'tests/test_m11a_*.py'
+      - 'tests/test_m9b_*.py'
+      - 'tests/test_vnext_m3c_admission.py'
+      - '.github/workflows/m11c-cutover-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: ${{ matrix.os }} / Python 3.12
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+
+      - name: Compile cutover sources
+        run: >-
+          python -m py_compile
+          bdb_vnext/m11c_cutover.py
+          bdb_vnext/m11c_cutover_cli.py
+          bdb_vnext/m11c_windows_clients.py
+          bdb_vnext/m11a_bootstrap_slots.py
+          bdb_vnext/m11a_prepared_activation.py
+          bdb_vnext/m11a_windows_tcb.py
+          bdb_vnext/m9b_activation.py
+          bdb_vnext/m9b_native_host.py
+          bdb_vnext/m3c_admission.py
+
+      - name: Validate Browser service worker syntax
+        run: node --check browser_extension_vnext/transport_worker.js
+
+      - name: Validate M11c schemas
+        shell: python {0}
+        run: |
+          import json
+          from pathlib import Path
+          for path in (
+              Path('schemas/bdb-vnext-bootstrap-slot-state-v2.schema.json'),
+              Path('schemas/bdb-vnext-m11c-cutover-plan-v1.schema.json'),
+              Path('schemas/bdb-vnext-m11c-client-plan-v1.schema.json'),
+          ):
+              json.loads(path.read_text(encoding='utf-8'))
+              print(f'validated {path}')
+
+      - name: Run complete M11c source and hardening gate
+        shell: python {0}
+        run: |
+          from pathlib import Path
+          import subprocess
+          import sys
+          files = sorted(Path('tests').glob('test_m11c_*.py'))
+          assert files, 'M11c hardening suite is empty'
+          print('\n'.join(str(path) for path in files))
+          subprocess.run([sys.executable, '-m', 'pytest', '-q', *map(str, files)], check=True)
+
+      - name: Prove installed vNext operator entrypoints exist
+        shell: python {0}
+        run: |
+          import shutil
+          native = shutil.which('bdb-vnext-native-host') or shutil.which('bdb-vnext-native-host.exe')
+          cutover = shutil.which('bdb-vnext-cutover') or shutil.which('bdb-vnext-cutover.exe')
+          assert native, 'installed bdb-vnext-native-host entrypoint is missing'
+          assert cutover, 'installed bdb-vnext-cutover entrypoint is missing'
+          print(native)
+          print(cutover)
+
+      - name: Run M11a + M9b + M3c regression
+        run: >-
+          python -m pytest -q
+          tests/test_m11a_bootstrap_slots.py
+          tests/test_m11a_prepared_activation.py
+          tests/test_m11a_windows_tcb.py
+          tests/test_m11a_bootstrap_admin.py
+          tests/test_m9b_activation.py
+          tests/test_m9b_native_host.py
+          tests/test_m9b_browser_bundle.py
+          tests/test_vnext_m3c_admission.py
+
+      - name: Prove sole production activation surface
+        shell: python {0}
+        run: |
+          import bdb_vnext.m11c_cutover as cutover
+          import bdb_vnext.m9b_activation as client_gate
+          assert 'apply_windows_cutover' in cutover.__all__
+          assert '_apply_cutover' not in cutover.__all__
+          assert 'prepare_windows_cutover_plan' in cutover.__all__
+          assert cutover.M11C_ACTIVATION_AUTHORITY == 'm11c-external-bootstrap'
+          assert not hasattr(client_gate, 'activate')
+          assert not hasattr(client_gate, 'finalize_interrupted_activation')
+          assert '_begin_bootstrap_client_gate' not in client_gate.__all__
+          assert '_finalize_bootstrap_client_gate' not in client_gate.__all__
+          print('PASS: External Bootstrap is the only exported production cutover surface')

@@ -1,6 +1,7 @@
 "use strict";
 
 const HOST_NAME = "com.bartosz.dev_bridge.vnext";
+const NATIVE_HOST_NAME = "com.bartosz.dev_bridge.vnext";
 const REQUEST_SCHEMA = "bdb-vnext-native-request-v1";
 const RESPONSE_SCHEMA = "bdb-vnext-native-response-v1";
 const PROTOCOL = "bdb-vnext-protocol-v1";
@@ -8,6 +9,8 @@ const GENERATION = "bdb-vnext-g1";
 const EXTENSION_ID = "mopnolkjddkmgojfjkenjobehhmmklll";
 const OUTBOX_KEY = "bdbVnextOutboxV1";
 const OUTBOX_SCHEMA = "bdb-vnext-browser-outbox-v1";
+const BROWSER_BUNDLE_SCHEMA = "bdb-vnext-m11c-browser-bundle-v1";
+const CLIENT_FILES_SCHEMA = "bdb-vnext-browser-client-files-v1";
 const MAX_ENTRIES = 128;
 const MAX_REQUEST_BYTES = 256 * 1024;
 const TYPES = new Set(["bdb-vnext-status", "bdb-vnext-submit", "bdb-vnext-lookup", "bdb-vnext-resume-outbox"]);
@@ -43,6 +46,21 @@ async function digest(value) {
   const raw = new TextEncoder().encode(canonicalJson(value));
   const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", raw));
   return `sha256:${Array.from(hash, (v) => v.toString(16).padStart(2, "0")).join("")}`;
+}
+
+async function digestBytes(bytes) {
+  const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return `sha256:${Array.from(hash, (v) => v.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function validateNativeResponse(response) {
+  const value = object(response, "native response");
+  if (
+    value.schema !== RESPONSE_SCHEMA || value.generation_id !== GENERATION ||
+    value.protocol_generation !== PROTOCOL || value.native_host_name !== HOST_NAME ||
+    value.browser_extension_id !== EXTENSION_ID
+  ) throw new Error("vNext Native Host identity mismatch");
+  return value;
 }
 
 async function canonicalRequest(input) {
@@ -91,17 +109,85 @@ function sendNative(message) {
       const runtimeError = chrome.runtime.lastError;
       if (runtimeError) return reject(new Error(runtimeError.message || "vNext Native Host unavailable"));
       try {
-        const value = object(response, "native response");
-        if (
-          value.schema !== RESPONSE_SCHEMA || value.generation_id !== GENERATION ||
-          value.protocol_generation !== PROTOCOL || value.native_host_name !== HOST_NAME ||
-          value.browser_extension_id !== EXTENSION_ID
-        ) throw new Error("vNext Native Host identity mismatch");
-        resolve(value);
+        resolve(validateNativeResponse(response));
       } catch (error) {
         reject(error);
       }
     });
+  });
+}
+
+async function bdbVNextObserveOwnBundle() {
+  const indexResponse = await fetch(chrome.runtime.getURL("client_files.json"), { cache: "no-store" });
+  if (!indexResponse.ok) throw new Error("vNext Browser client file index is unavailable");
+  const index = await indexResponse.json();
+  if (!index || index.schema !== CLIENT_FILES_SCHEMA || !Array.isArray(index.files) || index.files.length === 0) {
+    throw new Error("vNext Browser client file index is invalid");
+  }
+  const paths = [...index.files].sort();
+  if (new Set(paths).size !== paths.length || paths.some((path) => typeof path !== "string" || !path || path.includes(".."))) {
+    throw new Error("vNext Browser client file index contains an invalid path");
+  }
+  const files = [];
+  let totalBytes = 0;
+  for (const path of paths) {
+    const response = await fetch(chrome.runtime.getURL(path), { cache: "no-store" });
+    if (!response.ok) throw new Error(`vNext Browser package file unavailable: ${path}`);
+    const bytes = await response.arrayBuffer();
+    totalBytes += bytes.byteLength;
+    files.push({ path, size: bytes.byteLength, sha256: await digestBytes(bytes) });
+  }
+  return {
+    schema: BROWSER_BUNDLE_SCHEMA,
+    extension_id: EXTENSION_ID,
+    file_count: files.length,
+    total_bytes: totalBytes,
+    files
+  };
+}
+
+async function bdbVNextPublishClientVerification() {
+  const expectedExtensionId = "mopnolkjddkmgojfjkenjobehhmmklll";
+  if (chrome.runtime.id !== expectedExtensionId) throw new Error("vNext Browser runtime extension ID differs");
+  const browserObservation = await bdbVNextObserveOwnBundle();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      try { port.disconnect(); } catch (_) { /* already closed */ }
+      if (error) reject(error); else resolve(value);
+    };
+    port.onMessage.addListener((response) => {
+      try {
+        const value = validateNativeResponse(response);
+        if (value.status !== "success" || typeof value.client_verification_sha256 !== "string" || !value.client_verification_sha256.startsWith("sha256:")) {
+          throw new Error("vNext Native Host did not publish client verification");
+        }
+        finish(null, value);
+      } catch (error) {
+        finish(error);
+      }
+    });
+    port.onDisconnect.addListener(() => {
+      const runtimeError = chrome.runtime.lastError;
+      if (!settled) finish(new Error(runtimeError?.message || "vNext Native Host disconnected before verification"));
+    });
+    port.postMessage({
+      schema: REQUEST_SCHEMA,
+      request_id: requestId("verify"),
+      action: "handshake",
+      protocol_generation: "bdb-vnext-protocol-v1",
+      browser_extension_id: expectedExtensionId,
+      browser_observation: browserObservation
+    });
+  });
+}
+
+function bdbVNextTryPublishClientVerification() {
+  bdbVNextPublishClientVerification().catch(() => {
+    // The next worker install/startup/load retries this proof; failure never falls back to Legacy.
   });
 }
 
@@ -222,3 +308,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   );
   return true;
 });
+
+chrome.runtime.onInstalled.addListener(() => {
+  bdbVNextTryPublishClientVerification();
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  bdbVNextTryPublishClientVerification();
+});
+
+bdbVNextTryPublishClientVerification();
