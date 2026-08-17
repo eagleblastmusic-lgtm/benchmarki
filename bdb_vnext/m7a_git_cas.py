@@ -37,6 +37,7 @@ from bdb_vnext.control_store import (
     rollback_control_write,
 )
 from bdb_vnext.m6a_evidence_policy import EvidencePolicyGate, compute_subject_digest
+from bdb_vnext.m6c_validation_authority import M6C_AUTHORITY, M6C_GATE_SCHEMA, M6C_MODE
 from bdb_vnext.repo_view import RepositoryResource, RepoViewError
 
 
@@ -330,6 +331,9 @@ class PreparedGitCasAdapter:
         self.candidate_store = candidate_store
         self.work_kernel = work_kernel
         self.evidence_policy_gate = evidence_policy_gate
+        # Wired by M7c only after the canonical promotion cutover is installed.
+        # Standalone pre-cutover M7a tests retain the proven M6a-only build path.
+        self.canonical_validation_authority: Any | None = None
         self.allowed_ref_prefix = _text(allowed_ref_prefix, "allowed_ref_prefix", maximum=512)
         if not self.allowed_ref_prefix.startswith("refs/"):
             _fail("invalid_ref_policy", "M7a allowed ref prefix must be a full refs/ namespace")
@@ -1094,7 +1098,128 @@ class PreparedGitCasAdapter:
         assert current is not None
         return current
 
+    def _matching_m7c_cutover(self, record: PreparedGitEffect) -> Mapping[str, Any] | None:
+        table = self._connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='m7c_promotion_cutovers'"
+        ).fetchone()
+        if table is None:
+            return None
+        rows = self._connection.execute(
+            "SELECT flow_id,flow_revision_id,policy_digest,plan_digest,scope,target_ref_prefix,state "
+            "FROM m7c_promotion_cutovers"
+        ).fetchall()
+        matches = [row for row in rows if record.target_ref.startswith(str(row[5]))]
+        if len(matches) > 1:
+            _fail("m7c_authority_ambiguous", "multiple M7c cutovers cover the exact target ref")
+        if not matches:
+            return None
+        row = matches[0]
+        return {
+            "flow_id": str(row[0]),
+            "flow_revision_id": str(row[1]),
+            "policy_digest": str(row[2]),
+            "plan_digest": str(row[3]),
+            "scope": str(row[4]),
+            "target_ref_prefix": str(row[5]),
+            "state": str(row[6]),
+        }
+
+    def _m7c_binding(self, record: PreparedGitEffect, cutover: Mapping[str, Any]) -> Mapping[str, Any]:
+        table = self._connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='m7c_promotion_bindings'"
+        ).fetchone()
+        if table is None:
+            _fail("m7c_authority_required", "M7c cutover exists without its canonical binding store")
+        row = self._connection.execute(
+            "SELECT flow_id,flow_revision_id,capability_bindings_json,binding_digest "
+            "FROM m7c_promotion_bindings WHERE effect_id=?",
+            (record.effect_id,),
+        ).fetchone()
+        if row is None:
+            _fail("m7c_authority_required", "M7c cutover requires an exact promotion evidence binding")
+        if str(row[0]) != cutover["flow_id"] or str(row[1]) != cutover["flow_revision_id"]:
+            _fail("m7c_binding_stale", "M7c binding does not match the active cutover revision")
+        try:
+            capability_bindings = json.loads(bytes(row[2]).decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise M7aError("m7c_binding_corrupt", "M7c capability binding is not canonical JSON") from exc
+        if not isinstance(capability_bindings, dict):
+            _fail("m7c_binding_corrupt", "M7c capability binding must be a mapping")
+        material = {
+            "schema": "bdb-vnext-m7c-promotion-binding-v1",
+            "effect_id": record.effect_id,
+            "flow_id": str(row[0]),
+            "flow_revision_id": str(row[1]),
+            "capability_bindings": capability_bindings,
+        }
+        if semantic_digest(material) != str(row[3]):
+            _fail("m7c_binding_corrupt", "M7c capability binding digest is invalid")
+        return capability_bindings
+
     def _authorize(self, record: PreparedGitEffect, *, approval_id: str, now: str | None) -> Mapping[str, Any]:
+        cutover = self._matching_m7c_cutover(record)
+        if cutover is not None:
+            if cutover["state"] != "ACTIVE":
+                _fail("m7c_authority_paused", "M7c promotion authority is paused for this ref namespace")
+            authority = self.canonical_validation_authority
+            if authority is None:
+                _fail("m7c_authority_required", "active M7c cutover requires the canonical M6c authority")
+            flow = authority.get_active_flow(str(cutover["flow_id"]))
+            if flow is None or flow.revision_id != cutover["flow_revision_id"]:
+                _fail("m7c_policy_stale", "active M6c flow differs from the M7c cutover revision")
+            if (
+                flow.policy_digest != cutover["policy_digest"]
+                or flow.plan_digest != cutover["plan_digest"]
+                or flow.scope != cutover["scope"]
+                or record.validation_policy_digest != flow.policy_digest
+                or record.check_plan_digest != flow.plan_digest
+                or record.scope != flow.scope
+            ):
+                _fail("m7c_policy_stale", "prepared Git effect no longer matches canonical M6c/M7c policy")
+            bindings = self._m7c_binding(record, cutover)
+            obligation_by_capability: dict[str, str] = {}
+            evidence_by_capability: dict[str, str] = {}
+            for capability, value in bindings.items():
+                if not isinstance(capability, str) or not isinstance(value, Mapping):
+                    _fail("m7c_binding_corrupt", "M7c capability binding entry is invalid")
+                obligation_id = value.get("obligation_id")
+                evidence_id = value.get("evidence_id")
+                if not isinstance(obligation_id, str) or not isinstance(evidence_id, str):
+                    _fail("m7c_binding_corrupt", "M7c capability binding IDs are invalid")
+                obligation_by_capability[capability] = obligation_id
+                evidence_by_capability[capability] = evidence_id
+            gate = authority.authorize(
+                flow_id=flow.flow_id,
+                obligation_by_capability=obligation_by_capability,
+                evidence_by_capability=evidence_by_capability,
+                approval_id=approval_id,
+                subject={"subject_digest": record.subject_digest},
+                intent_revision_id=record.intent_revision_id,
+                effect_digest=record.effect_id,
+                scope=record.scope,
+                now=now,
+            )
+            if (
+                gate.get("schema") != M6C_GATE_SCHEMA
+                or gate.get("authority") != M6C_AUTHORITY
+                or gate.get("mode") != M6C_MODE
+                or gate.get("decision") != "ALLOW"
+                or gate.get("allowed") is not True
+                or gate.get("effect_digest") != record.effect_id
+                or gate.get("subject_digest") != record.subject_digest
+                or gate.get("policy_digest") != record.validation_policy_digest
+                or gate.get("plan_digest") != record.check_plan_digest
+                or gate.get("flow_revision_id") != flow.revision_id
+            ):
+                _fail(
+                    "promotion_not_authorized",
+                    "M6c canonical validation authority blocked the exact Git effect",
+                    details={"gate_decision_digest": gate.get("decision_digest"), "reasons": gate.get("reasons", [])},
+                )
+            return gate
+
+        # Pre-cutover standalone M7a compatibility only.  Once M7c installs a
+        # matching marker, this branch is structurally unreachable for that ref.
         gate = self.evidence_policy_gate.promotion_gate(
             obligation_ids=record.obligation_ids,
             approval_id=approval_id,
@@ -1108,7 +1233,7 @@ class PreparedGitCasAdapter:
         if gate.get("decision") != "ALLOW" or gate.get("allowed") is not True:
             _fail(
                 "promotion_not_authorized",
-                "M6a evidence/approval gate blocked the exact Git effect",
+                "M6a pre-cutover evidence/approval gate blocked the exact Git effect",
                 details={"gate_decision_digest": gate.get("decision_digest"), "reasons": gate.get("reasons", [])},
             )
         return gate

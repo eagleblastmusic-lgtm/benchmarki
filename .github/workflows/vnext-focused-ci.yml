@@ -17,7 +17,7 @@ jobs:
   focused-contracts:
     name: Focused vNext contracts / Python 3.12
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +40,8 @@ jobs:
             bdb_vnext/m6b_check_plan.py \
             bdb_vnext/m6c_validation_authority.py \
             bdb_vnext/m7a_git_cas.py \
-            bdb_vnext/m7b_checkout_sync.py
+            bdb_vnext/m7b_checkout_sync.py \
+            bdb_vnext/m7c_promotion_authority.py
 
       - name: Run focused P1/P2 contracts
         run: |
@@ -52,6 +53,7 @@ jobs:
             tests/test_vnext_m6c_validation_authority.py \
             tests/test_vnext_m7a_git_cas.py \
             tests/test_vnext_m7b_checkout_sync.py \
+            tests/test_vnext_m7c_promotion_authority.py \
             tests/test_vnext_engineering_loop.py \
             -q
 
@@ -135,3 +137,27 @@ jobs:
 
       - name: Run M7b checkout crash/reconciliation contracts
         run: python -m pytest tests/test_vnext_m7b_checkout_sync.py -q
+
+  m7c-windows:
+    name: M7c Canonical Promotion / Windows / Python 3.12
+    runs-on: windows-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install focused test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+
+      - name: Compile M7c closure
+        run: python -m py_compile bdb_vnext/m6c_validation_authority.py bdb_vnext/m7a_git_cas.py bdb_vnext/m7b_checkout_sync.py bdb_vnext/m7c_promotion_authority.py
+
+      - name: Run M7c canonical promotion/bypass contracts
+        run: python -m pytest tests/test_vnext_m7c_promotion_authority.py -q
