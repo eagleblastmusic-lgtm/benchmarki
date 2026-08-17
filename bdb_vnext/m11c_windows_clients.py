@@ -1,13 +1,9 @@
 """M11c Windows Browser/Native client staging and verification.
 
-This module does not activate BDB Next.  It stages exact target Browser bytes,
-creates the dedicated Native Messaging configuration/manifest, optionally
-registers only the target Native host, and records a non-authoritative Browser
-launch observation after Chrome actually starts the host from the pinned vNext
-extension origin.
-
-The final M11c cutover consumes this observation as a prerequisite.  The
-external ProgramData Bootstrap remains the only activation authority.
+This module never activates BDB Next. It stages exact Browser/Native subjects,
+records a non-authoritative Browser launch witness, and manages the dedicated
+vNext Native Messaging registration. The external ProgramData Bootstrap remains
+the only production activation authority.
 """
 
 from __future__ import annotations
@@ -30,6 +26,7 @@ from bdb_vnext.composition import (
     NATIVE_HOST_NAME,
     PROTOCOL_GENERATION,
     RUNTIME_ID,
+    load_browser_identity,
 )
 
 
@@ -132,7 +129,13 @@ def inspect_browser_bundle(root: str | Path) -> dict[str, Any]:
         manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise M11cClientError("browser_manifest_invalid", "Browser manifest is not valid JSON") from exc
-    if not isinstance(manifest, Mapping) or manifest.get("manifest_version") != 3 or not isinstance(manifest.get("key"), str):
+    identity = load_browser_identity()
+    if (
+        not isinstance(manifest, Mapping)
+        or manifest.get("manifest_version") != 3
+        or manifest.get("key") != identity["public_key_spki_der_base64"]
+        or identity["extension_id"] != BROWSER_EXTENSION_ID
+    ):
         _fail("browser_manifest_invalid", "Browser manifest identity differs")
     payload = {
         "schema": BROWSER_BUNDLE_SCHEMA,
@@ -167,12 +170,7 @@ def _copy_browser_bundle(source: Path, target: Path, expected_digest: str) -> No
         raise
 
 
-def _native_config(
-    *,
-    runtime: Path,
-    legacy: Path,
-    bootstrap: Path,
-) -> dict[str, Any]:
+def _native_config(*, runtime: Path, legacy: Path, bootstrap: Path) -> dict[str, Any]:
     return {
         "schema": NATIVE_CONFIG_SCHEMA,
         "generation_id": GENERATION_ID,
@@ -294,9 +292,9 @@ def query_client_plan(*, runtime_root: str | Path) -> dict[str, Any]:
         _fail("native_host_executable_stale", "Native Host executable differs from client plan")
     config_path = Path(plan["native_config_path"])
     manifest_path = Path(plan["native_manifest_path"])
-    if _digest_bytes(config_path.read_bytes()) != plan["native_config_sha256"]:
+    if not config_path.is_file() or _digest_bytes(config_path.read_bytes()) != plan["native_config_sha256"]:
         _fail("native_config_stale", "Native Host config differs from client plan")
-    if _digest_bytes(manifest_path.read_bytes()) != plan["native_manifest_sha256"]:
+    if not manifest_path.is_file() or _digest_bytes(manifest_path.read_bytes()) != plan["native_manifest_sha256"]:
         _fail("native_manifest_stale", "Native Messaging manifest differs from client plan")
     manifest = _load_json(manifest_path, field="native_manifest")
     if manifest != _native_manifest(executable):
@@ -309,12 +307,56 @@ def query_client_plan(*, runtime_root: str | Path) -> dict[str, Any]:
     }
 
 
+def _browser_observation_payload(observation: Mapping[str, Any]) -> dict[str, Any]:
+    expected_keys = {"schema", "extension_id", "file_count", "total_bytes", "files"}
+    if set(observation) != expected_keys:
+        _fail("browser_runtime_bundle_mismatch", "Browser runtime observation fields differ")
+    if observation.get("schema") != BROWSER_BUNDLE_SCHEMA or observation.get("extension_id") != BROWSER_EXTENSION_ID:
+        _fail("browser_runtime_bundle_mismatch", "Browser runtime observation identity differs")
+    file_count = observation.get("file_count")
+    total_bytes = observation.get("total_bytes")
+    files = observation.get("files")
+    if isinstance(file_count, bool) or not isinstance(file_count, int) or file_count < 1 or file_count > _MAX_BROWSER_FILES:
+        _fail("browser_runtime_bundle_mismatch", "Browser runtime file count is invalid")
+    if isinstance(total_bytes, bool) or not isinstance(total_bytes, int) or total_bytes < 1 or total_bytes > _MAX_BROWSER_BYTES:
+        _fail("browser_runtime_bundle_mismatch", "Browser runtime byte count is invalid")
+    if not isinstance(files, list) or len(files) != file_count:
+        _fail("browser_runtime_bundle_mismatch", "Browser runtime file inventory is incomplete")
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    observed_total = 0
+    for item in files:
+        if not isinstance(item, Mapping) or set(item) != {"path", "size", "sha256"}:
+            _fail("browser_runtime_bundle_mismatch", "Browser runtime file record differs")
+        path = item.get("path")
+        size = item.get("size")
+        digest = item.get("sha256")
+        if not isinstance(path, str) or not path or path.startswith(('/', '\\')) or ".." in Path(path).parts or path in seen:
+            _fail("browser_runtime_bundle_mismatch", "Browser runtime file path is invalid")
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0 or size > _MAX_BROWSER_BYTES:
+            _fail("browser_runtime_bundle_mismatch", "Browser runtime file size is invalid")
+        _check_digest(digest, "browser_runtime_file.sha256")
+        seen.add(path)
+        observed_total += size
+        normalized.append({"path": path, "size": size, "sha256": digest})
+    if observed_total != total_bytes:
+        _fail("browser_runtime_bundle_mismatch", "Browser runtime byte total differs")
+    return {
+        "schema": BROWSER_BUNDLE_SCHEMA,
+        "extension_id": BROWSER_EXTENSION_ID,
+        "file_count": file_count,
+        "total_bytes": total_bytes,
+        "files": normalized,
+    }
+
+
 def record_browser_launch_verification(
     *,
     runtime_root: str | Path,
     caller_origin: str,
+    browser_observation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Record that Chrome launched the exact staged Native route from vNext origin."""
+    """Record Chrome->Native proof only for the exact staged Browser package."""
 
     runtime = _absolute_path(runtime_root, field="runtime_root")
     expected_origin = f"chrome-extension://{BROWSER_EXTENSION_ID}/"
@@ -322,12 +364,18 @@ def record_browser_launch_verification(
         _fail("browser_origin_mismatch", "Chrome caller origin is not the pinned vNext extension")
     observed = query_client_plan(runtime_root=runtime)
     plan = observed["plan"]
+    expected_browser = dict(observed["browser"])
+    expected_browser.pop("bundle_digest", None)
+    supplied_browser = expected_browser if browser_observation is None else _browser_observation_payload(browser_observation)
+    if supplied_browser != expected_browser:
+        _fail("browser_runtime_bundle_mismatch", "running Browser package differs from staged client plan")
     payload = {
         "schema": CLIENT_VERIFICATION_SCHEMA,
         "runtime_id": RUNTIME_ID,
         "generation_id": GENERATION_ID,
         "protocol_generation": PROTOCOL_GENERATION,
         "client_plan_sha256": plan["client_plan_sha256"],
+        "browser_bundle_digest": plan["browser_bundle_digest"],
         "browser_extension_id": BROWSER_EXTENSION_ID,
         "caller_origin": caller_origin,
         "native_host_name": NATIVE_HOST_NAME,
@@ -339,14 +387,11 @@ def record_browser_launch_verification(
     return document
 
 
-def require_client_verification(
-    *,
-    runtime_root: str | Path,
-    expected_client_plan_sha256: str,
-) -> dict[str, Any]:
+def require_client_verification(*, runtime_root: str | Path, expected_client_plan_sha256: str) -> dict[str, Any]:
     runtime = _absolute_path(runtime_root, field="runtime_root")
     expected_plan = _check_digest(expected_client_plan_sha256, "expected_client_plan_sha256")
-    query_client_plan(runtime_root=runtime)
+    current = query_client_plan(runtime_root=runtime)
+    plan = current["plan"]
     document = _load_json(client_verification_path(runtime), field="m11c_client_verification")
     if (
         document.get("schema") != CLIENT_VERIFICATION_SCHEMA
@@ -354,6 +399,7 @@ def require_client_verification(
         or document.get("generation_id") != GENERATION_ID
         or document.get("protocol_generation") != PROTOCOL_GENERATION
         or document.get("client_plan_sha256") != expected_plan
+        or document.get("browser_bundle_digest") != plan["browser_bundle_digest"]
         or document.get("browser_extension_id") != BROWSER_EXTENSION_ID
         or document.get("caller_origin") != f"chrome-extension://{BROWSER_EXTENSION_ID}/"
         or document.get("native_host_name") != NATIVE_HOST_NAME
@@ -404,34 +450,71 @@ def observe_windows_native_routes(*, runtime_root: str | Path) -> dict[str, Any]
                 target_values.append({"root": root_name, "view": view_name, "value": target})
             if legacy is not None:
                 legacy_values.append({"root": root_name, "view": view_name, "value": legacy})
-    expected = str(Path(plan["native_manifest_path"]))
-    conflicting = [item for item in target_values if os.path.normcase(item["value"]) != os.path.normcase(expected)]
+    expected = os.path.normcase(str(Path(plan["native_manifest_path"])))
+    conflicting = [
+        item
+        for item in target_values
+        if item["root"] != "HKCU" or os.path.normcase(item["value"]) != expected
+    ]
+    exact_hkcu_views = {
+        item["view"]
+        for item in target_values
+        if item["root"] == "HKCU" and os.path.normcase(item["value"]) == expected
+    }
     return {
         "target": target_values,
         "legacy": legacy_values,
         "target_conflict": bool(conflicting),
-        "target_registered": any(os.path.normcase(item["value"]) == os.path.normcase(expected) for item in target_values),
+        "target_registered": exact_hkcu_views == {"32", "64"} and not conflicting,
+        "target_registered_views": sorted(exact_hkcu_views),
         "legacy_route_present": bool(legacy_values),
         "production_activation_performed": False,
     }
 
 
-def register_windows_target_native_host(*, runtime_root: str | Path) -> dict[str, Any]:
-    """Register only the dedicated vNext host; Legacy remains untouched here."""
+def _backup_prior_target_route(runtime: Path, before: Mapping[str, Any], expected_manifest: str) -> None:
+    payload = {
+        "schema": "bdb-vnext-m11c-prior-target-native-route-backup-v1",
+        "target": list(before["target"]),
+        "replacement_manifest": expected_manifest,
+        "production_activation_performed": False,
+    }
+    document = {**payload, "backup_sha256": _digest(payload)}
+    _atomic_json(runtime / "clients" / "prior-target-native-route-backup.json", document, immutable=True)
+
+
+def register_windows_target_native_host(
+    *,
+    runtime_root: str | Path,
+    replace_existing_target: bool = False,
+) -> dict[str, Any]:
+    """Register exact vNext host in both HKCU views; optionally migrate a stale HKCU rehearsal route."""
 
     runtime = _absolute_path(runtime_root, field="runtime_root")
     plan = query_client_plan(runtime_root=runtime)["plan"]
     before = observe_windows_native_routes(runtime_root=runtime)
     if before["target_conflict"]:
-        _fail("target_native_route_conflict", "another vNext Native Messaging registration differs")
+        if any(item["root"] == "HKLM" for item in before["target"]):
+            _fail("target_native_route_requires_admin", "conflicting vNext Native route exists in HKLM")
+        if replace_existing_target is not True:
+            _fail("target_native_route_conflict", "another vNext Native Messaging registration differs")
+        _backup_prior_target_route(runtime, before, str(Path(plan["native_manifest_path"])))
+
     winreg = _winreg_module()
+    expected = str(Path(plan["native_manifest_path"]))
     try:
-        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, TARGET_REGISTRY_SUBKEY, 0, winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY) as key:
-            winreg.SetValueEx(key, None, 0, winreg.REG_SZ, str(Path(plan["native_manifest_path"])))
+        for view in (winreg.KEY_WOW64_32KEY, winreg.KEY_WOW64_64KEY):
+            with winreg.CreateKeyEx(
+                winreg.HKEY_CURRENT_USER,
+                TARGET_REGISTRY_SUBKEY,
+                0,
+                winreg.KEY_SET_VALUE | view,
+            ) as key:
+                winreg.SetValueEx(key, None, 0, winreg.REG_SZ, expected)
     except OSError as exc:
         raise M11cClientError("registry_write_failed", "vNext Native Messaging registration failed") from exc
     after = observe_windows_native_routes(runtime_root=runtime)
-    if after["target_conflict"] or not after["target_registered"]:
+    if after["target_conflict"] or after["target_registered"] is not True:
         _fail("target_native_route_unverified", "vNext Native Messaging registration could not be re-observed")
     return after
 
