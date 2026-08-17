@@ -113,8 +113,6 @@ def commit_control_write(connection: sqlite3.Connection) -> None:
         connection.commit()
     except sqlite3.OperationalError as exc:
         if is_sqlite_busy(exc):
-            # SQLite leaves a busy commit transaction open.  Normalise it so a
-            # caller cannot accidentally continue with a half-owned writer.
             if connection.in_transaction:
                 connection.rollback()
             _busy("vNext Control DB remained busy during commit")
@@ -153,9 +151,6 @@ def _read_seal(path: Path) -> dict[str, Any] | None:
         try:
             payload = path.read_bytes()
         except OSError as exc:
-            # Windows may briefly deny a reader while another process atomically
-            # replaces the final seal. Retry only that transport-level sharing
-            # window; malformed bytes below remain immediately fail-closed.
             if time.monotonic() < deadline:
                 time.sleep(0.005)
                 continue
@@ -173,19 +168,37 @@ def _read_seal(path: Path) -> dict[str, Any] | None:
 def _write_seal(path: Path, document: Mapping[str, Any]) -> None:
     payload = canonical_json_bytes(dict(document))
     path.parent.mkdir(parents=True, exist_ok=True)
-    # A fixed .tmp name makes concurrent initializers contend on the staging
-    # file itself on Windows. Each writer gets private staging bytes; only the
-    # final atomic replace target is shared.
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         temporary.write_bytes(payload)
-        temporary.replace(path)
+        deadline = time.monotonic() + (CONTROL_BUSY_TIMEOUT_MS / 1000) + 0.5
+        while True:
+            try:
+                temporary.replace(path)
+                break
+            except OSError as exc:
+                # Windows can briefly deny replacement while another opener
+                # observes the final seal. Preserve the exact staging bytes and
+                # retry only this atomic publication boundary.
+                if time.monotonic() < deadline:
+                    time.sleep(0.005)
+                    continue
+                raise ControlStoreError(
+                    "control_seal_write_failed",
+                    "Control DB external seal could not be written",
+                ) from exc
     except OSError as exc:
         try:
             temporary.unlink(missing_ok=True)
         except OSError:
             pass
         raise ControlStoreError("control_seal_write_failed", "Control DB external seal could not be written") from exc
+    except ControlStoreError:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def _seal_document(*, state: str, instance_id: str, user_version: int, layout_digest: str | None) -> dict[str, Any]:
@@ -227,18 +240,6 @@ def _validate_seal(document: Mapping[str, Any], *, state: str, user_version: int
 
 
 def _preflight_existing_control_store(database_path: Path, seal_document: Mapping[str, Any]) -> None:
-    """Validate an existing sealed DB through a read-only SQLite handle.
-
-    Opening an existing store must not first switch journaling, create WAL
-    sidecars, or otherwise repair the file before its identity and layout are
-    known to be canonical.  v2 is intentionally validated here and migrated
-    only by the normal writable opener after this read-only gate succeeds.
-    """
-
-    # ``immutable`` avoids SQLite creating ``-shm`` while we validate a
-    # checkpointed database.  If an existing WAL pair is already present, use
-    # the read-only WAL-aware handle instead; no new sidecar is introduced by
-    # that path and the current committed view remains visible.
     wal_present = database_path.with_name(database_path.name + "-wal").exists()
     shm_present = database_path.with_name(database_path.name + "-shm").exists()
     query = "mode=ro" if wal_present or shm_present else "mode=ro&immutable=1"
@@ -264,9 +265,6 @@ def _preflight_existing_control_store(database_path: Path, seal_document: Mappin
         seal_version = seal_document.get("user_version")
         if seal_version not in {CONTROL_PREVIOUS_USER_VERSION, CONTROL_DB_USER_VERSION}:
             _fail("control_seal_mismatch", "existing Control DB seal has an unsupported version")
-        # A supported v2 database may carry the current external seal while
-        # its version bump is still pending; ensure_identity performs that
-        # validated migration after this read-only gate succeeds.
         _validate_seal(seal_document, state="SEALED", user_version=int(seal_version), layout_digest=layout_digest)
         try:
             rows = {
@@ -291,22 +289,11 @@ def _preflight_existing_control_store(database_path: Path, seal_document: Mappin
 
 
 def prepare_control_store(root: str | Path) -> Path:
-    """Open the canonical server DB through an explicit lifecycle boundary.
-
-    A missing DB is the only state eligible for INITIALIZE_NEW.  The durable
-    external INITIALIZING seal makes a crash during composition observable;
-    the next OPEN_EXISTING refuses to reinterpret it as a fresh store.
-    """
-
     root_path = Path(root).expanduser().absolute()
     database_path = assert_database_path(root_path, root_path / CONTROL_DATABASE_RELATIVE_PATH)
     database_path.parent.mkdir(parents=True, exist_ok=True)
     seal = seal_path_for_database(database_path)
     existed = database_path.exists()
-    # Reject an impossible existing/fresh pairing before sqlite3.connect can
-    # create or rewrite anything.  In particular, a seal-only recovery root
-    # must remain seal-only, and an existing DB without its independent seal
-    # must not be touched by WAL/synchronous setup before failing closed.
     existing_seal = _read_seal(seal)
     if existed:
         if existing_seal is None:
@@ -321,7 +308,7 @@ def prepare_control_store(root: str | Path) -> Path:
     try:
         configure_connection(connection)
         if not existed:
-            identity = ensure_identity(
+            ensure_identity(
                 connection,
                 lifecycle="INITIALIZE_NEW",
                 seal_path=seal,
@@ -345,8 +332,6 @@ def prepare_control_store(root: str | Path) -> Path:
 
 
 def finalize_control_store(connection: sqlite3.Connection) -> str:
-    """Seal a fully composed Control DB after every typed schema is present."""
-
     layout_digest = validate_current_layout_identity(connection)
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
     if version != CONTROL_DB_USER_VERSION:
@@ -354,8 +339,6 @@ def finalize_control_store(connection: sqlite3.Connection) -> str:
     seal = seal_path_for_database(_database_path(connection))
     document = _read_seal(seal)
     if document is None:
-        # Direct typed stores remain usable in focused unit fixtures; the
-        # canonical composition root always creates the seal first.
         return layout_digest
     instance_id = _validate_seal(document, state="INITIALIZING", user_version=0)
     _write_seal(
@@ -437,8 +420,6 @@ def expected_identity() -> dict[str, str]:
 
 
 def assert_database_path(root: str | Path, database_path: str | Path) -> Path:
-    """Require the canonical physical path; old milestone DBs are retired."""
-
     root_path = Path(root).expanduser().absolute()
     expected = (root_path / CONTROL_DATABASE_RELATIVE_PATH).absolute()
     actual = Path(database_path).expanduser().absolute()
@@ -471,15 +452,6 @@ def ensure_identity(
     seal_path: str | Path | None = None,
     initialize: bool = False,
 ) -> dict[str, str]:
-    """Initialize a new DB or validate a sealed current DB before mutation.
-
-    ``user_version=0`` is the only initialization/migration state in which the
-    domain stores may create their owned tables. A sealed v2/v3 database is
-    validated *before* any ``CREATE IF NOT EXISTS`` statement can hide missing
-    canonical state. The v2 -> v3 migration changes only this opening contract:
-    the prior layout is proven intact before the version is advanced.
-    """
-
     expected = expected_identity()
     if lifecycle not in {"DIRECT", "INITIALIZE_NEW", "OPEN_EXISTING"}:
         _fail("control_lifecycle_invalid", "Control DB lifecycle is unsupported")
@@ -497,9 +469,6 @@ def ensure_identity(
             _fail("control_seal_missing", "existing Control DB has no external seal")
         if document.get("state") != "SEALED":
             _fail("control_initialization_incomplete", "existing Control DB has an incomplete initialization seal")
-        # The user_version/layout checks below are deliberately still run;
-        # the seal is an independent prerequisite, not a replacement for DB
-        # structural verification.
         seal_user_version = document.get("user_version")
         if seal_user_version not in {CONTROL_PREVIOUS_USER_VERSION, CONTROL_DB_USER_VERSION}:
             _fail("control_seal_mismatch", "existing Control DB seal has an unsupported version")
@@ -522,13 +491,9 @@ def ensure_identity(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='m4a_work_items'"
         ).fetchone()
         legacy_sql = "" if legacy_shape is None or legacy_shape[0] is None else str(legacy_shape[0]).upper()
-        # The only direct version-0 exception is the explicit, bounded N1
-        # lifecycle migration shape. A current schema forced to zero has no
-        # legacy vocabulary and remains fail-closed.
         if "TERMINAL" not in legacy_sql and "CANCELLED" not in legacy_sql:
             _fail("control_user_version_mismatch", "sealed Control DB cannot be downgraded to user_version=0")
     if version in {CONTROL_PREVIOUS_USER_VERSION, CONTROL_DB_USER_VERSION}:
-        # Intentionally read-only and before any store-owned CREATE statement.
         layout_digest = validate_current_layout_identity(connection)
         if lifecycle == "OPEN_EXISTING":
             document = _read_seal(seal)  # type: ignore[arg-type]
@@ -571,14 +536,6 @@ def ensure_identity(
 
     if lifecycle == "OPEN_EXISTING":
         _fail("control_user_version_mismatch", "existing Control DB is not a supported sealed version")
-    # version 0 remains visibly unsealed while all typed stores install their
-    # schemas.  Identity installation itself must be one atomic write: with
-    # autocommit, a concurrent opener could observe a partially inserted
-    # metadata set and incorrectly classify the DB as foreign.
-    # A fully initialized identity is read-only on open; this fast path is
-    # important for callers that attach while another process holds a domain
-    # write lock.  Only missing/legacy identity requires the initialization
-    # writer below.
     try:
         metadata_exists = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
@@ -673,8 +630,6 @@ def _layout_digest(connection: sqlite3.Connection) -> str:
 
 
 def validate_current_layout_identity(connection: sqlite3.Connection) -> str:
-    """Read-only validation for an already sealed current-version database."""
-
     try:
         metadata = connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -712,8 +667,6 @@ def validate_current_layout_identity(connection: sqlite3.Connection) -> str:
 
 
 def ensure_layout_identity(connection: sqlite3.Connection) -> str:
-    """Seal a version-0 initialization or validate an existing sealed layout."""
-
     try:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
         if version in {CONTROL_PREVIOUS_USER_VERSION, CONTROL_DB_USER_VERSION}:
@@ -825,8 +778,6 @@ def validate_backup_identity(value: Mapping[str, Any], *, connection: sqlite3.Co
 
 
 def validate_identity_document(value: Mapping[str, Any], *, config_sha256: str) -> None:
-    """Validate a v2 manifest identity without opening (and changing) its WAL pair."""
-
     if not isinstance(value, Mapping):
         _fail("backup_control_identity_invalid", "backup Control DB identity is not an object")
     required = {
