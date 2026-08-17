@@ -36,7 +36,7 @@ def _exclusive_read_handle(path: Path):
     handle = create_file(
         str(path),
         0x80000000,  # GENERIC_READ
-        0,           # no sharing: blocks replace/delete while open
+        0,           # no sharing: blocks concurrent observation/replace/delete
         None,
         3,           # OPEN_EXISTING
         0x80,        # FILE_ATTRIBUTE_NORMAL
@@ -58,7 +58,7 @@ def test_real_windows_exclusive_pointer_handle_blocks_switch_without_losing_old_
                 experiment_root=experiment,
                 health_probe=_named_probe(),
             )
-        assert caught.value.code == "experiment_write_failed"
+        assert caught.value.code == "pointer_unavailable"
     finally:
         kernel32.CloseHandle(ctypes.c_void_p(handle))
 
