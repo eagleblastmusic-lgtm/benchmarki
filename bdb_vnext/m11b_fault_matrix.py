@@ -1,9 +1,9 @@
 """M11b disposable activation fault matrix for the external BDB Next Bootstrap.
 
-This module intentionally cannot activate production.  It snapshots one exact
+This module intentionally cannot activate production. It snapshots one exact
 M11a prepared activation into an isolated experiment root, executes the future
 switch boundaries only against that disposable root, injects crashes/failures,
-and performs cold-restart classification.  Production ACTIVE, Browser, Native
+and performs cold-restart classification. Production ACTIVE, Browser, Native
 Host, registry and runtime writer/intake are never mutated here.
 """
 
@@ -11,13 +11,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import os
 import re
 import sys
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, NoReturn
 
@@ -144,7 +142,11 @@ def _atomic_replace_json(path: Path, document: Mapping[str, Any], *, hook: Write
 def _write_immutable(path: Path, document: Mapping[str, Any], *, hook: WriteHook | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
-        if _load_json(path, field="m11b_immutable") != document:
+        try:
+            current = _load_json(path, field="m11b_immutable")
+        except OSError as exc:
+            raise M11bFaultError("immutable_unavailable", "immutable experiment evidence cannot be read") from exc
+        if current != document:
             _fail("experiment_identity_conflict", "immutable experiment identity already differs")
         return
     if hook is not None:
@@ -174,7 +176,10 @@ def _event_documents(root: Path) -> list[dict[str, Any]]:
         return []
     documents: list[dict[str, Any]] = []
     for path in sorted(events_root.glob("*.json")):
-        documents.append(_load_json(path, field="m11b_event"))
+        try:
+            documents.append(_load_json(path, field="m11b_event"))
+        except OSError as exc:
+            raise M11bFaultError("event_unavailable", "M11b event cannot be read") from exc
     previous: str | None = None
     for sequence, document in enumerate(documents, start=1):
         if (
@@ -230,8 +235,9 @@ def _topology(
     slots = prepared_query.get("slots")
     if not isinstance(slots, Mapping):
         _fail("prepared_subject_invalid", "prepared slots are missing")
+    slot_map = slots.get("slots")
     for slot in ("ACTIVE", "PREVIOUS", "CANDIDATE"):
-        document = slots.get("slots", {}).get(slot) if isinstance(slots.get("slots"), Mapping) else None
+        document = slot_map.get(slot) if isinstance(slot_map, Mapping) else None
         if isinstance(document, Mapping):
             root = _absolute_path(document.get("bundle_root"), field=f"{slot.lower()}_bundle_root")
             if _overlaps(experiment, root):
@@ -308,7 +314,10 @@ def initialize_fault_experiment(
 
 
 def _load_experiment(root: Path) -> dict[str, Any]:
-    document = _load_json(_experiment_path(root), field="m11b_experiment")
+    try:
+        document = _load_json(_experiment_path(root), field="m11b_experiment")
+    except OSError as exc:
+        raise M11bFaultError("experiment_unavailable", "M11b experiment identity cannot be read") from exc
     if (
         document.get("schema") != EXPERIMENT_SCHEMA
         or document.get("runtime_id") != RUNTIME_ID
@@ -328,8 +337,10 @@ def _load_experiment(root: Path) -> dict[str, Any]:
 def _load_pointer(root: Path, experiment: Mapping[str, Any]) -> dict[str, Any]:
     try:
         document = _load_json(_pointer_path(root), field="m11b_pointer")
+    except OSError as exc:
+        raise M11bFaultError("pointer_unavailable", "M11b pointer is temporarily unavailable") from exc
     except BootstrapError as exc:
-        raise M11bFaultError("pointer_invalid", "M11b pointer cannot be read") from exc
+        raise M11bFaultError("pointer_invalid", "M11b pointer cannot be validated") from exc
     if document.get("schema") != POINTER_SCHEMA or document.get("experiment_id") != experiment["experiment_id"]:
         _fail("pointer_invalid", "M11b pointer identity differs")
     slot = document.get("slot")
@@ -373,7 +384,8 @@ def _default_health_probe(experiment: Mapping[str, Any], slot_document: Mapping[
         preparation_id=experiment["preparation_id"],
     )
     slot = next(
-        name for name in ("ACTIVE", "PREVIOUS", "CANDIDATE")
+        name
+        for name in ("ACTIVE", "PREVIOUS", "CANDIDATE")
         if prepared["slots"]["slots"][name]["manifest_sha256"] == slot_document["manifest_sha256"]
     )
     source = prepared["slots"]["slots"][slot]
@@ -398,6 +410,24 @@ def _default_health_probe(experiment: Mapping[str, Any], slot_document: Mapping[
 
 def _slot_document(experiment: Mapping[str, Any], slot: SlotName) -> Mapping[str, Any]:
     return experiment["slots"][slot]
+
+
+def _latest_start_success(events: Sequence[Mapping[str, Any]]) -> bool | None:
+    """Return the durable start observation, if one exists.
+
+    False is authoritative evidence that the start call failed. A later cold
+    health probe must not reinterpret that failed start as a successful one.
+    """
+
+    for event in reversed(events):
+        if event.get("boundary") != "START_REQUESTED":
+            continue
+        details = event.get("details")
+        if not isinstance(details, Mapping):
+            return None
+        value = details.get("start_success")
+        return value if isinstance(value, bool) else None
+    return None
 
 
 def query_fault_experiment(*, experiment_root: str | Path) -> dict[str, Any]:
@@ -437,7 +467,6 @@ def advance_fault_experiment(
     root = _absolute_path(experiment_root, field="experiment_root")
     with BootstrapLock(root / "experiment.lock"):
         experiment = _load_experiment(root)
-        # Revalidate the exact M11a preparation before any experiment boundary.
         query_prepared_activation(
             authority_root=experiment["authority_root"],
             preparation_id=experiment["preparation_id"],
@@ -492,11 +521,7 @@ def advance_fault_experiment(
             _maybe_crash("HEALTH_VERIFIED", crash_after, hard=hard_crash)
         boundaries = {event["boundary"] for event in _event_documents(root)}
         if "CONCLUDED" not in boundaries:
-            _append_event(
-                root,
-                boundary="CONCLUDED",
-                details={"outcome": "KNOWN_GOOD_CANDIDATE"},
-            )
+            _append_event(root, boundary="CONCLUDED", details={"outcome": "KNOWN_GOOD_CANDIDATE"})
             _maybe_crash("CONCLUDED", crash_after, hard=hard_crash)
         return cold_recover_fault_experiment(experiment_root=root, health_probe=health_probe)
 
@@ -520,6 +545,24 @@ def _publish_recovery(
     return document
 
 
+def _recover_previous_or_block(
+    root: Path,
+    experiment: Mapping[str, Any],
+    pointer: Mapping[str, Any],
+    probe: HealthProbe,
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    previous_ok = probe(experiment, _slot_document(experiment, "PREVIOUS"))
+    if previous_ok:
+        pointer = _publish_pointer(root, experiment, "PREVIOUS")
+        outcome: RecoveryOutcome = "RECOVERED_PREVIOUS"
+    else:
+        outcome = "BLOCKED_QUARANTINED"
+    recovery = _publish_recovery(root, outcome=outcome, reason=reason, pointer=pointer)
+    return {"outcome": outcome, "recovery": recovery, "experiment": experiment}
+
+
 def cold_recover_fault_experiment(
     *,
     experiment_root: str | Path,
@@ -535,11 +578,11 @@ def cold_recover_fault_experiment(
     boundaries = {event["boundary"] for event in events}
     try:
         pointer = _load_pointer(root, experiment)
-    except M11bFaultError:
+    except M11bFaultError as exc:
         recovery = _publish_recovery(
             root,
             outcome="BLOCKED_QUARANTINED",
-            reason="pointer_invalid",
+            reason=exc.code,
             pointer=None,
         )
         return {"outcome": recovery["outcome"], "recovery": recovery, "experiment": experiment}
@@ -551,15 +594,13 @@ def cold_recover_fault_experiment(
             outcome: RecoveryOutcome = "KNOWN_GOOD_ACTIVE"
             recovery = _publish_recovery(root, outcome=outcome, reason=reason, pointer=pointer)
             return {"outcome": outcome, "recovery": recovery, "experiment": experiment}
-        # ACTIVE became unhealthy; PREVIOUS is the only exact recovery subject.
-        previous_ok = probe(experiment, _slot_document(experiment, "PREVIOUS"))
-        if previous_ok:
-            pointer = _publish_pointer(root, experiment, "PREVIOUS")
-            outcome = "RECOVERED_PREVIOUS"
-        else:
-            outcome = "BLOCKED_QUARANTINED"
-        recovery = _publish_recovery(root, outcome=outcome, reason="active_unhealthy", pointer=pointer)
-        return {"outcome": outcome, "recovery": recovery, "experiment": experiment}
+        return _recover_previous_or_block(
+            root,
+            experiment,
+            pointer,
+            probe,
+            reason="active_unhealthy",
+        )
 
     if slot == "PREVIOUS":
         previous_ok = probe(experiment, _slot_document(experiment, "PREVIOUS"))
@@ -567,20 +608,24 @@ def cold_recover_fault_experiment(
         recovery = _publish_recovery(root, outcome=outcome, reason=reason, pointer=pointer)
         return {"outcome": outcome, "recovery": recovery, "experiment": experiment}
 
-    # Candidate pointer exists.  A crash before START_REQUESTED never assumes
-    # the candidate is running; recover PREVIOUS if possible.
-    if "START_REQUESTED" not in boundaries:
-        previous_ok = probe(experiment, _slot_document(experiment, "PREVIOUS"))
-        if previous_ok:
-            pointer = _publish_pointer(root, experiment, "PREVIOUS")
-            outcome = "RECOVERED_PREVIOUS"
-        else:
-            outcome = "BLOCKED_QUARANTINED"
-        recovery = _publish_recovery(root, outcome=outcome, reason="candidate_not_started", pointer=pointer)
-        return {"outcome": outcome, "recovery": recovery, "experiment": experiment}
+    start_success = _latest_start_success(events)
+    if start_success is None:
+        return _recover_previous_or_block(
+            root,
+            experiment,
+            pointer,
+            probe,
+            reason="candidate_not_started",
+        )
+    if start_success is False:
+        return _recover_previous_or_block(
+            root,
+            experiment,
+            pointer,
+            probe,
+            reason="candidate_start_failed",
+        )
 
-    # Health ACK loss is resolved by a fresh independent candidate health
-    # observation.  We never trust an old self-report without re-observation.
     candidate_ok = probe(experiment, _slot_document(experiment, "CANDIDATE"))
     if candidate_ok:
         if "HEALTH_VERIFIED" not in boundaries:
@@ -599,14 +644,13 @@ def cold_recover_fault_experiment(
         recovery = _publish_recovery(root, outcome=outcome, reason=reason, pointer=pointer)
         return {"outcome": outcome, "recovery": recovery, "experiment": experiment}
 
-    previous_ok = probe(experiment, _slot_document(experiment, "PREVIOUS"))
-    if previous_ok:
-        pointer = _publish_pointer(root, experiment, "PREVIOUS")
-        outcome = "RECOVERED_PREVIOUS"
-    else:
-        outcome = "BLOCKED_QUARANTINED"
-    recovery = _publish_recovery(root, outcome=outcome, reason="candidate_unhealthy", pointer=pointer)
-    return {"outcome": outcome, "recovery": recovery, "experiment": experiment}
+    return _recover_previous_or_block(
+        root,
+        experiment,
+        pointer,
+        probe,
+        reason="candidate_unhealthy",
+    )
 
 
 def matrix_pass(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
