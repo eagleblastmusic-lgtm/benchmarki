@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
 
 import bdb_vnext.m11c_cutover as m11c
+import bdb_vnext.m9a_handoff_cli as handoff_cli
 from bdb_vnext.m9a_handoff import M9aHandoffError
 
 
@@ -76,3 +78,11 @@ def test_windows_apply_revalidates_m9a_before_bootstrap_tcb_or_route_effect(monk
         )
     assert exc.value.code == "m9a_legacy_drift"
     assert calls == ["client", "revalidate-m9a"]
+
+
+def test_m9a_operator_cli_is_installed_and_has_no_activation_or_legacy_disable_verb() -> None:
+    assert shutil.which("bdb-vnext-m9a-handoff") or shutil.which("bdb-vnext-m9a-handoff.exe")
+    parser = handoff_cli._parser()
+    for forbidden in ("activate", "apply", "switch", "disable", "freeze-legacy", "install", "start", "stop"):
+        with pytest.raises(SystemExit):
+            parser.parse_args([forbidden])
