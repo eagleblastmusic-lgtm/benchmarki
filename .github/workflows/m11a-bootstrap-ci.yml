@@ -7,6 +7,7 @@ on:
       - 'bdb_vnext/m11a_*.py'
       - 'bdb_vnext/bootstrap.py'
       - 'bdb_vnext/m9b_*.py'
+      - 'scripts/Set-BDBVNextBootstrapAuthorityAcl.ps1'
       - 'schemas/bdb-vnext-bootstrap-*.schema.json'
       - 'tests/test_m11a_*.py'
       - 'tests/test_vnext_bootstrap.py'
@@ -31,6 +32,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -44,8 +48,10 @@ jobs:
           python -m py_compile
           bdb_vnext/m11a_bootstrap_slots.py
           bdb_vnext/m11a_prepared_activation.py
+          bdb_vnext/m11a_windows_tcb.py
           tests/test_m11a_bootstrap_slots.py
           tests/test_m11a_prepared_activation.py
+          tests/test_m11a_windows_tcb.py
 
       - name: Validate M11a JSON schemas
         shell: python {0}
@@ -60,11 +66,24 @@ jobs:
               json.loads(path.read_text(encoding='utf-8'))
               print(f'validated {path}')
 
+      - name: Prepare hosted-Windows Bootstrap TCB fixture
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'BartoszDevBridge-Next\bootstrap'
+          ./scripts/Set-BDBVNextBootstrapAuthorityAcl.ps1 `
+            -Root $root `
+            -Apply `
+            -AllowNonProgramDataForTest
+          "BDB_VNEXT_TCB_FIXTURE=$root" >> $env:GITHUB_ENV
+          "BDB_VNEXT_TCB_PROGRAMDATA=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
+
       - name: Run M11a + M1b gate
         run: >-
           python -m pytest -q
           tests/test_m11a_bootstrap_slots.py
           tests/test_m11a_prepared_activation.py
+          tests/test_m11a_windows_tcb.py
           tests/test_vnext_bootstrap.py
 
       - name: Run impacted M9b + M3 regression
@@ -82,8 +101,10 @@ jobs:
         run: |
           import bdb_vnext.m11a_bootstrap_slots as slots
           import bdb_vnext.m11a_prepared_activation as prepared
+          import bdb_vnext.m11a_windows_tcb as windows_tcb
           assert not hasattr(slots, 'activate_candidate_slot')
           assert not hasattr(prepared, 'activate_prepared_candidate')
+          assert not hasattr(windows_tcb, 'activate_candidate')
           query_actions = {'activate_candidate': False}
           assert query_actions['activate_candidate'] is False
           print('M11a remains build-only; activation is not exported')
