@@ -62,6 +62,7 @@ jobs:
               Path('schemas/bdb-vnext-bootstrap-slot-manifest-v1.schema.json'),
               Path('schemas/bdb-vnext-bootstrap-slot-state-v1.schema.json'),
               Path('schemas/bdb-vnext-bootstrap-prepared-activation-v1.schema.json'),
+              Path('schemas/bdb-vnext-bootstrap-windows-tcb-v1.schema.json'),
           ):
               json.loads(path.read_text(encoding='utf-8'))
               print(f'validated {path}')
