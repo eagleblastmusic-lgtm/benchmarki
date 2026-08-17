@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:bdb:schema:vnext-bootstrap-prepared-activation:v1",
+  "title": "BDB vNext M11a prepared activation evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "runtime_id",
+    "generation_id",
+    "preparation_id",
+    "authority_boundary",
+    "slot_binding",
+    "required_control_schema",
+    "required_capabilities",
+    "backup",
+    "recovery",
+    "candidate_may_write_active_pointer",
+    "production_activation_performed",
+    "activation_deferred_to",
+    "preparation_sha256"
+  ],
+  "properties": {
+    "schema": {"const": "bdb-vnext-bootstrap-prepared-activation-v1"},
+    "runtime_id": {"const": "devmaster.bdb.vnext.runtime"},
+    "generation_id": {"const": "bdb-vnext-g1"},
+    "preparation_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "authority_boundary": {"const": "external_bootstrap_root"},
+    "slot_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "slot_state_sha256",
+        "active_manifest_sha256",
+        "previous_manifest_sha256",
+        "candidate_manifest_sha256"
+      ],
+      "properties": {
+        "slot_state_sha256": {"$ref": "#/$defs/digest"},
+        "active_manifest_sha256": {"$ref": "#/$defs/digest"},
+        "previous_manifest_sha256": {"$ref": "#/$defs/digest"},
+        "candidate_manifest_sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "required_control_schema": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+    "required_capabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:+/-]{0,127}$"}
+    },
+    "backup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "manifest_sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "manifest_sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_root", "previous_bundle_sha256", "previous_health"],
+      "properties": {
+        "target_root": {"type": "string", "minLength": 1},
+        "previous_bundle_sha256": {"$ref": "#/$defs/digest"},
+        "previous_health": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "status", "runtime_id", "bundle_id", "observed_control_schema", "witness_sha256"],
+          "properties": {
+            "schema": {"const": "bdb-vnext-health-v1"},
+            "status": {"const": "READY"},
+            "runtime_id": {"const": "devmaster.bdb.vnext.runtime"},
+            "bundle_id": {"type": "string", "minLength": 1},
+            "observed_control_schema": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+            "witness_sha256": {"$ref": "#/$defs/digest"}
+          }
+        }
+      }
+    },
+    "candidate_may_write_active_pointer": {"const": false},
+    "production_activation_performed": {"const": false},
+    "activation_deferred_to": {"const": "M11c"},
+    "preparation_sha256": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}
