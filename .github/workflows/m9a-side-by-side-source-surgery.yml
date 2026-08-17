@@ -10,7 +10,6 @@ permissions:
 
 jobs:
   integrate-m11c:
-    if: ${{ hashFiles('scripts/_m9a_integrate_m11c.py') != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
