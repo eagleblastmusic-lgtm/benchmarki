@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from bdb_shared.evidence import canonical_json_bytes
+from bdb_vnext.bootstrap import BootstrapError
 from bdb_vnext.m11c_cutover import (
     M11cCutoverError,
     apply_windows_cutover,
@@ -98,8 +99,13 @@ def _client_status(args: argparse.Namespace) -> dict[str, Any]:
     plan = query_client_plan(runtime_root=args.runtime_root)["plan"]
     try:
         verification = require_client_verification(runtime_root=args.runtime_root, expected_client_plan_sha256=plan["client_plan_sha256"])
-    except (M11cClientError, FileNotFoundError):
+    except FileNotFoundError:
         verification = None
+    except BootstrapError as exc:
+        if exc.code == "missing_file":
+            verification = None
+        else:
+            raise M11cClientError(exc.code, str(exc)) from exc
     try:
         routes = observe_windows_native_routes(runtime_root=args.runtime_root)
     except M11cClientError as exc:
