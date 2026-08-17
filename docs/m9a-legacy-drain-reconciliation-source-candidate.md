@@ -76,10 +76,11 @@ candidate, one spool entry and one unresolved Command/Session while the OS
 process observation did not see a BDB process; that mismatch requires bounded
 writer-candidate reconciliation rather than assuming either side is correct.
 The second profile reports zero active-writer candidates, fourteen spool
-entries and a large unresolved legacy set including effects and manual
-reconciliation. For both profiles the receipt source is invalid/incomplete; the
-promoter source is unavailable/incomplete for `bartosz-dev-bridge` and
-invalid/incomplete for `bdb-self`.
+entries and a large unresolved legacy set containing Commands, Effects,
+Sessions and one manual-reconciliation subject. Its Outbox group is empty.
+For both profiles Native receipt reservations are zero, but the receipt source
+itself is invalid/incomplete; the promoter source is unavailable/incomplete for
+`bartosz-dev-bridge` and invalid/incomplete for `bdb-self`.
 
 The original single-profile classifier source at commit
 `6337bac0fe64a0f4739edd2a5a6c3a61c9d58bab` passed its 13 focused Windows tests.
