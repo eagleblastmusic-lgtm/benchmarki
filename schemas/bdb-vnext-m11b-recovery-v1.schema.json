@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:bdb:schema:vnext-m11b-recovery:v1",
+  "title": "BDB vNext M11b deterministic recovery witness v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "outcome",
+    "reason",
+    "pointer",
+    "production_activation_performed",
+    "recovery_sha256"
+  ],
+  "properties": {
+    "schema": {"const": "bdb-vnext-m11b-recovery-v1"},
+    "outcome": {
+      "enum": [
+        "KNOWN_GOOD_ACTIVE",
+        "KNOWN_GOOD_CANDIDATE",
+        "RECOVERED_PREVIOUS",
+        "BLOCKED_QUARANTINED"
+      ]
+    },
+    "reason": {"type": "string", "minLength": 1},
+    "pointer": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "experiment_id", "slot", "manifest_sha256", "epoch", "pointer_sha256"],
+          "properties": {
+            "schema": {"const": "bdb-vnext-m11b-pointer-v1"},
+            "experiment_id": {"type": "string", "minLength": 1},
+            "slot": {"enum": ["ACTIVE", "PREVIOUS", "CANDIDATE"]},
+            "manifest_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "epoch": {"type": "integer", "minimum": 0},
+            "pointer_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+          }
+        }
+      ]
+    },
+    "production_activation_performed": {"const": false},
+    "recovery_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}
