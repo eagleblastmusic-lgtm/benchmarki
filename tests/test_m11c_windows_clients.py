@@ -48,6 +48,12 @@ def _stage(tmp_path: Path):
     return runtime, legacy, bootstrap, executable, result
 
 
+def _browser_observation(result: dict[str, object]) -> dict[str, object]:
+    observation = dict(result["browser"])  # type: ignore[arg-type]
+    observation.pop("bundle_digest")
+    return observation
+
+
 def test_browser_bundle_identity_is_content_addressed_and_pinned() -> None:
     observed = inspect_browser_bundle(BROWSER_SOURCE)
     assert observed["extension_id"] == BROWSER_EXTENSION_ID
@@ -88,7 +94,11 @@ def test_only_real_pinned_chrome_origin_can_publish_client_verification(tmp_path
         record_browser_launch_verification(runtime_root=runtime, caller_origin="chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/")
     assert exc.value.code == "browser_origin_mismatch"
 
-    witness = record_browser_launch_verification(runtime_root=runtime, caller_origin=ORIGIN)
+    witness = record_browser_launch_verification(
+        runtime_root=runtime,
+        caller_origin=ORIGIN,
+        browser_observation=_browser_observation(result),
+    )
     assert witness["native_launch_verified"] is True
     assert witness["client_plan_sha256"] == plan["client_plan_sha256"]
     assert require_client_verification(
@@ -108,6 +118,7 @@ def test_native_handshake_from_chrome_origin_records_same_non_authoritative_witn
             "action": "handshake",
             "protocol_generation": PROTOCOL_GENERATION,
             "browser_extension_id": BROWSER_EXTENSION_ID,
+            "browser_observation": _browser_observation(result),
         },
         caller_origin=ORIGIN,
     )
@@ -118,6 +129,7 @@ def test_native_handshake_from_chrome_origin_records_same_non_authoritative_witn
         runtime_root=runtime,
         expected_client_plan_sha256=result["plan"]["client_plan_sha256"],
     )
+    assert witness["browser_bundle_digest"] == result["plan"]["browser_bundle_digest"]
     assert witness["production_activation_performed"] is False
     assert config.runtime_root == runtime.absolute()
     assert config.legacy_runtime_root == legacy.absolute()
