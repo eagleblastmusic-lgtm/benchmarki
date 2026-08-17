@@ -39,7 +39,7 @@ def test_wrong_approval_sha_is_rejected_before_legacy_route_disable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fixture = _fixture(tmp_path)
-    plan = _plan(fixture)
+    _plan(fixture)
     monkeypatch.setenv("PROGRAMDATA", str(fixture["program_data"]))
     disabled = _pretend_target_route_is_ready(monkeypatch)
 
@@ -66,7 +66,7 @@ def test_missing_browser_native_witness_is_rejected_before_legacy_route_disable(
     verification.unlink()
     disabled = _pretend_target_route_is_ready(monkeypatch)
 
-    with pytest.raises((m11c.M11cCutoverError, FileNotFoundError)):
+    with pytest.raises(m11c.M11cCutoverError) as exc:
         m11c.apply_windows_cutover(
             authority_root=fixture["authority"],
             cutover_id="final-1",
@@ -74,5 +74,6 @@ def test_missing_browser_native_witness_is_rejected_before_legacy_route_disable(
             operator_approved=True,
         )
 
+    assert exc.value.code == "missing_file"
     assert disabled == []
     assert m11c.observe_bootstrap_activation(authority_root=fixture["authority"])["status"] == "PREPARED"
