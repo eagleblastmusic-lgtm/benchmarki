@@ -160,7 +160,10 @@ def _read_seal(path: Path) -> dict[str, Any] | None:
 def _write_seal(path: Path, document: Mapping[str, Any]) -> None:
     payload = canonical_json_bytes(dict(document))
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
+    # A fixed .tmp name makes concurrent initializers contend on the staging
+    # file itself on Windows. Each writer gets private staging bytes; only the
+    # final atomic replace target is shared.
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         temporary.write_bytes(payload)
         temporary.replace(path)
@@ -250,7 +253,7 @@ def _preflight_existing_control_store(database_path: Path, seal_document: Mappin
             _fail("control_seal_mismatch", "existing Control DB seal has an unsupported version")
         # A supported v2 database may carry the current external seal while
         # its version bump is still pending; ensure_identity performs that
-        # validated migration after this read-only gate.
+        # validated migration after this read-only gate succeeds.
         _validate_seal(seal_document, state="SEALED", user_version=int(seal_version), layout_digest=layout_digest)
         try:
             rows = {
