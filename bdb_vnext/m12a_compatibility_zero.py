@@ -33,6 +33,7 @@ from bdb_vnext.m11c_windows_clients import (
 from bdb_vnext.m9a_handoff import M9aHandoffError, revalidate_side_by_side_digest, verify_side_by_side_archive
 from bdb_vnext.m3c_admission import scan_supported_vnext_admission_paths
 from bdb_vnext.m9b_activation import M9bActivationError, read_activation
+from bdb_vnext.m9b_reconciliation import M9bReconciliationError, verify_post_active_reconciliation
 
 
 M12A_REPORT_SCHEMA = "bdb-vnext-m12a-compatibility-zero-report-v1"
@@ -406,6 +407,7 @@ def capture_compatibility_zero(
     *,
     authority_root: str | Path,
     runtime_root: str | Path,
+    client_runtime_root: str | Path | None = None,
     legacy_runtime_root: str | Path,
     repo_root: str | Path,
     observation_seconds: float = 2.0,
@@ -417,6 +419,7 @@ def capture_compatibility_zero(
         _fail("invalid_observation_window", "M12a observation window must be between 0 and 60 seconds")
     authority = _absolute(authority_root, field="authority_root")
     runtime = _absolute(runtime_root, field="runtime_root")
+    client_runtime = _absolute(client_runtime_root or runtime_root, field="client_runtime_root")
     legacy = _absolute(legacy_runtime_root, field="legacy_runtime_root")
     repo = _absolute(repo_root, field="repo_root")
 
@@ -444,12 +447,12 @@ def capture_compatibility_zero(
         _fail("client_gate_not_active", "M12a requires the subordinate M9b gate ACTIVE")
 
     try:
-        client_plan = query_client_plan(runtime_root=runtime)["plan"]
+        client_plan = query_client_plan(runtime_root=client_runtime)["plan"]
         verification = require_client_verification(
-            runtime_root=runtime,
+            runtime_root=client_runtime,
             expected_client_plan_sha256=client_plan["client_plan_sha256"],
         )
-        routes = observe_windows_native_routes(runtime_root=runtime)
+        routes = observe_windows_native_routes(runtime_root=client_runtime)
     except M11cClientError as exc:
         raise M12aCompatibilityError(exc.code, str(exc)) from exc
     if routes.get("target_registered") is not True or routes.get("target_conflict") or routes.get("legacy_route_present"):
@@ -458,11 +461,25 @@ def capture_compatibility_zero(
     activation_id = state.get("activation_id")
     if not isinstance(activation_id, str) or not activation_id.startswith("m11c-"):
         _fail("activation_identity_invalid", "post-cutover activation identity differs")
-    cutover_id = activation_id[len("m11c-") :]
-    cutover = query_cutover_plan(authority_root=authority, cutover_id=cutover_id)["plan"]
-    if cutover.get("cutover_plan_sha256") != state.get("cutover_plan_sha256"):
-        _fail("cutover_plan_binding_mismatch", "ACTIVE state binds a different immutable cutover plan")
-    freeze_digest = _digest_field(cutover.get("m9a_freeze_digest"), "m9a_freeze_digest")
+    reconciliation: dict[str, Any] | None = None
+    if activation_id.startswith("m11c-maint-"):
+        maintenance_id = activation_id[len("m11c-maint-") :]
+        try:
+            reconciliation = verify_post_active_reconciliation(
+                authority_root=authority,
+                deployed_runtime_root=runtime,
+                maintenance_id=maintenance_id,
+                expected_plan_sha256=state["cutover_plan_sha256"],
+            )
+        except M9bReconciliationError as exc:
+            raise M12aCompatibilityError(exc.code, str(exc)) from exc
+        freeze_digest = _digest_field(reconciliation["plan"].get("m9a_freeze_digest"), "m9a_freeze_digest")
+    else:
+        cutover_id = activation_id[len("m11c-") :]
+        cutover = query_cutover_plan(authority_root=authority, cutover_id=cutover_id)["plan"]
+        if cutover.get("cutover_plan_sha256") != state.get("cutover_plan_sha256"):
+            _fail("cutover_plan_binding_mismatch", "ACTIVE state binds a different immutable cutover plan")
+        freeze_digest = _digest_field(cutover.get("m9a_freeze_digest"), "m9a_freeze_digest")
 
     try:
         first = revalidate_side_by_side_digest(
@@ -561,6 +578,8 @@ def capture_compatibility_zero(
         "archive_readable": archive_readable,
         "m9a_archive_verification": archive_verification,
         "native_route_exclusive": routes.get("legacy_route_present") is False and routes.get("target_registered") is True,
+        "client_runtime_root": str(client_runtime),
+        "m9b_reconciliation": reconciliation,
         "admission_path_scan": admission_scan,
         "active_python_closure": source_scan,
         "active_browser_closure": browser_scan,
