@@ -713,6 +713,16 @@ def _recover_route_if_needed(
     route = observe()
     route_phase = _route_phase(plan, route)
     bootstrap_phase = transition_state["bootstrap_phase"]
+    # Bootstrap and the transition journal are separate persistence domains.
+    # A crash can occur after slot-state.json is published but before the
+    # journal records BOOTSTRAP_PUBLISHED. The exact durable Bootstrap
+    # subject therefore decides the recovery direction in that window.
+    bootstrap_published = (
+        current["state"].get("cutover_plan_sha256") == plan.get("plan_sha256")
+        and current["active"].get("source_commit") == plan.get("candidate_source_head")
+    )
+    if bootstrap_phase == "OLD" and bootstrap_published:
+        bootstrap_phase = "NEW"
     if transition_state["phase"] == "COMPLETED":
         if bootstrap_phase != "NEW" or current["active"]["source_commit"] != plan["candidate_source_head"]:
             _fail("route_transition_state_invalid", "completed route transition no longer matches Bootstrap")

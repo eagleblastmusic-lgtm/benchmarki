@@ -175,3 +175,35 @@ def test_admission_route_bootstrap_mismatch_fails_before_canonical_open(monkeypa
         native.handle_message(config, message)
     assert caught.value.code == "route_bootstrap_mismatch"
     assert opened is False
+def test_recovery_uses_published_bootstrap_over_stale_old_journal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    old = [{"root": "HKCU", "view": "32", "value": str((tmp_path / "old32.json").resolve())}, {"root": "HKCU", "view": "64", "value": str((tmp_path / "old64.json").resolve())}]
+    candidate = str((tmp_path / "candidate.json").resolve())
+    values = {"32": candidate, "64": old[1]["value"]}
+    def observe() -> dict[str, object]:
+        return _observation(values)
+    def write(view: str, path: str) -> None:
+        values[view] = path
+    monkeypatch.setattr(maintenance, "_route_backend", lambda _root: (observe, write))
+    recorded: list[dict[str, object]] = []
+    monkeypatch.setattr(maintenance, "_write_transition_state", lambda *_args, **kwargs: recorded.append(kwargs) or kwargs)
+    plan = {
+        "plan_sha256": "sha256:" + "a" * 64,
+        "maintenance_id": "published-before-journal",
+        "route_transition_plan_sha256": "sha256:" + "b" * 64,
+        "old_native_routes": old,
+        "candidate_native_manifest_path": candidate,
+        "candidate_source_head": "c" * 40,
+    }
+    current = {
+        "state": {"cutover_plan_sha256": plan["plan_sha256"], "state_sha256": "sha256:" + "d" * 64},
+        "active": {"source_commit": plan["candidate_source_head"]},
+    }
+    recovered, route = maintenance._recover_route_if_needed(
+        authority=tmp_path, plan=plan, current=current, client_root=tmp_path,
+        transition_state={"phase": "BOOTSTRAP_PUBLISHING", "bootstrap_phase": "OLD"}, fault_hook=None,
+    )
+    assert recovered == current
+    assert classify_route(route, old_routes=old, candidate_manifest_path=candidate) == "CANDIDATE"
+    assert os.path.normcase(values["32"]) == os.path.normcase(candidate)
+    assert os.path.normcase(values["64"]) == os.path.normcase(candidate)
+    assert recorded and recorded[-1]["bootstrap_phase"] == "NEW"
