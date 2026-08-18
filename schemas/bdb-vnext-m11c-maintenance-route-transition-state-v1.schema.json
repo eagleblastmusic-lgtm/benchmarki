@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BDB vNext M11c route transition state v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "maintenance_id", "route_transition_plan_sha256", "phase", "bootstrap_phase", "recovery_mode", "production_activation_performed", "record_sha256"],
+  "properties": {
+    "schema": {"const": "bdb-vnext-m11c-route-transition-state-v1"},
+    "maintenance_id": {"type": "string"},
+    "route_transition_plan_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "phase": {"type": "string"},
+    "bootstrap_phase": {"enum": ["OLD", "NEW"]},
+    "recovery_mode": {"const": "ROLLBACK_BEFORE_BOOTSTRAP_ROLL_FORWARD_AFTER"},
+    "production_activation_performed": {"const": false},
+    "bootstrap_state_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "record_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}
