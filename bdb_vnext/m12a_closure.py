@@ -200,7 +200,9 @@ def inventory_compatibility_surfaces(*, repo_root: str | Path, source_commit: st
             if completed.returncode not in (0, 1):
                 _fail("git_inventory_failed", f"git grep failed for token: {token}")
             output = completed.stdout.decode("utf-8", errors="strict")
-        for path in output.splitlines():
+        prefix = f"{commit}:"
+        for raw_path in output.splitlines():
+            path = raw_path[len(prefix):] if raw_path.startswith(prefix) else raw_path
             if path in path_set:
                 matched.add(path)
                 token_hits.setdefault(path, set()).add(token)
