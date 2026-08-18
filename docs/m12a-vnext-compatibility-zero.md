@@ -1,6 +1,18 @@
 # M12a — Compatibility Zero Gate
 
-Status: **post-activation validation only**. M12a does not delete, contract, disable, activate, switch, install, start, stop, register, promote, or maintain any production surface.
+Status: **source/CI closure PASS; production closure pending maintenance upgrade**. M12a does not delete, contract, disable, activate, switch, install, start, stop, register, promote, or maintain any production surface.
+
+Final source-gate subject for this tranche before merge: `80af8cb3fb4f46d11a1ef52b5697359ce9799414`.
+
+Final required workflow evidence on that exact subject:
+
+- M12a Compatibility Zero CI #17 — Windows PASS + Ubuntu PASS;
+- M11c Cutover CI #81 — Windows PASS + Ubuntu PASS;
+- M11c Pre-staging CI #31 — PASS;
+- M11a Bootstrap CI #97 — PASS;
+- trusted BDB vNext CI #117 — PASS.
+
+This source/CI PASS is **not** a production M12a PASS. The currently deployed frozen production subject remains `bd634b85047674b74846ceaed959ac7883e3eb4a`, which the M12a exact-source test deliberately classifies as non-zero until a content-addressed maintenance upgrade is performed.
 
 ## Purpose
 
@@ -52,7 +64,7 @@ The inventory distinguishes production target surfaces from historical/Legacy su
 - benchmark assets — retain only as non-production benchmark archive evidence;
 - scripts, tests, docs, schemas, CI and package-composition references — each with an explicit M12b disposition.
 
-There is no catch-all disposition for unknown paths.
+There is no catch-all disposition for unknown paths. The final source-gate inventory converged only after explicit classification of benchmark archive evidence and separate target/Legacy Browser/Native packaging surfaces.
 
 ### Stale-client behavior
 
@@ -96,9 +108,9 @@ The preserved benchmark harness tests run in CI. The old Legacy benchmark is not
 
 The production cutover activated source `bd634b85047674b74846ceaed959ac7883e3eb4a`. M12a tests intentionally prove that this exact deployed source is **not** compatibility-zero because its Native Host imports the broad `m11c_cutover` module, which carries migration/preparation dependencies.
 
-This source branch isolates production ACTIVE observation into `m11c_active_reader`, a minimal read-only reader of the same External Bootstrap pointer. The cleaned source subject must pass the exact-source closure scan before it can become a content-addressed maintenance candidate.
+The cleaned source isolates production ACTIVE observation into `m11c_active_reader`, a minimal read-only reader of the same External Bootstrap pointer. The cleaned source subject passes the exact-source closure scan and can become a content-addressed maintenance candidate.
 
-A source merge does not change the running frozen executable. Therefore M12a may not report production `PASS_CLOSED` until the cleaned source has been built, staged, verified and promoted by a dedicated maintenance path that preserves the **same External Bootstrap authority and single ACTIVE pointer**. An in-place executable replacement is not acceptable. If the existing post-cutover substrate cannot express that maintenance transition safely, the maintenance path must be implemented and fault-tested before any user-machine upgrade.
+A source merge does not change the running frozen executable. Therefore M12a may not report production `PASS_CLOSED` until the cleaned source has been built, staged, verified and promoted by a dedicated maintenance path that preserves the **same External Bootstrap authority and single ACTIVE pointer**. An in-place executable replacement is not acceptable. The current M11a candidate-staging path accepts only pre-activation slot-state v1, so post-ACTIVE maintenance must be implemented and fault-tested explicitly rather than reusing the initial-cutover command.
 
 ## Evidence outputs
 
@@ -125,7 +137,7 @@ Full `PASS_CLOSED` requires:
 - `production_mutation_performed=false`;
 - `final_deletion_performed=false`.
 
-Both `verify` commands reread content-addressed evidence and verify its digest/bindings. Neither performs a production mutation.
+Both `verify` commands reread content-addressed evidence and verify their digest/bindings. Neither performs a production mutation.
 
 ## M12b handoff
 
