@@ -251,22 +251,49 @@ def validate_m9a_freeze_report(value: Mapping[str, Any]) -> str:
     return _sha256(freeze_digest, field="freeze_digest")
 
 
-def _atomic_write(path: Path, record: ActivationRecord) -> None:
+def _atomic_write(
+    path: Path,
+    record: ActivationRecord,
+    *,
+    fault_hook: Callable[[str], None] | None = None,
+) -> None:
     payload = canonical_json_bytes(record.as_dict())
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
     try:
         with temporary.open("xb") as handle:
             handle.write(payload)
+            if fault_hook:
+                fault_hook("during_temp_write")
             handle.flush()
             os.fsync(handle.fileno())
+            if fault_hook:
+                fault_hook("after_fsync")
         os.replace(temporary, path)
+        if fault_hook:
+            fault_hook("after_replace")
     except Exception as exc:
         try:
             temporary.unlink(missing_ok=True)
         except OSError:
             pass
         raise M9bActivationError("activation_write_failed", "M9b client-gate record could not be written atomically") from exc
+
+
+def write_activation(
+    runtime_root: str | Path,
+    record: ActivationRecord,
+    *,
+    fault_hook: Callable[[str], None] | None = None,
+) -> ActivationRecord:
+    """Persist one already-validated M9b record through the canonical writer.
+
+    This narrow boundary is used by post-maintenance reconciliation.  It is
+    not a product activation API and cannot construct an invalid record.
+    """
+
+    _atomic_write(activation_path(runtime_root), record, fault_hook=fault_hook)
+    return record
 
 
 def record_clients_verified(
@@ -368,4 +395,5 @@ __all__ = [
     "record_clients_verified",
     "require_active",
     "validate_m9a_freeze_report",
+    "write_activation",
 ]

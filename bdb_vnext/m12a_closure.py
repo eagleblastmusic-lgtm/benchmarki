@@ -39,6 +39,7 @@ from bdb_vnext.m12a_compatibility_zero import (
 )
 from bdb_vnext.m9a_handoff import M9aHandoffError, revalidate_side_by_side_digest, verify_side_by_side_archive
 from bdb_vnext.m9b_activation import M9bActivationError, read_activation
+from bdb_vnext.m9b_reconciliation import M9bReconciliationError
 from bdb_vnext.m9b_native_host import (
     M9B_NATIVE_REQUEST_SCHEMA,
     M9bNativeError,
@@ -293,8 +294,9 @@ def build_benchmark_basis(*, repo_root: str | Path, source_commit: str) -> dict[
     }
 
 
-def _runtime_snapshot(*, authority_root: Path, runtime_root: Path) -> dict[str, str]:
+def _runtime_snapshot(*, authority_root: Path, runtime_root: Path, client_runtime_root: Path | None = None) -> dict[str, str]:
     bootstrap = observe_bootstrap_activation(authority_root=authority_root)
+    client_runtime = _absolute(client_runtime_root or runtime_root, field="client_runtime_root")
     if bootstrap.get("status") != "ACTIVE" or bootstrap.get("production_activation_performed") is not True:
         _fail("production_active_required", "M12a closure requires External Bootstrap ACTIVE")
     state = bootstrap.get("state")
@@ -308,9 +310,9 @@ def _runtime_snapshot(*, authority_root: Path, runtime_root: Path) -> dict[str, 
     if activation is None or activation.state != "ACTIVE":
         _fail("client_gate_not_active", "M12a closure requires M9b ACTIVE")
     activation_map = activation.as_dict()
-    plan = query_client_plan(runtime_root=runtime_root)["plan"]
+    plan = query_client_plan(runtime_root=client_runtime)["plan"]
     verification = require_client_verification(
-        runtime_root=runtime_root,
+        runtime_root=client_runtime,
         expected_client_plan_sha256=plan["client_plan_sha256"],
     )
     return {
@@ -321,12 +323,12 @@ def _runtime_snapshot(*, authority_root: Path, runtime_root: Path) -> dict[str, 
     }
 
 
-def rehearse_stale_client_rejection(*, authority_root: str | Path, runtime_root: str | Path) -> dict[str, Any]:
+def rehearse_stale_client_rejection(*, authority_root: str | Path, runtime_root: str | Path, client_runtime_root: str | Path | None = None) -> dict[str, Any]:
     """Prove old/stale Browser clients fail explicitly without touching ACTIVE state."""
 
     authority = _absolute(authority_root, field="authority_root")
     runtime = _absolute(runtime_root, field="runtime_root")
-    before = _runtime_snapshot(authority_root=authority, runtime_root=runtime)
+    before = _runtime_snapshot(authority_root=authority, runtime_root=runtime, client_runtime_root=_absolute(client_runtime_root or runtime, field="client_runtime_root"))
     config = VNextNativeConfig.from_json(runtime / "config" / "native-host.json")
 
     cases = [
@@ -364,7 +366,7 @@ def rehearse_stale_client_rejection(*, authority_root: str | Path, runtime_root:
         else:
             _fail("stale_client_accepted", f"stale client case was accepted: {case_id}")
 
-    after = _runtime_snapshot(authority_root=authority, runtime_root=runtime)
+    after = _runtime_snapshot(authority_root=authority, runtime_root=runtime, client_runtime_root=_absolute(client_runtime_root or runtime, field="client_runtime_root"))
     unchanged = before == after
     if not unchanged:
         _fail("stale_client_mutated_authority", "stale-client rehearsal changed ACTIVE authority state")
@@ -383,13 +385,14 @@ def rehearse_interrupted_archive(
     *,
     authority_root: str | Path,
     runtime_root: str | Path,
+    client_runtime_root: str | Path | None = None,
     freeze_digest: str,
 ) -> dict[str, Any]:
     """Rehearse missing/tampered archive failures on a disposable copy only."""
 
     authority = _absolute(authority_root, field="authority_root")
     runtime = _absolute(runtime_root, field="runtime_root")
-    before = _runtime_snapshot(authority_root=authority, runtime_root=runtime)
+    before = _runtime_snapshot(authority_root=authority, runtime_root=runtime, client_runtime_root=_absolute(client_runtime_root or runtime, field="client_runtime_root"))
     verified = verify_side_by_side_archive(runtime_root=runtime, freeze_digest=freeze_digest)
     refs = verified.get("evidence_refs")
     if not isinstance(refs, list) or len(refs) < 2 or any(not isinstance(ref, str) for ref in refs):
@@ -436,7 +439,7 @@ def rehearse_interrupted_archive(
             "scratch interrupted archive rehearsal returned unexpected failure classes",
             details={"missing": missing_code, "tamper": tamper_code},
         )
-    after = _runtime_snapshot(authority_root=authority, runtime_root=runtime)
+    after = _runtime_snapshot(authority_root=authority, runtime_root=runtime, client_runtime_root=_absolute(client_runtime_root or runtime, field="client_runtime_root"))
     if before != after:
         _fail("archive_rehearsal_mutated_authority", "archive rehearsal changed ACTIVE authority state")
     return {
@@ -460,6 +463,7 @@ def capture_read_only_soak(
     *,
     authority_root: str | Path,
     runtime_root: str | Path,
+    client_runtime_root: str | Path | None = None,
     legacy_runtime_root: str | Path,
     freeze_digest: str,
     iterations: int = 5,
@@ -474,13 +478,14 @@ def capture_read_only_soak(
         _fail("invalid_soak_interval", "M12a soak interval must be between 0 and 5 seconds")
     authority = _absolute(authority_root, field="authority_root")
     runtime = _absolute(runtime_root, field="runtime_root")
+    client_runtime = _absolute(client_runtime_root or runtime_root, field="client_runtime_root")
     legacy = _absolute(legacy_runtime_root, field="legacy_runtime_root")
 
     samples: list[float] = []
     identities: list[dict[str, str]] = []
     for index in range(iterations):
         started = time.perf_counter()
-        identity = _runtime_snapshot(authority_root=authority, runtime_root=runtime)
+        identity = _runtime_snapshot(authority_root=authority, runtime_root=runtime, client_runtime_root=client_runtime)
         observed_freeze = revalidate_side_by_side_digest(
             runtime_root=runtime,
             legacy_runtime_root=legacy,
@@ -569,6 +574,7 @@ def capture_full_closure(
     *,
     authority_root: str | Path,
     runtime_root: str | Path,
+    client_runtime_root: str | Path | None = None,
     legacy_runtime_root: str | Path,
     repo_root: str | Path,
     observation_seconds: float = 2.0,
@@ -577,9 +583,11 @@ def capture_full_closure(
     """Capture all M12a canonical DONE proofs; no M12b effect is possible here."""
 
     runtime = _absolute(runtime_root, field="runtime_root")
+    client_runtime = _absolute(client_runtime_root or runtime_root, field="client_runtime_root")
     base = capture_compatibility_zero(
         authority_root=authority_root,
         runtime_root=runtime,
+        client_runtime_root=client_runtime,
         legacy_runtime_root=legacy_runtime_root,
         repo_root=repo_root,
         observation_seconds=observation_seconds,
@@ -599,15 +607,17 @@ def capture_full_closure(
     freeze_digest = str(report["m9a_freeze_digest"])
     inventory = inventory_compatibility_surfaces(repo_root=repo_root, source_commit=source_commit)
     benchmark = build_benchmark_basis(repo_root=repo_root, source_commit=source_commit)
-    stale = rehearse_stale_client_rejection(authority_root=authority_root, runtime_root=runtime)
+    stale = rehearse_stale_client_rejection(authority_root=authority_root, runtime_root=runtime, client_runtime_root=client_runtime)
     interrupted = rehearse_interrupted_archive(
         authority_root=authority_root,
         runtime_root=runtime,
+        client_runtime_root=client_runtime,
         freeze_digest=freeze_digest,
     )
     soak = capture_read_only_soak(
         authority_root=authority_root,
         runtime_root=runtime,
+        client_runtime_root=client_runtime,
         legacy_runtime_root=legacy_runtime_root,
         freeze_digest=freeze_digest,
         iterations=soak_iterations,
@@ -695,6 +705,7 @@ def _parser() -> argparse.ArgumentParser:
     capture = sub.add_parser("capture")
     capture.add_argument("--authority-root", required=True)
     capture.add_argument("--runtime-root", required=True)
+    capture.add_argument("--client-runtime-root")
     capture.add_argument("--legacy-runtime-root", required=True)
     capture.add_argument("--repo-root", required=True)
     capture.add_argument("--observation-seconds", type=float, default=2.0)
@@ -712,6 +723,7 @@ def main(argv: list[str] | None = None) -> int:
             result = capture_full_closure(
                 authority_root=args.authority_root,
                 runtime_root=args.runtime_root,
+                client_runtime_root=args.client_runtime_root,
                 legacy_runtime_root=args.legacy_runtime_root,
                 repo_root=args.repo_root,
                 observation_seconds=args.observation_seconds,
@@ -730,7 +742,7 @@ def main(argv: list[str] | None = None) -> int:
         M11cActiveReadError,
         M11cClientError,
         M9aHandoffError,
-        M9bActivationError,
+        M9bActivationError, M9bReconciliationError,
         M9bNativeError,
     ) as exc:
         print(
