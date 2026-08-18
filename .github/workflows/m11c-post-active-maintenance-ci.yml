@@ -1,0 +1,53 @@
+name: M11c Post-Active Maintenance CI
+
+on:
+  pull_request:
+    branches: [bdb-vnext]
+    paths:
+      - 'bdb_vnext/m11c_post_active_maintenance*.py'
+      - 'schemas/bdb-vnext-m11c-maintenance-*.schema.json'
+      - 'tests/test_m11c_post_active_maintenance*.py'
+      - '.github/workflows/m11c-post-active-maintenance-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  maintenance:
+    name: ${{ matrix.os }} / Python 3.12
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install focused dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+      - name: Compile maintenance sources
+        run: >-
+          python -m py_compile
+          bdb_vnext/m11c_post_active_maintenance.py
+          bdb_vnext/m11c_post_active_maintenance_cli.py
+      - name: Validate maintenance schemas
+        shell: python {0}
+        run: |
+          import json
+          from pathlib import Path
+          for path in sorted(Path('schemas').glob('bdb-vnext-m11c-maintenance-*.schema.json')):
+              json.loads(path.read_text(encoding='utf-8'))
+              print(path)
+      - name: Run maintenance fault matrix
+        run: python -m pytest -q tests/test_m11c_post_active_maintenance*.py
+      - name: Run nearest bootstrap regressions
+        run: >-
+          python -m pytest -q
+          tests/test_m11a_bootstrap_slots.py
+          tests/test_m11c_cutover.py

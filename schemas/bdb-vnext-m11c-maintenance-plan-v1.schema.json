@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BDB vNext post-ACTIVE maintenance plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "maintenance_id", "candidate_manifest_sha256", "plan_sha256", "operator_approval_required", "candidate_may_write_active_pointer", "production_activation_performed"],
+  "properties": {
+    "schema": {"const": "bdb-vnext-m11c-maintenance-plan-v1"},
+    "maintenance_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,90}$"},
+    "candidate_manifest_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "plan_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "operator_approval_required": {"const": true},
+    "candidate_may_write_active_pointer": {"const": false},
+    "production_activation_performed": {"const": false}
+  }
+}
