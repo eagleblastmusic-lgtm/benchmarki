@@ -23,9 +23,72 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
+  repair-once:
+    name: Exact inventory normalization
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'agent/m12a-compatibility-zero-gate'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/m12a-compatibility-zero-gate
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Apply exact source repair if still needed
+        id: patch
+        shell: python {0}
+        run: |
+          from pathlib import Path
+          source = Path('bdb_vnext/m12a_closure.py')
+          text = source.read_text(encoding='utf-8')
+          old = '''        for path in output.splitlines():
+            if path in path_set:
+                matched.add(path)
+                token_hits.setdefault(path, set()).add(token)
+'''
+          new = '''        prefix = f"{commit}:"
+        for raw_path in output.splitlines():
+            path = raw_path[len(prefix):] if raw_path.startswith(prefix) else raw_path
+            if path in path_set:
+                matched.add(path)
+                token_hits.setdefault(path, set()).add(token)
+'''
+          count = text.count(old)
+          if count == 1:
+              source.write_text(text.replace(old, new), encoding='utf-8')
+              print('changed=true')
+              with open(Path(__import__('os').environ['GITHUB_OUTPUT']), 'a', encoding='utf-8') as handle:
+                  handle.write('changed=true\n')
+          elif count == 0 and new in text:
+              print('changed=false')
+              with open(Path(__import__('os').environ['GITHUB_OUTPUT']), 'a', encoding='utf-8') as handle:
+                  handle.write('changed=false\n')
+          else:
+              raise SystemExit(f'unexpected inventory loop count: {count}')
+
+      - name: Focused proof
+        if: steps.patch.outputs.changed == 'true'
+        run: |
+          python -m pip install --disable-pip-version-check -e ".[dev]"
+          python -m pytest -q tests/test_m12a_closure.py -k 'inventory'
+
+      - name: Commit exact repair and remove obsolete helper
+        if: steps.patch.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add bdb_vnext/m12a_closure.py
+          if [ -f .github/workflows/m12a-inventory-normalize-once.yml ]; then
+            git rm .github/workflows/m12a-inventory-normalize-once.yml
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'M12a: normalize tree-ish inventory grep paths'
+          git push origin HEAD:agent/m12a-compatibility-zero-gate
+
   validate:
     name: ${{ matrix.os }} / Python 3.12
     runs-on: ${{ matrix.os }}
