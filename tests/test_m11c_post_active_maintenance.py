@@ -55,16 +55,31 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, 
     authority = tmp_path / "authority"
     for root in (authority, tmp_path / "bundle", tmp_path / "client", tmp_path / "legacy"):
         root.mkdir(exist_ok=True)
+    old32 = str((tmp_path / "old32.json").resolve())
+    old64 = str((tmp_path / "old64.json").resolve())
+    candidate_manifest = str((tmp_path / "client-manifest.json").resolve())
+    route_state = {"values": {"32": old32, "64": old64}}
+    def route_observation(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "target": [{"root": "HKCU", "view": view, "value": route_state["values"][view]} for view in ("32", "64")],
+            "legacy": [],
+            "target_conflict": False,
+            "target_registered": True,
+            "legacy_route_present": False,
+        }
+    def route_write(*, runtime_root: Path, view: str, manifest_path: str) -> None:
+        route_state["values"][view] = manifest_path
     monkeypatch.setattr(maintenance, "_active_observation", lambda _authority: current)
     monkeypatch.setattr(maintenance, "_observe_candidate_bundle", lambda **_: {"health": {"status": "READY"}})
     monkeypatch.setattr(
         maintenance,
         "_client_identity",
-        lambda *_args, **_kwargs: {"client_plan_sha256": SHA, "browser_bundle_digest": SHA, "native_manifest_digest": SHA},
+        lambda *_args, **_kwargs: {"client_plan_sha256": SHA, "browser_bundle_digest": SHA, "native_manifest_digest": SHA, "native_manifest_path": candidate_manifest},
     )
+    monkeypatch.setattr(maintenance, "_route_observation", route_observation)
+    monkeypatch.setattr(maintenance, "set_windows_target_native_route_view", route_write)
     monkeypatch.setattr(maintenance, "_verify_routes", lambda *_args: None)
     return current
-
 
 def _prepare(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, maintenance_id: str = "m12a-test") -> dict[str, object]:
     _patch_common(monkeypatch, tmp_path)

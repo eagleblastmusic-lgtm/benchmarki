@@ -483,6 +483,39 @@ def _backup_prior_target_route(runtime: Path, before: Mapping[str, Any], expecte
     _atomic_json(runtime / "clients" / "prior-target-native-route-backup.json", document, immutable=True)
 
 
+
+def set_windows_target_native_route_view(
+    *,
+    runtime_root: str | Path,
+    view: str,
+    manifest_path: str,
+) -> None:
+    """Write exactly one HKCU target view for the canonical route transition.
+
+    This helper is intentionally not a public activation command. It is used
+    only while the post-ACTIVE maintenance lock holds the exact route plan.
+    """
+    if view not in {"32", "64"}:
+        _fail("registry_view_invalid", "Native target registry view is invalid")
+    runtime = _absolute_path(runtime_root, field="runtime_root")
+    _ = query_client_plan(runtime_root=runtime)
+    target = Path(manifest_path).expanduser()
+    if not target.is_absolute() or target.is_symlink() or not target.is_file():
+        _fail("native_manifest_invalid", "Native target manifest must be an existing regular file")
+    winreg = _winreg_module()
+    wow_view = winreg.KEY_WOW64_32KEY if view == "32" else winreg.KEY_WOW64_64KEY
+    try:
+        with winreg.CreateKeyEx(
+            winreg.HKEY_CURRENT_USER,
+            TARGET_REGISTRY_SUBKEY,
+            0,
+            winreg.KEY_SET_VALUE | wow_view,
+        ) as key:
+            winreg.SetValueEx(key, None, 0, winreg.REG_SZ, str(target))
+    except OSError as exc:
+        raise M11cClientError("registry_write_failed", "vNext Native Messaging route transition failed") from exc
+
+
 def register_windows_target_native_host(
     *,
     runtime_root: str | Path,
@@ -568,6 +601,7 @@ __all__ = [
     "observe_windows_native_routes",
     "record_browser_launch_verification",
     "register_windows_target_native_host",
+    "set_windows_target_native_route_view",
     "require_client_verification",
     "stage_client_plan",
     "query_client_plan",

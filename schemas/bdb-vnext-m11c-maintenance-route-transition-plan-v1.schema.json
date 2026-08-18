@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BDB vNext M11c route transition plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "maintenance_id", "route_transition_plan_sha256", "old_native_routes", "candidate_native_manifest_path", "candidate_client_plan_sha256", "candidate_source_head", "candidate_source_tree", "legacy_route_present", "production_activation_performed"],
+  "properties": {
+    "schema": {"const": "bdb-vnext-m11c-route-transition-plan-v1"},
+    "maintenance_id": {"type": "string"},
+    "route_transition_plan_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "old_native_routes": {"type": "array", "minItems": 2, "maxItems": 2},
+    "candidate_native_manifest_path": {"type": "string", "minLength": 1},
+    "candidate_client_plan_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "candidate_source_head": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "candidate_source_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "legacy_route_present": {"const": false},
+    "production_activation_performed": {"const": false}
+  }
+}

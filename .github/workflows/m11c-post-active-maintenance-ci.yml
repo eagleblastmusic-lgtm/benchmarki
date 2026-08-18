@@ -5,7 +5,9 @@ on:
     branches: [bdb-vnext]
     paths:
       - 'bdb_vnext/m11c_post_active_maintenance*.py'
-      - 'schemas/bdb-vnext-m11c-maintenance-*.schema.json'
+      - 'bdb_vnext/m11c_route_transition.py'
+      - 'bdb_vnext/m11c_windows_clients.py'
+      - 'schemas/bdb-vnext-m11c-*.schema.json'
       - 'tests/test_m11c_post_active_maintenance*.py'
       - '.github/workflows/m11c-post-active-maintenance-ci.yml'
   workflow_dispatch:
@@ -35,6 +37,8 @@ jobs:
         run: >-
           python -m py_compile
           bdb_vnext/m11c_post_active_maintenance.py
+          bdb_vnext/m11c_route_transition.py
+          bdb_vnext/m11c_windows_clients.py
           bdb_vnext/m11c_post_active_maintenance_cli.py
       - name: Validate maintenance schemas
         shell: python {0}
