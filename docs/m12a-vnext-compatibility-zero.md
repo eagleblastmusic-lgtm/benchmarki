@@ -2,15 +2,15 @@
 
 Status: **source/CI closure PASS; production closure pending maintenance upgrade**. M12a does not delete, contract, disable, activate, switch, install, start, stop, register, promote, or maintain any production surface.
 
-Final source-gate subject for this tranche before merge: `80af8cb3fb4f46d11a1ef52b5697359ce9799414`.
+Final source-gate implementation subject before this closure-only documentation commit: `80af8cb3fb4f46d11a1ef52b5697359ce9799414`. The documentation-only closure commit remains part of the same PR and is required to pass the identical gate set before merge.
 
-Final required workflow evidence on that exact subject:
+Required workflow evidence for the final PR head:
 
-- M12a Compatibility Zero CI #17 — Windows PASS + Ubuntu PASS;
-- M11c Cutover CI #81 — Windows PASS + Ubuntu PASS;
-- M11c Pre-staging CI #31 — PASS;
-- M11a Bootstrap CI #97 — PASS;
-- trusted BDB vNext CI #117 — PASS.
+- M12a Compatibility Zero CI — Windows PASS + Ubuntu PASS;
+- M11c Cutover CI — Windows PASS + Ubuntu PASS;
+- M11c Pre-staging CI — PASS;
+- M11a Bootstrap CI — PASS;
+- trusted BDB vNext CI — PASS.
 
 This source/CI PASS is **not** a production M12a PASS. The currently deployed frozen production subject remains `bd634b85047674b74846ceaed959ac7883e3eb4a`, which the M12a exact-source test deliberately classifies as non-zero until a content-addressed maintenance upgrade is performed.
 
