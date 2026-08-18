@@ -15,6 +15,9 @@ on:
       - 'tests/test_m9b_native_host.py'
       - 'tests/test_m11c_cutover.py'
       - 'tests/test_vnext_m3c_admission.py'
+      - 'docs/LOCAL_BROWSER_BENCHMARK.md'
+      - 'scripts/run_local_browser_benchmark.py'
+      - 'tests/test_local_browser_benchmark.py'
       - 'pyproject.toml'
       - '.github/workflows/m12a-compatibility-zero-ci.yml'
   workflow_dispatch:
@@ -48,6 +51,7 @@ jobs:
         run: >-
           python -m py_compile
           bdb_vnext/m12a_compatibility_zero.py
+          bdb_vnext/m12a_closure.py
           bdb_vnext/m11c_active_reader.py
           bdb_vnext/m9a_handoff.py
           bdb_vnext/m9b_native_host.py
@@ -56,7 +60,7 @@ jobs:
       - name: Validate Browser service worker syntax
         run: node --check browser_extension_vnext/transport_worker.js
 
-      - name: Run M12a compatibility-zero gate
+      - name: Run M12a compatibility-zero and full closure gate
         shell: python {0}
         run: |
           from pathlib import Path
@@ -67,6 +71,9 @@ jobs:
           print('\n'.join(str(path) for path in files))
           subprocess.run([sys.executable, '-m', 'pytest', '-q', *map(str, files)], check=True)
 
+      - name: Run preserved benchmark harness tests
+        run: python -m pytest -q tests/test_local_browser_benchmark.py
+
       - name: Run authority and Native regression
         run: >-
           python -m pytest -q
@@ -75,22 +82,30 @@ jobs:
           tests/test_m11c_cutover.py
           tests/test_vnext_m3c_admission.py
 
-      - name: Prove installed M12a operator
+      - name: Prove installed M12a operators
         shell: python {0}
         run: |
           import shutil
-          executable = shutil.which('bdb-vnext-m12a') or shutil.which('bdb-vnext-m12a.exe')
-          assert executable, 'installed bdb-vnext-m12a entrypoint is missing'
-          print(executable)
+          base = shutil.which('bdb-vnext-m12a') or shutil.which('bdb-vnext-m12a.exe')
+          closure = shutil.which('bdb-vnext-m12a-closure') or shutil.which('bdb-vnext-m12a-closure.exe')
+          assert base, 'installed bdb-vnext-m12a entrypoint is missing'
+          assert closure, 'installed bdb-vnext-m12a-closure entrypoint is missing'
+          print(base)
+          print(closure)
 
       - name: Prove M12a has no destructive or activation surface
         shell: python {0}
         run: |
           import bdb_vnext.m12a_compatibility_zero as m12a
-          parser = m12a._parser()
-          actions = set(parser._subparsers._group_actions[0].choices)
-          assert actions == {'capture', 'verify'}
-          forbidden = {'delete', 'drop', 'contract', 'apply', 'activate', 'switch', 'install', 'start', 'stop', 'disable'}
-          assert actions.isdisjoint(forbidden)
-          assert not any(name.startswith(tuple(forbidden)) for name in m12a.__all__)
+          import bdb_vnext.m12a_closure as closure
+          forbidden = {
+              'delete', 'drop', 'contract', 'apply', 'activate', 'switch',
+              'maintenance', 'promote', 'install', 'register', 'start', 'stop', 'disable'
+          }
+          for module in (m12a, closure):
+              parser = module._parser()
+              actions = set(parser._subparsers._group_actions[0].choices)
+              assert actions == {'capture', 'verify'}
+              assert actions.isdisjoint(forbidden)
+              assert not any(name.startswith(tuple(forbidden)) for name in module.__all__)
           print('PASS: M12a is evidence-only; destructive M12b effects remain unavailable')
