@@ -155,6 +155,8 @@ def _classify_path(path: str) -> tuple[str, str] | None:
         return "SHARED_COMPATIBILITY_REFERENCE", "RETAIN_ONLY_NON_LEGACY_FOUNDATION_IN_M12B"
     if path.startswith(("bdb_integrations/", "bdb_release/", "bdb_bartosz_os/")):
         return "AUXILIARY_COMPATIBILITY_REFERENCE", "REVIEW_AND_EXCLUDE_NON_TARGET_SURFACES_IN_M12B"
+    if path.startswith("benchmarks/"):
+        return "BENCHMARK_COMPATIBILITY_EVIDENCE", "RETAIN_AS_NON_PRODUCTION_BENCHMARK_ARCHIVE_IN_M12B"
     if path.startswith("scripts/"):
         return "INSTALLER_WRAPPER_SCRIPT", "ARCHIVE_OR_DELETE_SOURCE_ONLY_SURFACES_IN_M12B"
     if path.startswith("tests/"):
