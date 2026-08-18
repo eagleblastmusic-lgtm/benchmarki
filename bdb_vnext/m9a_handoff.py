@@ -416,6 +416,41 @@ def verify_side_by_side_report(*, runtime_root: str | Path, report: Mapping[str,
     return freeze_digest
 
 
+def verify_side_by_side_archive(*, runtime_root: str | Path, freeze_digest: str) -> dict[str, Any]:
+    """Read every content-addressed M9a evidence object bound by the archive."""
+
+    runtime = _absolute(runtime_root, field="runtime_root")
+    archive = _archive_for_digest(runtime, freeze_digest)
+    refs = [
+        archive.get("route_evidence_ref"),
+        archive.get("first_probe_ref"),
+        archive.get("second_probe_ref"),
+        archive.get("client_evidence_ref"),
+        freeze_digest,
+    ]
+    if any(not isinstance(ref, str) for ref in refs):
+        _fail("m9a_archive_invalid", "M9a archive evidence references are incomplete")
+    objects = [_read_object(runtime, str(ref)) for ref in refs]
+    first, second, client = objects[1], objects[2], objects[3]
+    if (
+        first.get("schema") != "bdb-vnext-m9a-probe-set-v1"
+        or first.get("phase") != "FIRST"
+        or second.get("schema") != "bdb-vnext-m9a-probe-set-v1"
+        or second.get("phase") != "SECOND"
+        or client.get("schema") != "bdb-vnext-m9a-client-binding-v1"
+    ):
+        _fail("m9a_archive_invalid", "M9a archive referenced evidence identities differ")
+    return {
+        "schema": "bdb-vnext-m9a-archive-verification-v1",
+        "freeze_digest": freeze_digest,
+        "archive_readable": True,
+        "evidence_refs": [str(ref) for ref in refs],
+        "evidence_object_count": len(refs),
+        "legacy_mutation_performed": False,
+        "production_activation_performed": False,
+    }
+
+
 def revalidate_side_by_side_digest(
     *,
     runtime_root: str | Path,
@@ -478,5 +513,6 @@ __all__ = [
     "M9aHandoffError",
     "capture_side_by_side_handoff",
     "revalidate_side_by_side_digest",
+    "verify_side_by_side_archive",
     "verify_side_by_side_report",
 ]

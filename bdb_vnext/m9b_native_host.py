@@ -31,7 +31,7 @@ from bdb_vnext.composition import (
     PROTOCOL_GENERATION,
     default_vnext_runtime_root,
 )
-from bdb_vnext.m11c_cutover import M11cCutoverError, observe_bootstrap_activation, require_bootstrap_active
+from bdb_vnext.m11c_active_reader import M11cActiveReadError, observe_bootstrap_activation, require_bootstrap_active
 from bdb_vnext.m11c_windows_clients import M11cClientError, record_browser_launch_verification
 from bdb_vnext.m3a_submission import M3aError, ShadowSubmissionRequest
 from bdb_vnext.m3c_admission import CanonicalVNextAdmissionAuthority, M3cError
@@ -200,7 +200,7 @@ def _activation_projection(config: VNextNativeConfig) -> dict[str, Any]:
     try:
         client = read_activation(config.runtime_root)
         bootstrap = observe_bootstrap_activation(authority_root=config.bootstrap_authority_root)
-    except (M9bActivationError, M11cCutoverError) as exc:
+    except (M9bActivationError, M11cActiveReadError) as exc:
         raise M9bNativeError(exc.code, str(exc)) from exc
     if client is None:
         return {
@@ -284,7 +284,7 @@ def handle_message(
     try:
         client_gate = require_active(config.runtime_root)
         require_bootstrap_active(config.bootstrap_authority_root, expected_source_head=client_gate.source_head)
-    except (M9bActivationError, M11cCutoverError) as exc:
+    except (M9bActivationError, M11cActiveReadError) as exc:
         raise M9bNativeError(exc.code, str(exc)) from exc
 
     authority = CanonicalVNextAdmissionAuthority.open(config.runtime_root, legacy_root=config.legacy_runtime_root)
@@ -364,7 +364,7 @@ def serve(
             request_id = str(message.get("request_id") or "invalid-request")[:128]
             try:
                 response = handle_message(config, message, caller_origin=caller_origin)
-            except (M9bNativeError, M3aError, M3cError, M9bActivationError, M11cCutoverError, M11cClientError) as exc:
+            except (M9bNativeError, M3aError, M3cError, M9bActivationError, M11cActiveReadError, M11cClientError) as exc:
                 response = _error_response(config, request_id, exc)
             write_native_message(stdout, response)
         except M9bNativeError:
