@@ -149,6 +149,12 @@ def _classify_path(path: str) -> tuple[str, str] | None:
         return "LEGACY_POC_PACKAGE", "ARCHIVE_OR_EXCLUDE_FROM_TARGET_ONLY_RELEASE_IN_M12B"
     if path.startswith("browser_extension/"):
         return "LEGACY_BROWSER_PACKAGE", "EXCLUDE_FROM_TARGET_ONLY_RELEASE_IN_M12B"
+    if path.startswith("browser_extension_vnext/"):
+        return "TARGET_BROWSER_PACKAGE", "RETAIN_IN_TARGET_ONLY_RELEASE_IN_M12B"
+    if path == "packaging/windows/native_host_entry.py":
+        return "LEGACY_NATIVE_PACKAGING_ENTRY", "EXCLUDE_FROM_TARGET_ONLY_RELEASE_IN_M12B"
+    if path == "packaging/windows/vnext_native_host_entry.py":
+        return "TARGET_NATIVE_PACKAGING_ENTRY", "RETAIN_IN_TARGET_ONLY_RELEASE_IN_M12B"
     if path.startswith("bdb_vnext/"):
         return "VNEXT_MIGRATION_OR_COMPATIBILITY_SOURCE", "RETAIN_ONLY_IF_TARGET_CLOSURE_REQUIRES_ELSE_REMOVE_IN_M12B"
     if path.startswith("bdb_shared/"):
