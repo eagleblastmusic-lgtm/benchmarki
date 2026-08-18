@@ -32,6 +32,7 @@ bdb-vnext-m9a-handoff = "bdb_vnext.m9a_handoff_cli:main"
 bdb-vnext-final-prepare = "bdb_vnext.m11c_final_prepare:main"
 bdb-vnext-legacy-recovery = "bdb_vnext.m11c_legacy_recovery:main"
 bdb-vnext-m12a = "bdb_vnext.m12a_compatibility_zero:main"
+bdb-vnext-m12a-closure = "bdb_vnext.m12a_closure:main"
 
 [tool.setuptools.packages.find]
 include = [
