@@ -33,7 +33,11 @@ from bdb_vnext.m11c_windows_clients import (
 from bdb_vnext.m9a_handoff import M9aHandoffError, revalidate_side_by_side_digest, verify_side_by_side_archive
 from bdb_vnext.m3c_admission import scan_supported_vnext_admission_paths
 from bdb_vnext.m9b_activation import M9bActivationError, read_activation
-from bdb_vnext.m9b_reconciliation import M9bReconciliationError, verify_post_active_reconciliation
+from bdb_vnext.m9b_reconciliation import (
+    M9bReconciliationError,
+    query_post_active_reconciliation,
+    verify_post_active_reconciliation,
+)
 
 
 M12A_REPORT_SCHEMA = "bdb-vnext-m12a-compatibility-zero-report-v1"
@@ -467,11 +471,24 @@ def capture_compatibility_zero(
     if activation_id.startswith("m11c-maint-"):
         maintenance_id = activation_id[len("m11c-maint-") :]
         try:
+            m9b_subject = query_post_active_reconciliation(
+                authority_root=authority,
+                maintenance_id=maintenance_id,
+                deployed_runtime_root=runtime,
+            )
+            m9b_plan = m9b_subject.get("plan")
+            if (
+                m9b_subject.get("status") != "COMPLETED"
+                or not isinstance(m9b_plan, Mapping)
+                or m9b_plan.get("maintenance_plan_sha256") != state.get("cutover_plan_sha256")
+            ):
+                _fail("reconciliation_plan_binding_mismatch", "M9b reconciliation is not bound to the active maintenance plan")
+            m9b_plan_sha256 = _digest_field(m9b_plan.get("plan_sha256"), "m9b_plan_sha256")
             reconciliation = verify_post_active_reconciliation(
                 authority_root=authority,
                 deployed_runtime_root=runtime,
                 maintenance_id=maintenance_id,
-                expected_plan_sha256=state["cutover_plan_sha256"],
+                expected_plan_sha256=m9b_plan_sha256,
             )
         except M9bReconciliationError as exc:
             raise M12aCompatibilityError(exc.code, str(exc)) from exc
