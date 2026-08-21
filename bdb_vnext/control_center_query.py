@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, NoReturn
 
@@ -32,6 +32,7 @@ CC1_AUTHORITY_ID = "devmaster.bdb.vnext.control-center-query"
 CC1_ACTION_REASON = "cc1_read_only"
 CC1_MAX_WORK_ITEMS = 500
 CC1_MAX_RELATED_RECORDS = 50
+CC3_AUTHORITY_SCHEMA = "bdb-vnext-cc3-authority-summary-v1"
 SYSTEM_STATES = frozenset({"OFF", "ON", "PAUSED", "DEGRADED"})
 
 class ControlCenterQueryError(RuntimeError):
@@ -93,18 +94,133 @@ class ControlCenterWorkProjection:
 
 @dataclass(frozen=True)
 class ControlCenterSnapshot:
-    runtime_root: str; system_state: str; writer_state: str; activation_state: str; store_state: str; store_instance_id: str | None; works: tuple[ControlCenterWorkProjection, ...]; action_predicates: tuple[ActionPredicate, ...]; reason_code: str | None = None; schema: str = CC1_QUERY_SCHEMA; authority: str = CC1_AUTHORITY_ID; generation: str = GENERATION_ID
+    runtime_root: str; system_state: str; writer_state: str; activation_state: str; store_state: str; store_instance_id: str | None; works: tuple[ControlCenterWorkProjection, ...]; action_predicates: tuple[ActionPredicate, ...]; reason_code: str | None = None; schema: str = CC1_QUERY_SCHEMA; authority: str = CC1_AUTHORITY_ID; generation: str = GENERATION_ID; authority_summary: Mapping[str, Any] = field(default_factory=dict)
     def __post_init__(self) -> None:
         if self.system_state not in SYSTEM_STATES: raise ValueError("unsupported Control Center system state")
     def as_dict(self) -> dict[str, Any]:
-        payload = {"schema": self.schema, "authority": self.authority, "generation": self.generation, "runtime_root": self.runtime_root, "status_vector": {"system": self.system_state, "writer": self.writer_state, "activation": self.activation_state, "control_store": self.store_state}, "store_instance_id": self.store_instance_id, "reason_code": self.reason_code, "works": [item.as_dict() for item in self.works], "actions": [item.as_dict() for item in self.action_predicates], "read_only": True, "legacy_fallback": False, "mutation_operations_invoked": 0}
+        payload = {"schema": self.schema, "authority": self.authority, "generation": self.generation, "runtime_root": self.runtime_root, "status_vector": {"system": self.system_state, "writer": self.writer_state, "activation": self.activation_state, "control_store": self.store_state}, "store_instance_id": self.store_instance_id, "reason_code": self.reason_code, "works": [item.as_dict() for item in self.works], "actions": [item.as_dict() for item in self.action_predicates], "authority_summary": dict(self.authority_summary), "read_only": True, "legacy_fallback": False, "mutation_operations_invoked": 0}
         payload["projection_digest"] = semantic_digest(payload); return payload
+
+
+def _unavailable_authority_summary(reason: str) -> dict[str, Any]:
+    """Return explicit unknowns without probing or creating another authority."""
+
+    unavailable = {"status": "UNAVAILABLE", "reason_code": reason}
+    return {
+        "schema": CC3_AUTHORITY_SCHEMA,
+        "bootstrap": dict(unavailable),
+        "m9b": dict(unavailable),
+        "m3c": dict(unavailable),
+        "native_route": dict(unavailable),
+        "production_acceptance": {"status": "UNAVAILABLE", "reason_code": reason},
+        "warnings": [reason],
+        "legacy_fallback": False,
+    }
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ControlCenterQueryError("authority_projection_corrupt", f"canonical authority file is unreadable: {path}") from exc
+    if not isinstance(value, dict):
+        _fail("authority_projection_corrupt", "canonical authority file must contain an object")
+    return {str(key): item for key, item in value.items()}
+
+
+def read_control_center_authority_summary(
+    root: str | Path | None = None,
+    *,
+    bootstrap_authority_root: str | Path | None = None,
+) -> dict[str, Any]:
+    """Read external vNext authorities without mutation or Legacy fallback."""
+
+    runtime_root = Path(root).expanduser().absolute() if root is not None else default_vnext_runtime_root().expanduser().absolute()
+    config_path = runtime_root / "config" / "native-host.json"
+    authority_path = Path(bootstrap_authority_root).expanduser().absolute() if bootstrap_authority_root is not None else None
+    if authority_path is None and config_path.is_file():
+        config = _read_json_file(config_path)
+        configured = config.get("bootstrap_authority_root")
+        if isinstance(configured, str) and configured:
+            authority_path = Path(configured).expanduser().absolute()
+    if authority_path is None:
+        return _unavailable_authority_summary("bootstrap_authority_not_configured")
+    try:
+        from bdb_vnext.m11c_active_reader import observe_bootstrap_activation
+        from bdb_vnext.m11c_windows_clients import observe_windows_native_routes
+        from bdb_vnext.m9b_reconciliation import query_post_active_reconciliation
+
+        bootstrap = observe_bootstrap_activation(authority_root=authority_path)
+        state = bootstrap.get("state") or {}
+        activation_id = state.get("activation_id")
+        if not isinstance(activation_id, str) or not activation_id:
+            _fail("authority_identity_missing", "Bootstrap ACTIVE has no canonical maintenance identity")
+        maintenance_id = activation_id.removeprefix("m11c-maint-")
+        m9b_result = query_post_active_reconciliation(
+            authority_root=authority_path,
+            maintenance_id=maintenance_id,
+            deployed_runtime_root=runtime_root,
+        )
+        m9b = m9b_result.get("m9b_record") or m9b_result.get("subject", {}).get("m9b") or {}
+        m9b_plan = m9b_result.get("plan") or {}
+        client_root_value = m9b_plan.get("candidate_client_runtime_root")
+        routes: dict[str, Any]
+        if isinstance(client_root_value, str) and client_root_value:
+            routes = observe_windows_native_routes(runtime_root=client_root_value)
+        else:
+            routes = {"status": "UNAVAILABLE", "reason_code": "client_runtime_not_bound"}
+        m3c_control = runtime_root / "control" / "m3c-control.json"
+        m3c_kill = runtime_root / "control" / "m3c-kill-switch.json"
+        m3c_control_doc = _read_json_file(m3c_control) if m3c_control.is_file() else {}
+        m3c_kill_doc = _read_json_file(m3c_kill) if m3c_kill.is_file() else {}
+        m3c_enabled = m3c_kill_doc.get("admission_enabled")
+        route_ok = routes.get("target_registered") is True and routes.get("target_conflict") is False and routes.get("legacy_route_present") is False
+        m9b_ok = m9b.get("state") == "ACTIVE" and m9b.get("writer_enabled") is True and m9b.get("intake_enabled") is True
+        production_acceptance = route_ok and m9b_ok and m3c_enabled is True and bootstrap.get("status") == "ACTIVE"
+        warnings: list[str] = []
+        if not route_ok:
+            warnings.append("native_route_not_ready")
+        if not m9b_ok:
+            warnings.append("m9b_not_active")
+        if m3c_enabled is not True:
+            warnings.append("m3c_admission_not_enabled")
+        return {
+            "schema": CC3_AUTHORITY_SCHEMA,
+            "bootstrap": {
+                "status": bootstrap.get("status", "UNAVAILABLE"),
+                "state_sha256": state.get("state_sha256"),
+                "active_manifest_sha256": state.get("active_manifest_sha256"),
+                "previous_manifest_sha256": state.get("previous_manifest_sha256"),
+                "source_commit": (bootstrap.get("slots", {}).get("ACTIVE") or {}).get("source_commit"),
+                "source_tree": m9b_plan.get("candidate_source_tree"),
+            },
+            "m9b": {
+                "status": m9b.get("state", "UNAVAILABLE"),
+                "record_digest": m9b.get("record_digest"),
+                "source_head": m9b.get("source_head"),
+                "writer_enabled": m9b.get("writer_enabled"),
+                "intake_enabled": m9b.get("intake_enabled"),
+            },
+            "m3c": {
+                "status": "CANONICAL" if m3c_control_doc and m3c_kill_doc else "UNAVAILABLE",
+                "admission_enabled": m3c_enabled,
+                "control_schema": m3c_control_doc.get("schema"),
+            },
+            "native_route": dict(routes),
+            "production_acceptance": {"status": "PASS" if production_acceptance else "DEGRADED", "value": production_acceptance},
+            "warnings": warnings,
+            "legacy_fallback": False,
+        }
+    except ControlCenterQueryError:
+        raise
+    except Exception as exc:
+        return _unavailable_authority_summary(getattr(exc, "code", "authority_projection_unavailable"))
 
 def _read_only_actions() -> tuple[ActionPredicate, ...]:
     return tuple(ActionPredicate(action=action) for action in ("resume", "apply_effect", "publish", "activate"))
 
 def _off_snapshot(root: Path) -> ControlCenterSnapshot:
-    return ControlCenterSnapshot(str(root), "OFF", "OFF", "OFF", "ABSENT", None, (), _read_only_actions(), "control_store_absent")
+    return ControlCenterSnapshot(str(root), "OFF", "OFF", "OFF", "ABSENT", None, (), _read_only_actions(), "control_store_absent", authority_summary=_unavailable_authority_summary("control_store_absent"))
 
 def _candidates_for_work(connection: sqlite3.Connection, work_id: str) -> tuple[dict[str, Any], ...]:
     rows = connection.execute("SELECT candidate_id,effect_id,work_id,task_id,state,effect_certainty,base_view_json,workspace_generation,config_digest,lease_id,fence,base_tree_digest,planned_tree_digest,observed_tree_digest,candidate_view_json,manifest_digest FROM m4b_candidate_effects WHERE work_id=? ORDER BY candidate_id LIMIT ?", (work_id, CC1_MAX_RELATED_RECORDS)).fetchall()
@@ -166,7 +282,7 @@ def read_control_center_snapshot(root: str | Path | None = None) -> ControlCente
         works = tuple(_work_projection(connection, item.as_dict()) for item in queries)
         if connection.total_changes != before_changes: _fail("read_only_violation", "Control Center query unexpectedly mutated the Control DB")
         instance_id = str(seal.get("instance_id")) if seal.get("instance_id") else None
-        return ControlCenterSnapshot(str(runtime_root), "OFF", "OFF", "OFF", "SEALED", instance_id, works, _read_only_actions(), "cc1_build_only")
+        return ControlCenterSnapshot(str(runtime_root), "OFF", "OFF", "OFF", "SEALED", instance_id, works, _read_only_actions(), "cc1_build_only", authority_summary=read_control_center_authority_summary(runtime_root))
     except M4aReadQueryError as exc:
         raise ControlCenterQueryError(exc.code, str(exc)) from exc
     except sqlite3.DatabaseError as exc:
@@ -175,4 +291,4 @@ def read_control_center_snapshot(root: str | Path | None = None) -> ControlCente
         try: connection.close()
         except sqlite3.DatabaseError: pass
 
-__all__ = ["ActionPredicate", "CC1_ACTION_REASON", "CC1_AUTHORITY_ID", "CC1_QUERY_SCHEMA", "ControlCenterQueryError", "ControlCenterSnapshot", "ControlCenterWorkProjection", "SYSTEM_STATES", "read_control_center_snapshot"]
+__all__ = ["ActionPredicate", "CC1_ACTION_REASON", "CC1_AUTHORITY_ID", "CC1_QUERY_SCHEMA", "CC3_AUTHORITY_SCHEMA", "ControlCenterQueryError", "ControlCenterSnapshot", "ControlCenterWorkProjection", "SYSTEM_STATES", "read_control_center_authority_summary", "read_control_center_snapshot"]
