@@ -1023,7 +1023,7 @@ def apply_m12b_deletion(
             "status": "COMPLETED",
             "plan_sha256": plan_sha,
             "deleted_paths": [target["path"] for target in targets],
-            "production_deletion_performed": plan.get("execution_scope") == "production",
+            "production_deletion_performed": bool(targets) and plan.get("execution_scope") == "production",
         }
     deleted: list[str] = []
     try:
@@ -1077,7 +1077,7 @@ def apply_m12b_deletion(
             "state": "COMPLETED",
             "current_target_id": None,
             "completed_actions": sorted(completed),
-            "production_deletion_performed": plan.get("execution_scope") == "production",
+            "production_deletion_performed": bool(targets) and plan.get("execution_scope") == "production",
         }
         _write_journal(journal_path, journal)
     except M12bDeletionError as exc:
@@ -1110,7 +1110,7 @@ def apply_m12b_deletion(
         "status": "COMPLETED",
         "plan_sha256": plan_sha,
         "deleted_paths": deleted,
-        "production_deletion_performed": plan.get("execution_scope") == "production",
+        "production_deletion_performed": bool(deleted) and plan.get("execution_scope") == "production",
     }
 
 
