@@ -449,6 +449,42 @@ def query_client_route_rebind(*, authority_root: str | Path, rebind_id: str, exp
     }
 
 
+def verify_client_route_rebind_current(
+    *,
+    authority_root: str | Path,
+    deployed_runtime_root: str | Path,
+    rebind_id: str,
+    expected_plan_sha256: str,
+) -> dict[str, Any]:
+    """Verify one explicitly supplied route-repair subject against current authorities."""
+
+    authority = _absolute(authority_root, "authority_root")
+    deployed = _absolute(deployed_runtime_root, "deployed_runtime_root")
+    rebind_id = _id(rebind_id, "rebind_id")
+    expected = _digest_field(expected_plan_sha256, "expected_plan_sha256")
+    plan = _load_plan(authority, rebind_id, expected)
+    state = _load_state(authority, rebind_id, expected)
+    if state["phase"] != "COMPLETED":
+        _fail("route_rebind_incomplete", "current route-repair subject is not COMPLETED")
+    routes, phase = _revalidate(
+        authority=authority,
+        deployed=deployed,
+        plan=plan,
+        state=state,
+        allow_partial=False,
+    )
+    if phase != "TARGET":
+        _fail("route_rebind_readback_mismatch", "current route-repair subject did not read back as TARGET")
+    return {
+        "schema": ROUTE_REBIND_RESULT_SCHEMA,
+        "rebind_id": rebind_id,
+        "plan": plan,
+        "state": state,
+        "routes": routes,
+        "production_mutation_performed": False,
+    }
+
+
 def _revalidate(
     *,
     authority: Path,
@@ -596,5 +632,6 @@ __all__ = [
     "ROUTE_REBIND_RECOVERY_MODE",
     "prepare_client_route_rebind",
     "query_client_route_rebind",
+    "verify_client_route_rebind_current",
     "rebind_client_route",
 ]

@@ -707,6 +707,27 @@ def _m3c(runtime: Path) -> dict[str, Any]:
     }
 
 
+def _resolve_route_rebind_identity(
+    *,
+    m9b_plan: Mapping[str, Any],
+    current_route_rebind_id: str | None,
+    current_route_rebind_plan_sha256: str | None,
+) -> tuple[str, str | None, str]:
+    """Resolve an explicit current route subject without timestamp/latest selection."""
+
+    if (current_route_rebind_id is None) != (current_route_rebind_plan_sha256 is None):
+        _fail(
+            "m12b_route_rebind_identity_invalid",
+            "current route-rebind identity must be supplied as an exact pair",
+        )
+    historical_id = str(m9b_plan.get("route_rebind_id", ""))
+    if current_route_rebind_id is not None:
+        return current_route_rebind_id, current_route_rebind_plan_sha256, "CURRENT_SUCCESSOR"
+    if not historical_id:
+        _fail("m12b_route_rebind_identity_missing", "M9b plan has no route-rebind identity")
+    return historical_id, None, "HISTORICAL"
+
+
 def prepare_m12b_readiness(
     *,
     authority_root: str | Path,
@@ -717,6 +738,8 @@ def prepare_m12b_readiness(
     subject_id: str,
     closure_report_sha256: str,
     deletion_plan_sha256: str,
+    current_route_rebind_id: str | None = None,
+    current_route_rebind_plan_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Observe canonical M12a/M11c authorities and publish no deletion."""
 
@@ -733,6 +756,7 @@ def prepare_m12b_readiness(
     from bdb_vnext.m11c_windows_clients import query_client_plan
     from bdb_vnext.m11c_windows_clients import observe_windows_native_routes
     from bdb_vnext.m11c_client_route_rebind import query_client_route_rebind
+    from bdb_vnext.m11c_client_route_rebind import verify_client_route_rebind_current
     from bdb_vnext.m9b_activation import read_activation
     from bdb_vnext.m9b_reconciliation import _subject as observe_production_subject
     from bdb_vnext.m9b_reconciliation import query_post_active_reconciliation
@@ -783,18 +807,31 @@ def prepare_m12b_readiness(
         "native_manifest_path": client_plan.get("native_manifest_path"),
         "native_routes": native_routes,
     }
-    rebind_id = str(m9b_plan.get("route_rebind_id", ""))
-    if not rebind_id:
-        _fail("m12b_route_rebind_identity_missing", "M9b plan has no route-rebind identity")
-    rebind_result = query_client_route_rebind(authority_root=authority, rebind_id=rebind_id)
+    rebind_id, expected_rebind_sha, rebind_role = _resolve_route_rebind_identity(
+        m9b_plan=m9b_plan,
+        current_route_rebind_id=current_route_rebind_id,
+        current_route_rebind_plan_sha256=current_route_rebind_plan_sha256,
+    )
+    rebind_result = query_client_route_rebind(
+        authority_root=authority,
+        rebind_id=rebind_id,
+        expected_plan_sha256=expected_rebind_sha,
+    )
     rebind_plan = rebind_result.get("plan", {})
     rebind = {
         "rebind_id": rebind_id,
         "plan_sha256": rebind_plan.get("route_rebind_plan_sha256") or rebind_plan.get("plan_sha256"),
         "state_sha256": rebind_result.get("state", {}).get("state_sha256"),
+        "role": rebind_role,
     }
     m3c = _m3c(runtime)
     try:
+        verify_client_route_rebind_current(
+            authority_root=authority,
+            deployed_runtime_root=runtime,
+            rebind_id=rebind_id,
+            expected_plan_sha256=str(rebind["plan_sha256"]),
+        )
         observed_subject = observe_production_subject(
             authority=authority,
             deployed_runtime=runtime,
