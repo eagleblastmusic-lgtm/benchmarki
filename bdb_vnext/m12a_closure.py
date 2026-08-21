@@ -393,12 +393,13 @@ def rehearse_interrupted_archive(
     authority = _absolute(authority_root, field="authority_root")
     runtime = _absolute(runtime_root, field="runtime_root")
     before = _runtime_snapshot(authority_root=authority, runtime_root=runtime, client_runtime_root=_absolute(client_runtime_root or runtime, field="client_runtime_root"))
-    verified = verify_side_by_side_archive(runtime_root=runtime, freeze_digest=freeze_digest)
+    client_runtime = _absolute(client_runtime_root or runtime, field="client_runtime_root")
+    verified = verify_side_by_side_archive(runtime_root=client_runtime, freeze_digest=freeze_digest)
     refs = verified.get("evidence_refs")
     if not isinstance(refs, list) or len(refs) < 2 or any(not isinstance(ref, str) for ref in refs):
         _fail("archive_rehearsal_invalid", "M9a archive references are incomplete")
 
-    source_root = runtime / "evidence" / "m9a-side-by-side" / "objects"
+    source_root = client_runtime / "evidence" / "m9a-side-by-side" / "objects"
     missing_code: str | None = None
     tamper_code: str | None = None
     with tempfile.TemporaryDirectory(prefix="bdb-m12a-archive-") as temporary:
@@ -487,7 +488,7 @@ def capture_read_only_soak(
         started = time.perf_counter()
         identity = _runtime_snapshot(authority_root=authority, runtime_root=runtime, client_runtime_root=client_runtime)
         observed_freeze = revalidate_side_by_side_digest(
-            runtime_root=runtime,
+            runtime_root=client_runtime,
             legacy_runtime_root=legacy,
             freeze_digest=freeze_digest,
         )

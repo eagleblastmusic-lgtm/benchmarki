@@ -30,7 +30,12 @@ from bdb_vnext.m11c_windows_clients import (
     query_client_plan,
     require_client_verification,
 )
-from bdb_vnext.m9a_handoff import M9aHandoffError, revalidate_side_by_side_digest, verify_side_by_side_archive
+from bdb_vnext.m9a_handoff import (
+    M9aHandoffError,
+    capture_side_by_side_handoff,
+    revalidate_side_by_side_digest,
+    verify_side_by_side_archive,
+)
 from bdb_vnext.m3c_admission import scan_supported_vnext_admission_paths
 from bdb_vnext.m9b_activation import M9bActivationError, read_activation
 from bdb_vnext.m9b_reconciliation import (
@@ -468,6 +473,7 @@ def capture_compatibility_zero(
     if not isinstance(activation_id, str) or not activation_id.startswith("m11c-"):
         _fail("activation_identity_invalid", "post-cutover activation identity differs")
     reconciliation: dict[str, Any] | None = None
+    historical_freeze_digest: str | None = None
     if activation_id.startswith("m11c-maint-"):
         maintenance_id = activation_id[len("m11c-maint-") :]
         try:
@@ -492,13 +498,26 @@ def capture_compatibility_zero(
             )
         except M9bReconciliationError as exc:
             raise M12aCompatibilityError(exc.code, str(exc)) from exc
-        freeze_digest = _digest_field(reconciliation["plan"].get("m9a_freeze_digest"), "m9a_freeze_digest")
+        historical_freeze_digest = _digest_field(reconciliation["plan"].get("m9a_freeze_digest"), "m9a_freeze_digest")
     else:
         cutover_id = activation_id[len("m11c-") :]
         cutover = query_cutover_plan(authority_root=authority, cutover_id=cutover_id)["plan"]
         if cutover.get("cutover_plan_sha256") != state.get("cutover_plan_sha256"):
             _fail("cutover_plan_binding_mismatch", "ACTIVE state binds a different immutable cutover plan")
-        freeze_digest = _digest_field(cutover.get("m9a_freeze_digest"), "m9a_freeze_digest")
+        historical_freeze_digest = _digest_field(cutover.get("m9a_freeze_digest"), "m9a_freeze_digest")
+
+    try:
+        current_m9a = capture_side_by_side_handoff(
+            runtime_root=client_runtime,
+            legacy_runtime_root=legacy,
+            observation_seconds=observation_seconds,
+            sleep_fn=sleep_fn,
+        )
+    except M9aHandoffError as exc:
+        raise M12aCompatibilityError(exc.code, str(exc)) from exc
+    if current_m9a.get("status") != "PASS_CLOSED":
+        _fail("m9a_current_capture_blocked", "stable client M9a handoff is not PASS_CLOSED")
+    freeze_digest = _digest_field(current_m9a.get("report", {}).get("freeze_digest"), "m9a_freeze_digest")
 
     expected_client_tree = (
         reconciliation["plan"].get("candidate_source_tree")
@@ -510,23 +529,20 @@ def capture_compatibility_zero(
 
     try:
         first = revalidate_side_by_side_digest(
-            runtime_root=runtime,
+            runtime_root=client_runtime,
             legacy_runtime_root=legacy,
             freeze_digest=freeze_digest,
         )
         sleep_fn(observation_seconds)
         second = revalidate_side_by_side_digest(
-            runtime_root=runtime,
+            runtime_root=client_runtime,
             legacy_runtime_root=legacy,
             freeze_digest=freeze_digest,
         )
     except M9aHandoffError as exc:
         raise M12aCompatibilityError(exc.code, str(exc)) from exc
     runtime_zero = first == second == freeze_digest
-    archive_verification = verify_side_by_side_archive(
-        runtime_root=runtime,
-        freeze_digest=freeze_digest,
-    )
+    archive_verification = verify_side_by_side_archive(runtime_root=client_runtime, freeze_digest=freeze_digest)
     archive_readable = archive_verification.get("archive_readable") is True
     admission_scan = scan_supported_vnext_admission_paths()
     admission_exclusive = (
@@ -601,6 +617,8 @@ def capture_compatibility_zero(
         "client_plan_sha256": client_plan["client_plan_sha256"],
         "client_verification_sha256": verification["verification_sha256"],
         "m9a_freeze_digest": freeze_digest,
+        "historical_m9a_freeze_digest": historical_freeze_digest,
+        "current_m9a_freeze_digest": freeze_digest,
         "runtime_zero_observed": runtime_zero,
         "archive_readable": archive_readable,
         "m9a_archive_verification": archive_verification,

@@ -246,6 +246,11 @@ def _capture_stubs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, source_ze
     )
     monkeypatch.setattr(
         m12a,
+        "capture_side_by_side_handoff",
+        lambda **_: {"status": "PASS_CLOSED", "report": {"freeze_digest": FREEZE_SHA}},
+    )
+    monkeypatch.setattr(
+        m12a,
         "scan_supported_vnext_admission_paths",
         lambda: {
             "pass": True,
