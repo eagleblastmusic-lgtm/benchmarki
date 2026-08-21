@@ -14,6 +14,7 @@ from bdb_vnext.m12b_deletion import (
     M12bDeletionError,
     apply_m12b_deletion,
     build_m12b_subject,
+    _resolve_route_rebind_identity,
     verify_m12b_plan,
 )
 
@@ -212,6 +213,27 @@ def test_false_production_observation_blocks_preflight() -> None:
     assert result["status"] == M12B_BLOCKED_STATUS
     assert result["plan"]["production_acceptance"] is False
     assert "production acceptance observation not proven" in result["plan"]["unknown_paths"]
+
+
+def test_m12b_requires_explicit_successor_route_identity() -> None:
+    historical = {"route_rebind_id": "historical-route"}
+    assert _resolve_route_rebind_identity(
+        m9b_plan=historical,
+        current_route_rebind_id="successor-route",
+        current_route_rebind_plan_sha256=SHA(10),
+    ) == ("successor-route", SHA(10), "CURRENT_SUCCESSOR")
+    assert _resolve_route_rebind_identity(
+        m9b_plan=historical,
+        current_route_rebind_id=None,
+        current_route_rebind_plan_sha256=None,
+    ) == ("historical-route", None, "HISTORICAL")
+    with pytest.raises(M12bDeletionError) as caught:
+        _resolve_route_rebind_identity(
+            m9b_plan=historical,
+            current_route_rebind_id="successor-route",
+            current_route_rebind_plan_sha256=None,
+        )
+    assert caught.value.code == "m12b_route_rebind_identity_invalid"
 
 
 def test_subject_rejects_wrong_source_identity() -> None:

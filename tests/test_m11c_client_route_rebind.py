@@ -145,6 +145,94 @@ def test_completed_route_drift_recovers_forward_under_same_plan(monkeypatch: pyt
     assert {item["view"] for item in route["target"]} == {"32", "64"}
 
 
+def test_successor_route_repair_binds_current_m9b_and_preserves_history(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prepared, authority, deployed, client, route, historical_id = _prepare(monkeypatch, tmp_path)
+    historical_plan_path = authority / "maintenance" / "client-route-rebind" / "plans" / f"{historical_id}.json"
+    historical_bytes = historical_plan_path.read_bytes()
+    historical_sha = prepared["plan"]["route_rebind_plan_sha256"]
+    rebind.rebind_client_route(
+        authority_root=authority,
+        deployed_runtime_root=deployed,
+        rebind_id=historical_id,
+        expected_plan_sha256=historical_sha,
+    )
+    route["target"] = []
+
+    successor_id = "successor-route-repair"
+    successor = rebind.prepare_client_route_rebind(
+        authority_root=authority,
+        deployed_runtime_root=deployed,
+        target_client_runtime_root=client,
+        rebind_id=successor_id,
+        operator_sid="test-sid",
+    )
+    assert successor["plan"]["rebind_id"] == successor_id
+    assert successor["plan"]["rebind_id"] != historical_id
+    assert successor["plan"]["m9b_record_digest"] == M9B
+    assert successor["plan"]["m9b_source_head"] == HEAD
+    successor_sha = successor["plan"]["route_rebind_plan_sha256"]
+
+    repaired = rebind.rebind_client_route(
+        authority_root=authority,
+        deployed_runtime_root=deployed,
+        rebind_id=successor_id,
+        expected_plan_sha256=successor_sha,
+    )
+    verified = rebind.verify_client_route_rebind_current(
+        authority_root=authority,
+        deployed_runtime_root=deployed,
+        rebind_id=successor_id,
+        expected_plan_sha256=successor_sha,
+    )
+    assert repaired["state"]["phase"] == "COMPLETED"
+    assert verified["state"]["phase"] == "COMPLETED"
+    assert {item["view"] for item in verified["routes"]["target"]} == {"32", "64"}
+    assert historical_plan_path.read_bytes() == historical_bytes
+
+
+def test_current_route_repair_verifier_rejects_stale_m9b_and_prepared_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prepared, authority, deployed, _client, route, rebind_id = _prepare(monkeypatch, tmp_path)
+    plan_sha = prepared["plan"]["route_rebind_plan_sha256"]
+    with pytest.raises(rebind.ClientRouteRebindError) as caught:
+        rebind.verify_client_route_rebind_current(
+            authority_root=authority,
+            deployed_runtime_root=deployed,
+            rebind_id=rebind_id,
+            expected_plan_sha256=plan_sha,
+        )
+    assert caught.value.code == "route_rebind_incomplete"
+
+    rebind.rebind_client_route(
+        authority_root=authority,
+        deployed_runtime_root=deployed,
+        rebind_id=rebind_id,
+        expected_plan_sha256=plan_sha,
+    )
+    original_active_subject = rebind._active_subject
+
+    def drifted(**kwargs: object) -> dict[str, object]:
+        value = original_active_subject(**kwargs)
+        value["m9b"] = {**value["m9b"], "record_digest": "sha256:" + "f" * 64}
+        return value
+
+    monkeypatch.setattr(rebind, "_active_subject", drifted)
+    with pytest.raises(rebind.ClientRouteRebindError) as caught:
+        rebind.verify_client_route_rebind_current(
+            authority_root=authority,
+            deployed_runtime_root=deployed,
+            rebind_id=rebind_id,
+            expected_plan_sha256=plan_sha,
+        )
+    assert caught.value.code == "route_rebind_m9b_changed"
+    assert {item["view"] for item in route["target"]} == {"32", "64"}
+
+
 def test_partial_route_fault_replays_forward_without_old_route(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     prepared, authority, deployed, _client, route, rebind_id = _prepare(monkeypatch, tmp_path)
     plan_sha = prepared["plan"]["route_rebind_plan_sha256"]
