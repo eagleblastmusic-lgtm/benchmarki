@@ -211,3 +211,68 @@ def test_prepare_binds_completed_stable_route_rebind_lineage(monkeypatch: pytest
     assert prepared["plan"]["route_rebind_id"] == "stable-route"
     assert prepared["plan"]["route_rebind_plan_sha256"] == ROUTE_REBIND
     assert prepared["plan"]["candidate_client_plan_sha256"] == CLIENT
+
+
+def test_subject_uses_maintenance_tree_when_active_manifest_omits_tree(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    authority = tmp_path / "authority"
+    deployed = tmp_path / "deployed"
+    client = tmp_path / "client"
+    for path in (authority, deployed, client):
+        path.mkdir()
+    old = _old()
+    plan = {
+        "maintenance_id": "m11c-test-reconciliation",
+        "plan_sha256": MAINTENANCE,
+        "route_transition_plan_sha256": ROUTE,
+        "candidate_source_head": HEAD,
+        "candidate_source_tree": TREE,
+        "client_plan_sha256": CLIENT,
+        "candidate_native_manifest_path": "C:/client/native-host.json",
+        "browser_bundle_digest": BROWSER,
+        "native_manifest_digest": NATIVE,
+    }
+    monkeypatch.setattr(
+        reconciliation,
+        "query_post_active_maintenance",
+        lambda **_: {
+            "plan": plan,
+            "route_transition_plan": {"route_transition_plan_sha256": ROUTE},
+            "route_transition_state": {"phase": "COMPLETED", "bootstrap_phase": "NEW", "bootstrap_state_sha256": BOOT},
+        },
+    )
+    monkeypatch.setattr(
+        reconciliation,
+        "observe_bootstrap_activation",
+        lambda **_: {
+            "status": "ACTIVE",
+            "production_activation_performed": True,
+            "state": {"state_sha256": BOOT, "cutover_plan_sha256": MAINTENANCE},
+            "slots": {"ACTIVE": {"source_commit": HEAD}},
+        },
+    )
+    client_plan = {
+        "client_plan_sha256": CLIENT,
+        "source_head": HEAD,
+        "source_tree": TREE,
+        "native_manifest_sha256": NATIVE,
+        "native_manifest_path": "C:/client/native-host.json",
+        "browser_bundle_digest": BROWSER,
+    }
+    monkeypatch.setattr(reconciliation, "query_client_plan", lambda **_: {"plan": client_plan})
+    monkeypatch.setattr(reconciliation, "require_client_verification", lambda **_: {"verification_sha256": CLIENT})
+    monkeypatch.setattr(
+        reconciliation,
+        "observe_windows_native_routes",
+        lambda **_: {"target_registered": True, "target_conflict": False, "legacy_route_present": False},
+    )
+    monkeypatch.setattr(reconciliation, "read_activation", lambda _runtime: old)
+    monkeypatch.setattr(reconciliation, "_m3c_state", lambda _runtime: {"control_digest": CLIENT, "kill_switch_digest": CLIENT})
+
+    subject = reconciliation._subject(
+        authority=authority,
+        deployed_runtime=deployed,
+        client_runtime=client,
+        maintenance_id="m11c-test-reconciliation",
+        maintenance_plan_sha256=MAINTENANCE,
+    )
+    assert subject["client_plan"]["source_tree"] == TREE

@@ -281,8 +281,10 @@ def _subject(
     if state.get("cutover_plan_sha256") != maintenance_plan_sha256:
         _fail("bootstrap_plan_mismatch", "Bootstrap ACTIVE is not bound to the maintenance plan")
     active = slots.get("ACTIVE")
-    if not isinstance(active, Mapping) or active.get("source_commit") != plan.get("candidate_source_head") or active.get("source_tree") != plan.get("candidate_source_tree"):
+    if not isinstance(active, Mapping) or active.get("source_commit") != plan.get("candidate_source_head"):
         _fail("bootstrap_source_mismatch", "Bootstrap ACTIVE source differs from candidate")
+    if active.get("source_tree") is not None and active.get("source_tree") != plan.get("candidate_source_tree"):
+        _fail("bootstrap_source_mismatch", "Bootstrap ACTIVE tree differs from candidate")
 
     try:
         queried_client = query_client_plan(runtime_root=client_runtime)
