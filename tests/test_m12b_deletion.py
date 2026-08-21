@@ -70,7 +70,7 @@ def _subject_inputs(*, unknown: bool = False) -> dict:
         "bootstrap": bootstrap,
         "m9b": {"plan_sha256": SHA(8), "state_sha256": SHA(9), "target_m9b_record_sha256": SHA(1)},
         "m3c": {"control_digest": SHA(2), "kill_switch_digest": SHA(3)},
-        "client": {"client_plan_sha256": SHA(4), "verification_sha256": SHA(5)},
+        "client": {"client_plan_sha256": SHA(4), "verification_sha256": SHA(5), "source_head": SOURCE, "source_tree": TREE},
         "route_rebind": {"plan_sha256": SHA(6), "state_sha256": SHA(7)},
         "physical_references": [
             {"path": r"C:\active\bundle", "category": "ACTIVE_PRODUCTION_REQUIRED", "authority": "bootstrap"},

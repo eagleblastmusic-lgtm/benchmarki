@@ -280,6 +280,8 @@ def build_m12b_subject(
         _check_digest(m3c.get(field), f"m3c_{field}")
     for field in ("client_plan_sha256", "verification_sha256"):
         _check_digest(client.get(field), f"client_{field}")
+    if client.get("source_head") != source_commit or client.get("source_tree") != source_tree:
+        _fail("m12b_client_source_mismatch", "client plan source identity differs from the exact M12a source")
     for field in ("plan_sha256", "state_sha256"):
         _check_digest(route_rebind.get(field), f"route_rebind_{field}")
 
