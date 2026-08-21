@@ -21,6 +21,7 @@ FREEZE_SHA = "sha256:" + "c" * 64
 VERIFY_SHA = "sha256:" + "d" * 64
 BUNDLE_SHA = "sha256:" + "e" * 64
 PREVIOUS_SHA = "sha256:" + "f" * 64
+M9B_PLAN_SHA = "sha256:" + "9" * 64
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -309,6 +310,61 @@ def test_capture_pass_closed_writes_only_evidence_and_deletion_plan(monkeypatch:
     assert verified["status"] == "PASS_CLOSED"
     assert verified["deletion_plan"]["status"] == "PLANNED_NOT_APPLIED"
     assert verified["final_deletion_performed"] is False
+
+
+def test_maintenance_capture_verifies_m9b_plan_not_bootstrap_cutover_digest(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    authority, runtime, legacy, repo = _capture_stubs(monkeypatch, tmp_path)
+    source_commit = "1" * 40
+    source_tree = "3" * 40
+    monkeypatch.setattr(
+        m12a,
+        "observe_bootstrap_activation",
+        lambda **_: {
+            "status": "ACTIVE",
+            "production_activation_performed": True,
+            "state": {"activation_id": "m11c-maint-test", "cutover_plan_sha256": PLAN_SHA},
+            "slots": {
+                "ACTIVE": {"source_commit": source_commit, "source_tree": source_tree, "bundle_sha256": BUNDLE_SHA, "known_good": True},
+                "PREVIOUS": {"source_commit": "2" * 40, "bundle_sha256": PREVIOUS_SHA, "known_good": True},
+                "CANDIDATE": None,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        m12a,
+        "read_activation",
+        lambda _: SimpleNamespace(state="ACTIVE", writer_enabled=True, intake_enabled=True, source_head=source_commit),
+    )
+    monkeypatch.setattr(
+        m12a,
+        "query_client_plan",
+        lambda **_: {"plan": {"client_plan_sha256": SHA, "source_head": source_commit, "source_tree": source_tree}},
+    )
+    m9b_plan = {
+        "plan_sha256": M9B_PLAN_SHA,
+        "maintenance_plan_sha256": PLAN_SHA,
+        "candidate_source_tree": source_tree,
+        "m9a_freeze_digest": FREEZE_SHA,
+    }
+    monkeypatch.setattr(
+        m12a,
+        "query_post_active_reconciliation",
+        lambda **_: {"status": "COMPLETED", "plan": m9b_plan},
+    )
+
+    def verify(**kwargs: object) -> dict[str, object]:
+        assert kwargs["expected_plan_sha256"] == M9B_PLAN_SHA
+        return {"status": "COMPLETED", "plan": m9b_plan, "route_rebind": None}
+
+    monkeypatch.setattr(m12a, "verify_post_active_reconciliation", verify)
+    result = m12a.capture_compatibility_zero(
+        authority_root=authority,
+        runtime_root=runtime,
+        legacy_runtime_root=legacy,
+        repo_root=repo,
+        observation_seconds=0,
+    )
+    assert result["status"] == "PASS_CLOSED"
 
 
 def test_capture_blocks_when_active_source_still_uses_migration_bridge(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
