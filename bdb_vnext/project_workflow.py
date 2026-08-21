@@ -8,14 +8,16 @@ for the existing Browser/Native transport.
 from __future__ import annotations
 
 import os
+import json
 import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence
 
-from .project_catalog import ProjectBrief, ProjectCatalog, ProjectCatalogError, ProjectPlan, ProjectRecord, new_project_record
+from .project_catalog import PROJECT_PLAN_MAX_BYTES, ProjectBrief, ProjectCatalog, ProjectCatalogError, ProjectPlan, ProjectRecord, new_project_record, validate_project_plan
 from .project_launch import ProjectLaunch, ProjectLaunchQueueAdapter, ProjectLaunchQueueError
+from .project_memory import HANDOFF_MODES, PlanUpdatePreview, ProjectMemoryState, ProjectMemoryStore, build_handoff_prompt
 
 
 _ALIAS_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
@@ -96,6 +98,10 @@ def brief_markdown(brief: ProjectBrief, *, github_repo: str | None = None, local
         lines.extend(["", "## Najważniejsze funkcje", *[f"- {item}" for item in brief.features]])
     if brief.constraints:
         lines.extend(["", "## Ograniczenia", *[f"- {item}" for item in brief.constraints]])
+    if brief.pinned_files:
+        lines.extend(["", "## Ważne pliki", *[f"- {item}" for item in brief.pinned_files]])
+    if brief.environment_hints:
+        lines.extend(["", "## Środowisko (wskazówki)", *[f"- {item}" for item in brief.environment_hints]])
     if github_repo:
         lines.extend(["", "## GitHub", github_repo])
     if local_repo_identity:
@@ -238,6 +244,69 @@ class ProjectWorkflow:
         except ProjectCatalogError as exc:
             raise ProjectWorkflowError(exc.code, str(exc)) from exc
 
+    def memory(self, project_id: str) -> ProjectMemoryStore:
+        if self.catalog.get(project_id) is None:
+            raise ProjectWorkflowError("project_not_found", "project is not in the canonical catalog")
+        return ProjectMemoryStore(self.catalog.runtime_root, project_id)
+
+    def read_memory(self, project_id: str) -> ProjectMemoryState:
+        return self.memory(project_id).read_state()
+
+    def preview_plan_update(self, project_id: str, plan_path: str | Path) -> PlanUpdatePreview:
+        project = self.catalog.get(project_id)
+        if project is None:
+            raise ProjectWorkflowError("project_not_found", "project is not in the canonical catalog")
+        try:
+            plan = self._read_plan(plan_path, project_id)
+            return self.memory(project_id).preview_update(plan)
+        except ProjectWorkflowError:
+            raise
+        except (ProjectCatalogError, OSError) as exc:
+            raise ProjectWorkflowError(getattr(exc, "code", "plan_path_invalid"), str(exc)) from exc
+
+    def apply_plan_update(self, project_id: str, plan_path: str | Path, preview: PlanUpdatePreview | None = None) -> tuple[ProjectRecord, ProjectPlan]:
+        if self.catalog.get(project_id) is None:
+            raise ProjectWorkflowError("project_not_found", "project is not in the canonical catalog")
+        candidate = self._read_plan(plan_path, project_id)
+        current_preview = self.memory(project_id).preview_update(candidate)
+        if preview is not None and (preview.project_id != project_id or preview.candidate_plan_digest != current_preview.candidate_plan_digest or preview.current_plan_digest != current_preview.current_plan_digest):
+            raise ProjectWorkflowError("plan_preview_mismatch", "plan preview no longer matches canonical state")
+        if not current_preview.accepted:
+            raise ProjectWorkflowError(current_preview.reason_code or "plan_update_rejected", "plan update was not accepted")
+        # Reuse the catalog's canonical import path so summary and immutable
+        # plan activation cannot diverge.
+        return self.import_plan(project_id, plan_path)
+
+    def queue_handoff_prompt(self, project_id: str, mode: str, *, git_head: str | None = None) -> ProjectLaunch:
+        if mode not in HANDOFF_MODES:
+            raise ProjectWorkflowError("handoff_mode_invalid", "handoff mode is unsupported")
+        project = self.catalog.get(project_id)
+        if project is None:
+            raise ProjectWorkflowError("project_not_found", "project is not in the canonical catalog")
+        memory = self.memory(project_id)
+        prompt = build_handoff_prompt(project, memory.current_plan(), memory.read_state(), mode=mode, git_head=git_head)
+        try:
+            launch = self.queue.enqueue(repo_alias=project.repo_alias, prompt=prompt, ttl_minutes=10)
+        except ProjectLaunchQueueError as exc:
+            raise ProjectWorkflowError(exc.code, str(exc)) from exc
+        memory.append_event("HANDOFF_CREATED", f"Utworzono handoff {mode}", correlation_id=launch.launch_id)
+        self.catalog.upsert(ProjectRecord(**{**project.__dict__, "last_launch_id": launch.launch_id}))
+        return launch
+
+    @staticmethod
+    def _read_plan(plan_path: str | Path, project_id: str) -> ProjectPlan:
+        source = Path(plan_path).expanduser().absolute()
+        if source.is_symlink() or not source.is_file():
+            raise ProjectWorkflowError("plan_path_invalid", "project-plan.json must be a regular file")
+        payload = source.read_bytes()
+        if len(payload) > PROJECT_PLAN_MAX_BYTES:
+            raise ProjectWorkflowError("plan_too_large", "project plan exceeds its bound")
+        try:
+            document = json.loads(payload.decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ProjectWorkflowError("plan_json_invalid", "project plan is not valid JSON") from exc
+        return validate_project_plan(document, expected_project_id=project_id)
+
     def queue_plan_prompt(self, project_id: str) -> ProjectLaunch:
         return self._queue(project_id, build_plan_prompt)
 
@@ -274,6 +343,7 @@ __all__ = [
     "ProjectWorkflow",
     "ProjectWorkflowError",
     "SubprocessCommandRunner",
+    "HANDOFF_MODES",
     "brief_markdown",
     "build_continue_prompt",
     "build_plan_prompt",
