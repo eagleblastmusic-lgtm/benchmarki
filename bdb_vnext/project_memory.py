@@ -1,0 +1,627 @@
+"""Canonical project memory, immutable plan history and deterministic next action.
+
+This is metadata authority only.  It deliberately does not observe Git logs,
+execute repository work, or infer task completion from runtime results.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import secrets
+import uuid
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable, Mapping, Sequence
+
+from bdb_shared.evidence import canonical_json_bytes, semantic_digest
+
+from .project_catalog import ProjectPlan, ProjectRecord, ProjectTask, validate_project_plan
+
+
+PROJECT_MEMORY_SCHEMA = "bdb-vnext-project-memory-v1"
+PROJECT_PLAN_POINTER_SCHEMA = "bdb-project-current-plan-v1"
+PROJECT_PLAN_UPDATE_PREVIEW_SCHEMA = "bdb-project-plan-update-preview-v1"
+PROJECT_EVENT_SCHEMA = "bdb-project-event-v1"
+PROJECT_DECISION_SCHEMA = "bdb-project-decision-v1"
+PROJECT_INBOX_SCHEMA = "bdb-project-inbox-v1"
+PROJECT_RISK_SCHEMA = "bdb-project-risk-v1"
+PROJECT_DEBT_SCHEMA = "bdb-project-debt-v1"
+PROJECT_ATTENTION_SCHEMA = "bdb-project-attention-v1"
+PROJECT_CHECKPOINT_SCHEMA = "bdb-project-checkpoint-v1"
+MAX_MEMORY_BYTES = 4 * 1024 * 1024
+MAX_EVENTS = 2_048
+MAX_ITEMS = 512
+_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$")
+_PLAN_VERSION_RE = re.compile(r"^(\d+)(?:\.0+)?$")
+_STATUS_VALUES = frozenset({"pending", "active", "review", "completed", "blocked", "skipped"})
+_EVENT_TYPES = frozenset({
+    "PROJECT_CREATED", "PLAN_IMPORTED", "PLAN_UPDATED", "TASK_STARTED", "TASK_REVIEW", "TASK_COMPLETED", "TASK_BLOCKED",
+    "DECISION_ADDED", "DECISION_SUPERSEDED", "INBOX_ITEM_ADDED", "INBOX_ITEM_RESOLVED", "RISK_ADDED", "RISK_RESOLVED",
+    "TECH_DEBT_ADDED", "TECH_DEBT_RESOLVED", "ATTENTION_ADDED", "ATTENTION_RESOLVED", "CHECKPOINT_CREATED", "HANDOFF_CREATED",
+})
+HANDOFF_MODES = (
+    "CONTINUE_IMPLEMENTATION", "NEW_CHAT_PROJECT_HANDOFF", "ARCHITECTURE_REVIEW", "PROJECT_REVIEW", "DEBUGGING",
+    "PLAN_REVIEW", "DISCUSS_IDEA", "SECOND_OPINION",
+)
+
+
+class ProjectMemoryError(ValueError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _fail(code: str, message: str) -> None:
+    raise ProjectMemoryError(code, message)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def _text(value: object, field: str, *, max_length: int = 8_000, required: bool = True) -> str:
+    if not isinstance(value, str):
+        _fail("memory_field_invalid", f"{field} must be text")
+    result = value.strip()
+    if required and not result:
+        _fail("memory_field_invalid", f"{field} must not be empty")
+    if len(result) > max_length:
+        _fail("memory_field_too_large", f"{field} exceeds its bound")
+    return result
+
+
+def _project_id(project_id: str) -> str:
+    value = _text(project_id, "project_id", max_length=96)
+    if not _ID_RE.fullmatch(value):
+        _fail("project_id_invalid", "project_id is unsafe")
+    return value
+
+
+def _version(value: object, field: str = "plan_version") -> str:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        _fail("plan_version_invalid", f"{field} must be an integer version")
+    text = str(value).strip()
+    if _PLAN_VERSION_RE.fullmatch(text) is None:
+        _fail("plan_version_invalid", f"{field} must be an integer version")
+    return str(int(text.split(".", 1)[0]))
+
+
+def plan_version_number(value: object) -> int:
+    text = _version(value)
+    return int(_PLAN_VERSION_RE.fullmatch(text).group(1))  # type: ignore[union-attr]
+
+
+def _atomic_write(path: Path, document: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = canonical_json_bytes(dict(document))
+    if len(payload) > MAX_MEMORY_BYTES:
+        _fail("memory_too_large", "project memory document exceeds its bound")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def memory_root(runtime_root: str | Path, project_id: str) -> Path:
+    root = Path(runtime_root).expanduser().absolute()
+    if root.exists() and root.is_symlink():
+        _fail("memory_root_invalid", "project memory runtime root must not be a symlink")
+    identifier = _project_id(project_id)
+    return root / "control" / "project-memory" / identifier
+
+
+def _plan_digest(plan: ProjectPlan) -> str:
+    return semantic_digest(plan.to_dict())
+
+
+@dataclass(frozen=True)
+class ProjectEvent:
+    event_id: str
+    project_id: str
+    event_type: str
+    timestamp: str
+    human_summary: str
+    task_id: str | None = None
+    milestone_id: str | None = None
+    plan_version: str | None = None
+    git_head: str | None = None
+    correlation_id: str | None = None
+    schema: str = PROJECT_EVENT_SCHEMA
+
+    def to_dict(self) -> dict[str, Any]:
+        return {key: value for key, value in {
+            "schema": self.schema, "event_id": self.event_id, "project_id": self.project_id,
+            "event_type": self.event_type, "timestamp": self.timestamp, "human_summary": self.human_summary,
+            "task_id": self.task_id, "milestone_id": self.milestone_id, "plan_version": self.plan_version,
+            "git_head": self.git_head, "correlation_id": self.correlation_id,
+        }.items() if value is not None}
+
+
+@dataclass(frozen=True)
+class DecisionRecord:
+    decision_id: str
+    project_id: str
+    title: str
+    decision: str
+    reason: str
+    status: str
+    created_at: str
+    related_task_ids: tuple[str, ...] = ()
+    related_plan_version: str | None = None
+    supersedes_decision_id: str | None = None
+    schema: str = PROJECT_DECISION_SCHEMA
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"schema": self.schema, "decision_id": self.decision_id, "project_id": self.project_id, "title": self.title, "decision": self.decision, "reason": self.reason, "status": self.status, "created_at": self.created_at, "related_task_ids": list(self.related_task_ids), "related_plan_version": self.related_plan_version, "supersedes_decision_id": self.supersedes_decision_id}
+
+
+@dataclass(frozen=True)
+class InboxItem:
+    inbox_id: str
+    project_id: str
+    title: str
+    description: str
+    created_at: str
+    status: str = "new"
+    schema: str = PROJECT_INBOX_SCHEMA
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"schema": self.schema, "inbox_id": self.inbox_id, "project_id": self.project_id, "title": self.title, "description": self.description, "created_at": self.created_at, "status": self.status}
+
+
+@dataclass(frozen=True)
+class RiskRecord:
+    risk_id: str
+    project_id: str
+    title: str
+    description: str
+    severity: str
+    status: str
+    created_at: str
+    schema: str = PROJECT_RISK_SCHEMA
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"schema": self.schema, "risk_id": self.risk_id, "project_id": self.project_id, "title": self.title, "description": self.description, "severity": self.severity, "status": self.status, "created_at": self.created_at}
+
+
+@dataclass(frozen=True)
+class DebtRecord:
+    debt_id: str
+    project_id: str
+    title: str
+    description: str
+    created_at: str
+    status: str
+    related_task_ids: tuple[str, ...] = ()
+    suggested_review_milestone: str | None = None
+    schema: str = PROJECT_DEBT_SCHEMA
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"schema": self.schema, "debt_id": self.debt_id, "project_id": self.project_id, "title": self.title, "description": self.description, "created_at": self.created_at, "status": self.status, "related_task_ids": list(self.related_task_ids), "suggested_review_milestone": self.suggested_review_milestone}
+
+
+@dataclass(frozen=True)
+class AttentionItem:
+    attention_id: str
+    project_id: str
+    type: str
+    title: str
+    description: str
+    created_at: str
+    status: str = "open"
+    schema: str = PROJECT_ATTENTION_SCHEMA
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"schema": self.schema, "attention_id": self.attention_id, "project_id": self.project_id, "type": self.type, "title": self.title, "description": self.description, "created_at": self.created_at, "status": self.status}
+
+
+@dataclass(frozen=True)
+class Checkpoint:
+    checkpoint_id: str
+    project_id: str
+    created_at: str
+    label: str
+    plan_version: str | None
+    git_head: str | None
+    completed_task_ids: tuple[str, ...]
+    current_task_id: str | None
+    active_decision_ids: tuple[str, ...]
+    open_blocker_ids: tuple[str, ...]
+    human_summary: str | None = None
+    schema: str = PROJECT_CHECKPOINT_SCHEMA
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"schema": self.schema, "checkpoint_id": self.checkpoint_id, "project_id": self.project_id, "created_at": self.created_at, "label": self.label, "plan_version": self.plan_version, "git_head": self.git_head, "completed_task_ids": list(self.completed_task_ids), "current_task_id": self.current_task_id, "active_decision_ids": list(self.active_decision_ids), "open_blocker_ids": list(self.open_blocker_ids), "human_summary": self.human_summary}
+
+
+@dataclass(frozen=True)
+class ProjectMemoryState:
+    project_id: str
+    events: tuple[ProjectEvent, ...] = ()
+    decisions: tuple[DecisionRecord, ...] = ()
+    inbox: tuple[InboxItem, ...] = ()
+    risks: tuple[RiskRecord, ...] = ()
+    technical_debt: tuple[DebtRecord, ...] = ()
+    attention: tuple[AttentionItem, ...] = ()
+    checkpoints: tuple[Checkpoint, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"schema": PROJECT_MEMORY_SCHEMA, "project_id": self.project_id, "events": [item.to_dict() for item in self.events], "decisions": [item.to_dict() for item in self.decisions], "inbox": [item.to_dict() for item in self.inbox], "risks": [item.to_dict() for item in self.risks], "technical_debt": [item.to_dict() for item in self.technical_debt], "attention": [item.to_dict() for item in self.attention], "checkpoints": [item.to_dict() for item in self.checkpoints]}
+
+
+@dataclass(frozen=True)
+class PlanDiffItem:
+    kind: str
+    subject: str
+    subject_id: str
+    before: Mapping[str, Any] | None
+    after: Mapping[str, Any] | None
+
+
+@dataclass(frozen=True)
+class PlanDiff:
+    milestones: tuple[PlanDiffItem, ...]
+    tasks: tuple[PlanDiffItem, ...]
+    dependencies: tuple[PlanDiffItem, ...]
+    acceptance_criteria: tuple[PlanDiffItem, ...]
+    current_task: tuple[PlanDiffItem, ...]
+
+    @property
+    def all_items(self) -> tuple[PlanDiffItem, ...]:
+        return self.milestones + self.tasks + self.dependencies + self.acceptance_criteria + self.current_task
+
+    def summary_lines(self) -> tuple[str, ...]:
+        labels = {"ADDED": "+", "REMOVED": "-", "MODIFIED": "~", "UNCHANGED": "="}
+        return tuple(f"{labels[item.kind]} {item.subject} {item.subject_id}" for item in self.all_items if item.kind != "UNCHANGED")
+
+
+@dataclass(frozen=True)
+class PlanUpdatePreview:
+    project_id: str
+    accepted: bool
+    reason_code: str | None
+    current_version: str | None
+    next_version: str
+    current_plan_digest: str | None
+    candidate_plan_digest: str
+    diff: PlanDiff
+    completed_protection: tuple[str, ...] = ()
+    schema: str = PROJECT_PLAN_UPDATE_PREVIEW_SCHEMA
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"schema": self.schema, "project_id": self.project_id, "accepted": self.accepted, "reason_code": self.reason_code, "current_version": self.current_version, "next_version": self.next_version, "current_plan_digest": self.current_plan_digest, "candidate_plan_digest": self.candidate_plan_digest, "diff": [{"kind": item.kind, "subject": item.subject, "subject_id": item.subject_id, "before": item.before, "after": item.after} for item in self.diff.all_items], "completed_protection": list(self.completed_protection)}
+
+
+@dataclass(frozen=True)
+class NextAction:
+    code: str
+    title: str
+    detail: str
+    priority: int
+
+
+def _item_map(items: Sequence[Mapping[str, Any]], key: str) -> dict[str, Mapping[str, Any]]:
+    return {str(item[key]): item for item in items}
+
+
+def _diff_by_id(old: Sequence[Mapping[str, Any]], new: Sequence[Mapping[str, Any]], *, key: str, subject: str) -> tuple[PlanDiffItem, ...]:
+    def normalized(item: Mapping[str, Any]) -> Mapping[str, Any]:
+        value = dict(item)
+        for list_key in ("dependencies", "acceptance_criteria"):
+            if isinstance(value.get(list_key), list):
+                value[list_key] = sorted(value[list_key])
+        return value
+    before = {identifier: normalized(item) for identifier, item in _item_map(old, key).items()}; after = {identifier: normalized(item) for identifier, item in _item_map(new, key).items()}
+    return tuple(PlanDiffItem("ADDED" if identifier not in before else "MODIFIED" if before[identifier] != after[identifier] else "UNCHANGED", subject, identifier, before.get(identifier), after.get(identifier)) for identifier in sorted(after)) + tuple(PlanDiffItem("REMOVED", subject, identifier, value, None) for identifier, value in sorted(before.items()) if identifier not in after)
+
+
+def semantic_plan_diff(old: ProjectPlan, new: ProjectPlan) -> PlanDiff:
+    old_doc, new_doc = old.to_dict(), new.to_dict()
+    milestones = _diff_by_id(old_doc["milestones"], new_doc["milestones"], key="id", subject="milestone")
+    tasks = _diff_by_id(old_doc["tasks"], new_doc["tasks"], key="id", subject="task")
+    old_tasks = _item_map(old_doc["tasks"], "id"); new_tasks = _item_map(new_doc["tasks"], "id")
+    dependency_items: list[PlanDiffItem] = []
+    acceptance_items: list[PlanDiffItem] = []
+    for identifier in sorted(set(old_tasks) | set(new_tasks)):
+        if identifier not in old_tasks or identifier not in new_tasks:
+            continue
+        old_dependencies = sorted(old_tasks[identifier].get("dependencies", [])); new_dependencies = sorted(new_tasks[identifier].get("dependencies", []))
+        old_acceptance = sorted(old_tasks[identifier].get("acceptance_criteria", [])); new_acceptance = sorted(new_tasks[identifier].get("acceptance_criteria", []))
+        if old_dependencies != new_dependencies:
+            dependency_items.append(PlanDiffItem("MODIFIED", "dependency", identifier, {"dependencies": old_dependencies}, {"dependencies": new_dependencies}))
+        else:
+            dependency_items.append(PlanDiffItem("UNCHANGED", "dependency", identifier, {"dependencies": old_dependencies}, {"dependencies": new_dependencies}))
+        if old_acceptance != new_acceptance:
+            acceptance_items.append(PlanDiffItem("MODIFIED", "acceptance_criteria", identifier, {"acceptance_criteria": old_acceptance}, {"acceptance_criteria": new_acceptance}))
+        else:
+            acceptance_items.append(PlanDiffItem("UNCHANGED", "acceptance_criteria", identifier, {"acceptance_criteria": old_acceptance}, {"acceptance_criteria": new_acceptance}))
+    current = (PlanDiffItem("UNCHANGED" if old.current_task_id == new.current_task_id else "MODIFIED", "current_task", "current_task_id", {"current_task_id": old.current_task_id}, {"current_task_id": new.current_task_id}),)
+    return PlanDiff(tuple(milestones), tuple(tasks), tuple(dependency_items), tuple(acceptance_items), current)
+
+
+def _completed_protection(old: ProjectPlan, new: ProjectPlan) -> tuple[str, ...]:
+    old_tasks = {task.task_id: task for task in old.tasks if task.status == "completed"}
+    new_tasks = {task.task_id: task for task in new.tasks}
+    blocked: list[str] = []
+    for identifier, task in old_tasks.items():
+        candidate = new_tasks.get(identifier)
+        if candidate is None:
+            blocked.append(f"completed_task_removed:{identifier}")
+            continue
+        if candidate.status != "completed":
+            blocked.append(f"completed_task_downgrade:{identifier}")
+        if (candidate.milestone_id != task.milestone_id or candidate.title != task.title or candidate.description != task.description or sorted(candidate.acceptance_criteria) != sorted(task.acceptance_criteria) or sorted(candidate.dependencies) != sorted(task.dependencies)):
+            blocked.append(f"completed_task_meaning_changed:{identifier}")
+    return tuple(blocked)
+
+
+class ProjectMemoryStore:
+    """Canonical metadata writer for one project, with immutable plan files."""
+
+    def __init__(self, runtime_root: str | Path, project_id: str) -> None:
+        self.project_id = _project_id(project_id)
+        self.root = memory_root(runtime_root, self.project_id)
+        self.plans = self.root / "plans"
+        self.memory_path = self.root / "memory.json"
+        self.current_pointer = self.plans / "current-plan.json"
+        if self.root.exists() and self.root.is_symlink():
+            _fail("memory_path_invalid", "project memory root must be a regular directory")
+
+    def read_state(self) -> ProjectMemoryState:
+        if not self.memory_path.exists():
+            return ProjectMemoryState(self.project_id)
+        if self.memory_path.is_symlink() or not self.memory_path.is_file():
+            _fail("memory_path_invalid", "project memory must be a regular file")
+        payload = self.memory_path.read_bytes()
+        if len(payload) > MAX_MEMORY_BYTES:
+            _fail("memory_too_large", "project memory exceeds its bound")
+        try:
+            document = json.loads(payload.decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ProjectMemoryError("memory_corrupt", "project memory is not valid JSON") from exc
+        if not isinstance(document, Mapping) or document.get("schema") != PROJECT_MEMORY_SCHEMA or document.get("project_id") != self.project_id:
+            _fail("memory_schema_invalid", "project memory schema or project identity differs")
+        return self._state_from_dict(document)
+
+    def _state_from_dict(self, document: Mapping[str, Any]) -> ProjectMemoryState:
+        # The persisted representation is intentionally strict enough to reject
+        # accidental cross-project or unbounded metadata, while keeping the
+        # read model small for the GUI.
+        collections = {}
+        for key in ("events", "decisions", "inbox", "risks", "technical_debt", "attention", "checkpoints"):
+            value = document.get(key, [])
+            if not isinstance(value, list) or len(value) > MAX_ITEMS * 4:
+                _fail("memory_shape_invalid", f"{key} is outside its bound")
+            if any(not isinstance(item, Mapping) for item in value):
+                _fail("memory_shape_invalid", f"{key} contains a non-object item")
+            collections[key] = tuple(dict(item) for item in value)
+        events = tuple(ProjectEvent(**{key: item[key] for key in ("event_id", "project_id", "event_type", "timestamp", "human_summary")}, task_id=item.get("task_id"), milestone_id=item.get("milestone_id"), plan_version=item.get("plan_version"), git_head=item.get("git_head"), correlation_id=item.get("correlation_id")) for item in collections["events"])
+        decisions = tuple(DecisionRecord(item["decision_id"], item["project_id"], item["title"], item["decision"], item["reason"], item["status"], item["created_at"], tuple(item.get("related_task_ids", [])), item.get("related_plan_version"), item.get("supersedes_decision_id")) for item in collections["decisions"])
+        inbox = tuple(InboxItem(item["inbox_id"], item["project_id"], item["title"], item["description"], item["created_at"], item.get("status", "new")) for item in collections["inbox"])
+        risks = tuple(RiskRecord(item["risk_id"], item["project_id"], item["title"], item["description"], item["severity"], item["status"], item["created_at"]) for item in collections["risks"])
+        debt = tuple(DebtRecord(item["debt_id"], item["project_id"], item["title"], item["description"], item["created_at"], item["status"], tuple(item.get("related_task_ids", [])), item.get("suggested_review_milestone")) for item in collections["technical_debt"])
+        attention = tuple(AttentionItem(item["attention_id"], item["project_id"], item["type"], item["title"], item["description"], item["created_at"], item.get("status", "open")) for item in collections["attention"])
+        checkpoints = tuple(Checkpoint(item["checkpoint_id"], item["project_id"], item["created_at"], item["label"], item.get("plan_version"), item.get("git_head"), tuple(item.get("completed_task_ids", [])), item.get("current_task_id"), tuple(item.get("active_decision_ids", [])), tuple(item.get("open_blocker_ids", [])), item.get("human_summary")) for item in collections["checkpoints"])
+        if any(event.project_id != self.project_id for event in events) or any(event.event_id != f"{self.project_id}:e{index:06d}" for index, event in enumerate(events, 1)):
+            _fail("memory_event_order_invalid", "project events must form one append-only sequence")
+        return ProjectMemoryState(self.project_id, events, decisions, inbox, risks, debt, attention, checkpoints)
+
+    def _write_state(self, state: ProjectMemoryState) -> None:
+        _atomic_write(self.memory_path, state.to_dict())
+
+    def _append_event(self, state: ProjectMemoryState, event_type: str, summary: str, *, task_id: str | None = None, milestone_id: str | None = None, plan_version: str | None = None, git_head: str | None = None, correlation_id: str | None = None) -> ProjectMemoryState:
+        if event_type not in _EVENT_TYPES:
+            _fail("event_type_invalid", "event_type is unsupported")
+        summary = _text(summary, "human_summary", max_length=2_000)
+        if len(state.events) >= MAX_EVENTS:
+            _fail("event_log_bounded", "project event log reached its bound")
+        event_id = f"{self.project_id}:e{len(state.events) + 1:06d}"
+        event = ProjectEvent(event_id, self.project_id, event_type, _now(), summary, task_id, milestone_id, plan_version, git_head, correlation_id)
+        return replace(state, events=state.events + (event,))
+
+    def append_event(self, event_type: str, human_summary: str, **bindings: str | None) -> ProjectEvent:
+        state = self.read_state()
+        updated = self._append_event(state, event_type, human_summary, **bindings)
+        self._write_state(updated)
+        return updated.events[-1]
+
+    def add_decision(self, *, title: str, decision: str, reason: str, plan_version: str | None = None, related_task_ids: Iterable[str] = (), supersedes_decision_id: str | None = None) -> DecisionRecord:
+        state = self.read_state(); identifier = f"D-{len(state.decisions) + 1:03d}"
+        if len(state.decisions) >= MAX_ITEMS: _fail("memory_collection_bounded", "decision history reached its bound")
+        if supersedes_decision_id and not any(item.decision_id == supersedes_decision_id for item in state.decisions):
+            _fail("decision_supersedes_missing", "superseded decision does not exist")
+        record = DecisionRecord(identifier, self.project_id, _text(title, "decision.title", max_length=300), _text(decision, "decision.decision", max_length=4_000), _text(reason, "decision.reason", max_length=4_000), "active", _now(), tuple(related_task_ids), plan_version, supersedes_decision_id)
+        decisions = tuple(replace(item, status="superseded") if item.decision_id == supersedes_decision_id else item for item in state.decisions) + (record,)
+        updated = replace(state, decisions=decisions); updated = self._append_event(updated, "DECISION_ADDED", f"Dodano decyzję: {record.title}", plan_version=plan_version)
+        if supersedes_decision_id:
+            updated = self._append_event(updated, "DECISION_SUPERSEDED", f"Decyzja {supersedes_decision_id} została zastąpiona przez {identifier}")
+        self._write_state(updated); return record
+
+    def add_inbox(self, *, title: str, description: str) -> InboxItem:
+        state = self.read_state()
+        if len(state.inbox) >= MAX_ITEMS: _fail("memory_collection_bounded", "inbox reached its bound")
+        record = InboxItem(f"I-{len(state.inbox) + 1:03d}", self.project_id, _text(title, "inbox.title", max_length=300), _text(description, "inbox.description", max_length=4_000), _now())
+        updated = replace(state, inbox=state.inbox + (record,)); updated = self._append_event(updated, "INBOX_ITEM_ADDED", f"Dodano pomysł: {record.title}"); self._write_state(updated); return record
+
+    def update_inbox(self, inbox_id: str, status: str) -> InboxItem:
+        state = self.read_state(); allowed = {"new", "discuss", "later", "accepted", "rejected", "resolved"}
+        if status not in allowed: _fail("inbox_status_invalid", "inbox status is unsupported")
+        found = next((item for item in state.inbox if item.inbox_id == inbox_id), None)
+        if found is None: _fail("inbox_not_found", "inbox item does not exist")
+        updated_item = replace(found, status=status); updated = replace(state, inbox=tuple(updated_item if item.inbox_id == inbox_id else item for item in state.inbox)); updated = self._append_event(updated, "INBOX_ITEM_RESOLVED" if status == "resolved" else "INBOX_ITEM_ADDED", f"Inbox {inbox_id}: {status}"); self._write_state(updated); return updated_item
+
+    def add_risk(self, *, title: str, description: str, severity: str = "medium") -> RiskRecord:
+        if severity not in {"low", "medium", "high"}: _fail("risk_severity_invalid", "risk severity is unsupported")
+        state = self.read_state()
+        if len(state.risks) >= MAX_ITEMS: _fail("memory_collection_bounded", "risk history reached its bound")
+        record = RiskRecord(f"R-{len(state.risks) + 1:03d}", self.project_id, _text(title, "risk.title", max_length=300), _text(description, "risk.description", max_length=4_000), severity, "open", _now()); updated = replace(state, risks=state.risks + (record,)); updated = self._append_event(updated, "RISK_ADDED", f"Dodano ryzyko: {record.title}"); self._write_state(updated); return record
+
+    def resolve_risk(self, risk_id: str, status: str = "resolved") -> RiskRecord:
+        if status not in {"mitigated", "resolved", "accepted"}: _fail("risk_status_invalid", "risk status is unsupported")
+        state = self.read_state(); found = next((item for item in state.risks if item.risk_id == risk_id), None)
+        if found is None: _fail("risk_not_found", "risk does not exist")
+        result = replace(found, status=status); updated = replace(state, risks=tuple(result if item.risk_id == risk_id else item for item in state.risks)); updated = self._append_event(updated, "RISK_RESOLVED", f"Ryzyko {risk_id}: {status}"); self._write_state(updated); return result
+
+    def add_debt(self, *, title: str, description: str, related_task_ids: Iterable[str] = (), suggested_review_milestone: str | None = None) -> DebtRecord:
+        state = self.read_state()
+        if len(state.technical_debt) >= MAX_ITEMS: _fail("memory_collection_bounded", "technical debt history reached its bound")
+        record = DebtRecord(f"TD-{len(state.technical_debt) + 1:03d}", self.project_id, _text(title, "debt.title", max_length=300), _text(description, "debt.description", max_length=4_000), _now(), "open", tuple(related_task_ids), suggested_review_milestone); updated = replace(state, technical_debt=state.technical_debt + (record,)); updated = self._append_event(updated, "TECH_DEBT_ADDED", f"Dodano dług techniczny: {record.title}"); self._write_state(updated); return record
+
+    def resolve_debt(self, debt_id: str, status: str = "resolved") -> DebtRecord:
+        if status not in {"planned", "resolved", "accepted"}: _fail("debt_status_invalid", "technical debt status is unsupported")
+        state = self.read_state(); found = next((item for item in state.technical_debt if item.debt_id == debt_id), None)
+        if found is None: _fail("debt_not_found", "technical debt does not exist")
+        result = replace(found, status=status); updated = replace(state, technical_debt=tuple(result if item.debt_id == debt_id else item for item in state.technical_debt)); updated = self._append_event(updated, "TECH_DEBT_RESOLVED", f"Dług {debt_id}: {status}"); self._write_state(updated); return result
+
+    def add_attention(self, *, type: str, title: str, description: str) -> AttentionItem:
+        if type not in {"decision_required", "blocked", "review_required", "plan_review_required"}: _fail("attention_type_invalid", "attention type is unsupported")
+        state = self.read_state()
+        if len(state.attention) >= MAX_ITEMS: _fail("memory_collection_bounded", "attention history reached its bound")
+        record = AttentionItem(f"A-{len(state.attention) + 1:03d}", self.project_id, type, _text(title, "attention.title", max_length=300), _text(description, "attention.description", max_length=4_000), _now()); updated = replace(state, attention=state.attention + (record,)); updated = self._append_event(updated, "ATTENTION_ADDED", f"Dodano uwagę: {record.title}"); self._write_state(updated); return record
+
+    def resolve_attention(self, attention_id: str) -> AttentionItem:
+        state = self.read_state(); found = next((item for item in state.attention if item.attention_id == attention_id), None)
+        if found is None: _fail("attention_not_found", "attention item does not exist")
+        result = replace(found, status="resolved"); updated = replace(state, attention=tuple(result if item.attention_id == attention_id else item for item in state.attention)); updated = self._append_event(updated, "ATTENTION_RESOLVED", f"Uwaga {attention_id} rozwiązana"); self._write_state(updated); return result
+
+    def create_checkpoint(self, *, label: str, plan_version: str | None, git_head: str | None, completed_task_ids: Iterable[str], current_task_id: str | None, active_decision_ids: Iterable[str] = (), open_blocker_ids: Iterable[str] = (), human_summary: str | None = None) -> Checkpoint:
+        state = self.read_state()
+        if len(state.checkpoints) >= MAX_ITEMS: _fail("memory_collection_bounded", "checkpoint history reached its bound")
+        record = Checkpoint(f"CP-{len(state.checkpoints) + 1:03d}", self.project_id, _now(), _text(label, "checkpoint.label", max_length=300), plan_version, git_head, tuple(completed_task_ids), current_task_id, tuple(active_decision_ids), tuple(open_blocker_ids), human_summary); updated = replace(state, checkpoints=state.checkpoints + (record,)); updated = self._append_event(updated, "CHECKPOINT_CREATED", f"Utworzono checkpoint: {record.label}", plan_version=plan_version, git_head=git_head); self._write_state(updated); return record
+
+    def ensure_initial_plan(self, plan: ProjectPlan) -> ProjectPlan:
+        if plan_version_number(plan.plan_version) != 1: _fail("plan_initial_version_invalid", "the first plan must be v1")
+        if self.current_plan() is not None: _fail("plan_already_exists", "project already has a current plan")
+        canonical = replace(plan, project_id=self.project_id, plan_version=_version(plan.plan_version), supersedes_version=None, created_at=plan.created_at or _now(), revision_reason=plan.revision_reason or "initial", revision_summary=plan.revision_summary or "Initial project plan")
+        self._write_immutable_plan(canonical); self._activate_pointer(canonical); self.append_event("PLAN_IMPORTED", f"Zaimportowano plan v{canonical.plan_version}", plan_version=canonical.plan_version); return canonical
+
+    def current_plan(self) -> ProjectPlan | None:
+        if not self.current_pointer.exists(): return None
+        if self.current_pointer.is_symlink() or not self.current_pointer.is_file(): _fail("plan_pointer_invalid", "current plan pointer must be a regular file")
+        pointer = json.loads(self.current_pointer.read_text(encoding="utf-8"))
+        if not isinstance(pointer, Mapping) or pointer.get("schema") != PROJECT_PLAN_POINTER_SCHEMA or pointer.get("project_id") != self.project_id: _fail("plan_pointer_invalid", "current plan pointer schema differs")
+        version = _version(pointer.get("plan_version")); path = self.plans / f"plan-v{version}.json"
+        if not path.is_file() or path.is_symlink(): _fail("plan_missing", "current plan file is missing")
+        document = json.loads(path.read_text(encoding="utf-8")); plan = validate_project_plan(document, expected_project_id=self.project_id)
+        if _plan_digest(plan) != pointer.get("plan_digest"): _fail("plan_digest_mismatch", "current plan digest differs")
+        return plan
+
+    def plan_versions(self) -> tuple[ProjectPlan, ...]:
+        if not self.plans.exists(): return ()
+        result: list[ProjectPlan] = []
+        for path in sorted(self.plans.glob("plan-v*.json")):
+            if path.name == "current-plan.json" or path.is_symlink(): continue
+            result.append(validate_project_plan(json.loads(path.read_text(encoding="utf-8")), expected_project_id=self.project_id))
+        return tuple(sorted(result, key=lambda item: plan_version_number(item.plan_version)))
+
+    def preview_update(self, candidate: ProjectPlan) -> PlanUpdatePreview:
+        candidate = validate_project_plan(candidate.to_dict(), expected_project_id=self.project_id)
+        current = self.current_plan()
+        if current is None:
+            diff = semantic_plan_diff(candidate, candidate)
+            return PlanUpdatePreview(self.project_id, plan_version_number(candidate.plan_version) == 1, None if plan_version_number(candidate.plan_version) == 1 else "plan_initial_version_invalid", None, _version(candidate.plan_version), None, _plan_digest(candidate), diff)
+        current_number = plan_version_number(current.plan_version); next_number = plan_version_number(candidate.plan_version); protection = _completed_protection(current, candidate)
+        reason: str | None = None
+        if next_number != current_number + 1: reason = "plan_successor_required"
+        elif candidate.supersedes_version is None or plan_version_number(candidate.supersedes_version) != current_number: reason = "plan_supersedes_mismatch"
+        elif protection: reason = "completed_task_reconciliation_required"
+        return PlanUpdatePreview(self.project_id, reason is None, reason, _version(current.plan_version), _version(candidate.plan_version), _plan_digest(current), _plan_digest(candidate), semantic_plan_diff(current, candidate), protection)
+
+    def apply_update(self, candidate: ProjectPlan, preview: PlanUpdatePreview | None = None) -> ProjectPlan:
+        candidate = validate_project_plan(candidate.to_dict(), expected_project_id=self.project_id)
+        check = preview or self.preview_update(candidate)
+        if check.project_id != self.project_id or check.candidate_plan_digest != _plan_digest(candidate):
+            _fail("plan_preview_mismatch", "plan preview does not match the candidate bytes")
+        if not check.accepted: _fail(check.reason_code or "plan_update_rejected", "plan update is not accepted")
+        current = self.current_plan()
+        if current is None: return self.ensure_initial_plan(candidate)
+        if check.current_plan_digest != _plan_digest(current): _fail("plan_current_changed", "current plan changed after preview")
+        canonical = replace(candidate, project_id=self.project_id, plan_version=_version(candidate.plan_version), supersedes_version=_version(current.plan_version), created_at=candidate.created_at or _now(), revision_reason=candidate.revision_reason or "plan update", revision_summary=candidate.revision_summary or "Updated project plan")
+        self._write_immutable_plan(canonical); self._activate_pointer(canonical); self.append_event("PLAN_UPDATED", f"Zaktualizowano plan v{current.plan_version} → v{canonical.plan_version}: {canonical.revision_reason}", plan_version=canonical.plan_version); return canonical
+
+    def _write_immutable_plan(self, plan: ProjectPlan) -> None:
+        self.plans.mkdir(parents=True, exist_ok=True); path = self.plans / f"plan-v{_version(plan.plan_version)}.json"; document = plan.to_dict(); digest = _plan_digest(plan)
+        if path.exists():
+            existing = validate_project_plan(json.loads(path.read_text(encoding="utf-8")), expected_project_id=self.project_id)
+            if _plan_digest(existing) != digest: _fail("plan_version_conflict", "immutable plan version already contains different bytes")
+            return
+        _atomic_write(path, document)
+
+    def _activate_pointer(self, plan: ProjectPlan) -> None:
+        _atomic_write(self.current_pointer, {"schema": PROJECT_PLAN_POINTER_SCHEMA, "project_id": self.project_id, "plan_version": _version(plan.plan_version), "plan_digest": _plan_digest(plan)})
+
+
+def resolve_next_action(project: ProjectRecord, plan: ProjectPlan | None, state: ProjectMemoryState, *, plan_update_pending: bool = False) -> NextAction:
+    if not project.plan_imported or plan is None: return NextAction("IMPORT_PLAN", "Wczytaj plan projektu", "Projekt nie ma aktywnego planu.", 1)
+    if plan_update_pending: return NextAction("REVIEW_PLAN_UPDATE", "Przejrzyj aktualizację planu", "Nowa wersja planu czeka na zatwierdzenie.", 2)
+    open_attention = [item for item in state.attention if item.status == "open"]
+    for item in open_attention:
+        if item.type == "decision_required": return NextAction("USER_DECISION_REQUIRED", "Wymaga Twojej decyzji", item.title, 3)
+    if any(item.status == "open" and item.type == "review_required" for item in open_attention): return NextAction("REVIEW_REQUIRED", "Wymaga przeglądu", "Otwarty element wymaga przeglądu.", 4)
+    if any(item.status == "open" and item.type == "blocked" for item in open_attention): return NextAction("RESOLVE_BLOCKER", "Rozwiąż blocker", "Projekt jest zablokowany.", 5)
+    current = plan.current_task
+    if current is not None and current.status in {"active", "pending", "review"}: return NextAction("CONTINUE_TASK", f"Kontynuuj: {current.task_id} — {current.title}", current.description, 6)
+    if plan.tasks and all(task.status in {"completed", "skipped"} for task in plan.tasks): return NextAction("PROJECT_REVIEW", "Przejrzyj projekt", "Wszystkie zadania planu są zakończone.", 7)
+    return NextAction("CONTINUE_TASK", "Kontynuuj projekt", "Wybierz następne zadanie z planu.", 6)
+
+
+def project_health(state: ProjectMemoryState, plan: ProjectPlan | None) -> str:
+    if plan is None or any(item.status == "open" and item.type == "blocked" for item in state.attention): return "BLOCKED"
+    if any(item.status == "open" and item.type in {"decision_required", "review_required", "plan_review_required"} for item in state.attention) or any(item.status == "open" and item.severity == "high" for item in state.risks): return "ATTENTION"
+    return "OK"
+
+
+def project_status_sentence(project: ProjectRecord, plan: ProjectPlan | None, state: ProjectMemoryState) -> str:
+    if plan is None: return f"Projekt {project.display_name} nie ma jeszcze zaimportowanego planu."
+    current = plan.current_task_id or "brak bieżącego zadania"; milestone = plan.current_milestone.milestone_id if plan.current_milestone else "brak etapu"; blocker_count = sum(item.status == "open" and item.type == "blocked" for item in state.attention)
+    suffix = f"; praca czeka na {blocker_count} blocker" if blocker_count else "; brak blockerów"
+    return f"Projekt jest na {milestone}/{current}, wykonano {plan.completed_tasks}/{len(plan.tasks)} zadań, plan v{plan.plan_version}{suffix}."
+
+
+def changes_since(state: ProjectMemoryState, *, after_event_id: str | None = None, limit: int = 20) -> tuple[ProjectEvent, ...]:
+    events = state.events
+    if after_event_id:
+        positions = [index for index, event in enumerate(events) if event.event_id == after_event_id]
+        if positions: events = events[positions[-1] + 1 :]
+    return events[-max(1, min(limit, 100)) :]
+
+
+def bounded_history_summary(project: ProjectRecord, plan: ProjectPlan | None, state: ProjectMemoryState, *, after_event_id: str | None = None, limit: int = 12) -> str:
+    lines = [f"Projekt: {project.display_name}", f"Project ID: {project.project_id}", f"Plan: v{plan.plan_version if plan else 'none'}", project_status_sentence(project, plan, state), "", "Ostatnie zmiany:"]
+    lines.extend(f"- {event.event_type}: {event.human_summary}" for event in changes_since(state, after_event_id=after_event_id, limit=limit))
+    if state.decisions: lines.extend(["", "Aktywne decyzje:", *[f"- {item.title}: {item.decision}" for item in state.decisions[-5:] if item.status == "active"]])
+    if state.risks: lines.extend(["", "Otwarte ryzyka:", *[f"- {item.title} ({item.severity})" for item in state.risks[-5:] if item.status == "open"]])
+    return "\n".join(lines)[:20_000]
+
+
+def build_handoff_prompt(project: ProjectRecord, plan: ProjectPlan | None, state: ProjectMemoryState, *, mode: str, git_head: str | None = None) -> str:
+    if mode not in HANDOFF_MODES: _fail("handoff_mode_invalid", "handoff mode is unsupported")
+    summary = bounded_history_summary(project, plan, state)
+    instruction = {
+        "CONTINUE_IMPLEMENTATION": "Kontynuuj aktualne zadanie po pobraniu bounded contextu przez BDB.",
+        "NEW_CHAT_PROJECT_HANDOFF": "To jest nowa rozmowa projektu; najpierw potwierdź canonical stan i nie powtarzaj ukończonych prac.",
+        "ARCHITECTURE_REVIEW": "Nie implementuj; wykonaj niezależny przegląd architektury i decyzji.",
+        "PROJECT_REVIEW": "Oceń postęp, zgodność kodu z planem, ryzyka i dług techniczny; nie zmieniaj planu automatycznie.",
+        "DEBUGGING": "Skup się na diagnostyce aktualnego blokera, bez rozszerzania zakresu.",
+        "PLAN_REVIEW": "Przeanalizuj potrzebę aktualizacji planu; ewentualny wynik ma być vN+1 z supersedes_version=vN.",
+        "DISCUSS_IDEA": "Omów pomysł bez automatycznego dodawania go do planu.",
+        "SECOND_OPINION": "Nie implementuj; wystąp jako niezależny reviewer i wskaż ryzyka tylko na podstawie danych.",
+    }[mode]
+    pinned = ", ".join(project.brief.pinned_files) if project.brief.pinned_files else "none"
+    environment = ", ".join(project.brief.environment_hints) if project.brief.environment_hints else "none"
+    return (f"Tryb handoffu: {mode}\nRepo alias: {project.repo_alias}\nGitHub repo: {project.github_repo or 'not configured'}\nCurrent Git HEAD: {git_head or 'unknown'}\nWażne pliki (repo-relative): {pinned}\nŚrodowisko (wskazówki): {environment}\n\n{summary}\n\nInstrukcja: {instruction}\nNie wysyłaj nic automatycznie i nie kopiuj całego repozytorium, diffów ani sekretów.")[:30_000]
+
+
+__all__ = [
+    "HANDOFF_MODES", "AttentionItem", "Checkpoint", "DebtRecord", "DecisionRecord", "InboxItem", "NextAction", "PlanDiff", "PlanDiffItem", "PlanUpdatePreview", "ProjectEvent", "ProjectMemoryError", "ProjectMemoryState", "ProjectMemoryStore", "RiskRecord", "bounded_history_summary", "build_handoff_prompt", "changes_since", "memory_root", "plan_version_number", "project_health", "project_status_sentence", "resolve_next_action", "semantic_plan_diff",
+]

@@ -25,8 +25,8 @@ PROJECT_PLAN_SCHEMA = "bdb-project-plan-v1"
 PROJECT_CATALOG_RELATIVE_PATH = Path("control") / "project-catalog.json"
 PROJECT_CATALOG_MAX_BYTES = 2 * 1024 * 1024
 PROJECT_PLAN_MAX_BYTES = 1024 * 1024
-PROJECT_STATUS_VALUES = frozenset({"new", "active", "blocked", "completed", "unknown"})
-PLAN_STATUS_VALUES = frozenset({"pending", "active", "completed", "blocked", "skipped"})
+PROJECT_STATUS_VALUES = frozenset({"new", "active", "paused", "blocked", "completed", "archived", "unknown"})
+PLAN_STATUS_VALUES = frozenset({"pending", "active", "review", "completed", "blocked", "skipped"})
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$")
 _ALIAS_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 _GITHUB_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
@@ -88,18 +88,22 @@ class ProjectBrief:
     technologies: tuple[str, ...] = ()
     features: tuple[str, ...] = ()
     constraints: tuple[str, ...] = ()
+    pinned_files: tuple[str, ...] = ()
+    environment_hints: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.name, "brief.name", max_length=200)
         _text(self.goal, "brief.goal", max_length=4_000)
         _text(self.description, "brief.description", max_length=8_000)
         _text(self.project_type, "brief.project_type", max_length=120)
-        for name, values in (("technologies", self.technologies), ("features", self.features), ("constraints", self.constraints)):
+        for name, values in (("technologies", self.technologies), ("features", self.features), ("constraints", self.constraints), ("environment_hints", self.environment_hints)):
             if len(values) > 128 or any(not isinstance(item, str) or not item.strip() or len(item) > 1_000 for item in values):
                 _fail("brief_invalid", f"brief.{name} is invalid")
+        if len(self.pinned_files) > 64 or any(not isinstance(item, str) or not item.strip() or len(item) > 260 or Path(item).is_absolute() or ".." in item.replace("\\", "/").split("/") for item in self.pinned_files):
+            _fail("brief_pinned_files_invalid", "brief.pinned_files must contain bounded repo-relative paths")
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        document = {
             "name": self.name,
             "goal": self.goal,
             "description": self.description,
@@ -108,6 +112,11 @@ class ProjectBrief:
             "features": list(self.features),
             "constraints": list(self.constraints),
         }
+        if self.pinned_files:
+            document["pinned_files"] = list(self.pinned_files)
+        if self.environment_hints:
+            document["environment_hints"] = list(self.environment_hints)
+        return document
 
     @classmethod
     def from_dict(cls, value: object) -> "ProjectBrief":
@@ -121,6 +130,8 @@ class ProjectBrief:
             technologies=_list_of_text(value.get("technologies"), "brief.technologies"),
             features=_list_of_text(value.get("features"), "brief.features"),
             constraints=_list_of_text(value.get("constraints"), "brief.constraints"),
+            pinned_files=_list_of_text(value.get("pinned_files"), "brief.pinned_files", max_items=64),
+            environment_hints=_list_of_text(value.get("environment_hints"), "brief.environment_hints"),
         )
 
 
@@ -166,9 +177,15 @@ class ProjectPlan:
     tasks: tuple[ProjectTask, ...]
     current_task_id: str | None = None
     schema: str = PROJECT_PLAN_SCHEMA
+    # These fields were appended so positional construction from Slice 2
+    # remains source-compatible.  A missing value is a legacy v1 plan.
+    supersedes_version: str | None = None
+    created_at: str | None = None
+    revision_reason: str | None = None
+    revision_summary: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        document = {
             "schema": self.schema,
             "project_id": self.project_id,
             "project_name": self.project_name,
@@ -177,6 +194,13 @@ class ProjectPlan:
             "tasks": [item.to_dict() for item in self.tasks],
             "current_task_id": self.current_task_id,
         }
+        # Do not add absent optional keys to old imported plans: this keeps a
+        # legacy plan's digest stable while allowing new versions to carry the
+        # complete immutable-history metadata.
+        for key, value in (("supersedes_version", self.supersedes_version), ("created_at", self.created_at), ("revision_reason", self.revision_reason), ("revision_summary", self.revision_summary)):
+            if value is not None:
+                document[key] = value
+        return document
 
     @property
     def completed_tasks(self) -> int:
@@ -205,7 +229,28 @@ def validate_project_plan(value: object, *, expected_project_id: str | None = No
     if expected_project_id is not None and project_id != expected_project_id:
         _fail("plan_project_mismatch", "plan project_id does not match the selected project")
     project_name = _text(value.get("project_name"), "project_name", max_length=200)
-    plan_version = _text(value.get("plan_version"), "plan_version", max_length=64)
+    raw_version = value.get("plan_version")
+    if isinstance(raw_version, bool) or not isinstance(raw_version, (str, int)):
+        _fail("plan_version_invalid", "plan_version must be an integer version")
+    plan_version = str(raw_version).strip()
+    if not re.fullmatch(r"\d+(?:\.0+)?", plan_version):
+        _fail("plan_version_invalid", "plan_version must be an integer version")
+    supersedes = value.get("supersedes_version")
+    if supersedes is not None:
+        if isinstance(supersedes, bool) or not isinstance(supersedes, (str, int)):
+            _fail("plan_supersedes_invalid", "supersedes_version must be an integer version")
+        supersedes = str(supersedes).strip()
+        if not re.fullmatch(r"\d+(?:\.0+)?", supersedes):
+            _fail("plan_supersedes_invalid", "supersedes_version must be an integer version")
+    created_at = value.get("created_at")
+    if created_at is not None:
+        created_at = _timestamp(created_at, "created_at")
+    revision_reason = value.get("revision_reason")
+    if revision_reason is not None:
+        revision_reason = _text(revision_reason, "revision_reason", max_length=1_000)
+    revision_summary = value.get("revision_summary")
+    if revision_summary is not None:
+        revision_summary = _text(revision_summary, "revision_summary", max_length=4_000)
     milestones_raw = value.get("milestones")
     tasks_raw = value.get("tasks")
     if not isinstance(milestones_raw, list) or not isinstance(tasks_raw, list) or len(milestones_raw) > 512 or len(tasks_raw) > 2_048:
@@ -268,7 +313,7 @@ def validate_project_plan(value: object, *, expected_project_id: str | None = No
             _fail("plan_current_task_missing", "current_task_id does not exist")
     elif active:
         current_task_id = active[0]
-    return ProjectPlan(project_id, project_name, plan_version, tuple(milestones), tuple(tasks), current_task_id)
+    return ProjectPlan(project_id, project_name, plan_version, tuple(milestones), tuple(tasks), current_task_id, PROJECT_PLAN_SCHEMA, supersedes, created_at, revision_reason, revision_summary)
 
 
 @dataclass(frozen=True)
@@ -448,9 +493,46 @@ class ProjectCatalog:
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ProjectCatalogError("plan_json_invalid", "project plan is not valid JSON") from exc
         plan = validate_project_plan(document, expected_project_id=project_id)
+        # Project Memory is the canonical writer for immutable plan history.
+        # The lazy import avoids a module cycle while preserving the Slice 2
+        # catalog API for callers that only need the summary record.
+        try:
+            from .project_memory import ProjectMemoryError, ProjectMemoryStore
+
+            memory = ProjectMemoryStore(self.runtime_root, project_id)
+            current = memory.current_plan()
+            if current is None and project.plan_imported:
+                # Explicitly seed legacy Slice 2 metadata once.  This is a
+                # migration from the old external plan file, never a silent
+                # overwrite of history.
+                legacy_source = Path(project.plan_path).expanduser() if project.plan_path else None
+                if legacy_source is None or not legacy_source.is_file() or legacy_source.resolve() == source.resolve():
+                    if str(plan.plan_version).split(".", 1)[0] != "1":
+                        _fail("plan_history_seed_missing", "legacy project history cannot seed a non-v1 successor")
+                    memory.ensure_initial_plan(plan)
+                    current = memory.current_plan()
+                else:
+                    legacy_document = json.loads(legacy_source.read_text(encoding="utf-8-sig"))
+                    legacy_plan = validate_project_plan(legacy_document, expected_project_id=project_id)
+                    memory.ensure_initial_plan(legacy_plan)
+                    current = memory.current_plan()
+            if current is None:
+                canonical_plan = memory.ensure_initial_plan(plan)
+            else:
+                preview = memory.preview_update(plan)
+                if not preview.accepted:
+                    _fail(preview.reason_code or "plan_update_rejected", "plan update was not accepted")
+                canonical_plan = memory.apply_update(plan, preview)
+        except ProjectMemoryError as exc:
+            raise ProjectCatalogError(exc.code, str(exc)) from exc
+        except OSError as exc:
+            raise ProjectCatalogError("plan_history_io_failed", str(exc)) from exc
+        # Summary remains in the catalog for fast list rendering; immutable
+        # bytes live under the project-memory canonical root.
+        plan = canonical_plan
         current_milestone = plan.current_milestone.title if plan.current_milestone else None
         updated = ProjectRecord(
-            **{**project.__dict__, "plan_imported": True, "plan_version": plan.plan_version, "total_tasks": len(plan.tasks), "completed_tasks": plan.completed_tasks, "current_milestone": current_milestone, "current_task": plan.current_task_id, "plan_path": str(source), "project_status": "active"}
+            **{**project.__dict__, "plan_imported": True, "plan_version": plan.plan_version, "total_tasks": len(plan.tasks), "completed_tasks": plan.completed_tasks, "current_milestone": current_milestone, "current_task": plan.current_task_id, "plan_path": str(memory.current_pointer), "project_status": "active"}
         )
         self.upsert(updated)
         return updated, plan
