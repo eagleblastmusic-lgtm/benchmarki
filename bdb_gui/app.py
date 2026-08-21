@@ -116,7 +116,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         from PySide6.QtCore import QTimer, qVersion
         from PySide6.QtWidgets import QApplication
 
-        from .vnext_control_center import VNextControlCenterWindow
+        # Project-centric CC3 surface; the imported alias preserves the stable
+        # application construction seam used by existing smoke tests.
+        from .project_center import ProjectCenterWindow as VNextControlCenterWindow
     except ImportError as error:
         report = {
             "schema": SMOKE_SCHEMA,

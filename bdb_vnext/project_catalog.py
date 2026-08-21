@@ -1,0 +1,477 @@
+"""Bounded canonical project catalog and Project Plan v1.
+
+This module owns only project metadata and imported plan identity.  It is a
+small vNext authority under the existing runtime root; it never reads Legacy
+workspace/session state and never executes GitHub or Browser operations.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import secrets
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable, Mapping
+
+from bdb_shared.evidence import canonical_json_bytes, semantic_digest
+
+
+PROJECT_CATALOG_SCHEMA = "bdb-vnext-project-catalog-v1"
+PROJECT_PLAN_SCHEMA = "bdb-project-plan-v1"
+PROJECT_CATALOG_RELATIVE_PATH = Path("control") / "project-catalog.json"
+PROJECT_CATALOG_MAX_BYTES = 2 * 1024 * 1024
+PROJECT_PLAN_MAX_BYTES = 1024 * 1024
+PROJECT_STATUS_VALUES = frozenset({"new", "active", "blocked", "completed", "unknown"})
+PLAN_STATUS_VALUES = frozenset({"pending", "active", "completed", "blocked", "skipped"})
+_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$")
+_ALIAS_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+_GITHUB_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
+
+
+class ProjectCatalogError(ValueError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _fail(code: str, message: str) -> None:
+    raise ProjectCatalogError(code, message)
+
+
+def _text(value: object, field_name: str, *, max_length: int = 8_000, required: bool = True) -> str:
+    if not isinstance(value, str):
+        _fail("project_field_invalid", f"{field_name} must be text")
+    result = value.strip()
+    if required and not result:
+        _fail("project_field_invalid", f"{field_name} must not be empty")
+    if len(result) > max_length:
+        _fail("project_field_too_large", f"{field_name} exceeds its bound")
+    return result
+
+
+def _list_of_text(value: object, field_name: str, *, max_items: int = 128) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or len(value) > max_items:
+        _fail("project_field_invalid", f"{field_name} must be a bounded list")
+    return tuple(_text(item, f"{field_name}[]", max_length=1_000) for item in value)
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def _timestamp(value: object, field_name: str) -> str:
+    text = _text(value, field_name, max_length=64)
+    if not text.endswith("Z"):
+        _fail("project_timestamp_invalid", f"{field_name} must use UTC Z form")
+    try:
+        parsed = datetime.fromisoformat(text[:-1] + "+00:00")
+    except ValueError as exc:
+        _fail("project_timestamp_invalid", f"{field_name} is not a timestamp")
+        raise AssertionError from exc
+    if parsed.tzinfo is None:
+        _fail("project_timestamp_invalid", f"{field_name} must include timezone")
+    return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+@dataclass(frozen=True)
+class ProjectBrief:
+    name: str
+    goal: str
+    description: str
+    project_type: str
+    technologies: tuple[str, ...] = ()
+    features: tuple[str, ...] = ()
+    constraints: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _text(self.name, "brief.name", max_length=200)
+        _text(self.goal, "brief.goal", max_length=4_000)
+        _text(self.description, "brief.description", max_length=8_000)
+        _text(self.project_type, "brief.project_type", max_length=120)
+        for name, values in (("technologies", self.technologies), ("features", self.features), ("constraints", self.constraints)):
+            if len(values) > 128 or any(not isinstance(item, str) or not item.strip() or len(item) > 1_000 for item in values):
+                _fail("brief_invalid", f"brief.{name} is invalid")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "goal": self.goal,
+            "description": self.description,
+            "project_type": self.project_type,
+            "technologies": list(self.technologies),
+            "features": list(self.features),
+            "constraints": list(self.constraints),
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> "ProjectBrief":
+        if not isinstance(value, Mapping):
+            _fail("brief_invalid", "brief must be an object")
+        return cls(
+            name=_text(value.get("name"), "brief.name", max_length=200),
+            goal=_text(value.get("goal"), "brief.goal", max_length=4_000),
+            description=_text(value.get("description"), "brief.description", max_length=8_000),
+            project_type=_text(value.get("project_type"), "brief.project_type", max_length=120),
+            technologies=_list_of_text(value.get("technologies"), "brief.technologies"),
+            features=_list_of_text(value.get("features"), "brief.features"),
+            constraints=_list_of_text(value.get("constraints"), "brief.constraints"),
+        )
+
+
+@dataclass(frozen=True)
+class ProjectTask:
+    task_id: str
+    milestone_id: str
+    title: str
+    description: str
+    status: str = "pending"
+    dependencies: tuple[str, ...] = ()
+    acceptance_criteria: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.task_id,
+            "milestone_id": self.milestone_id,
+            "title": self.title,
+            "description": self.description,
+            "status": self.status,
+            "dependencies": list(self.dependencies),
+            "acceptance_criteria": list(self.acceptance_criteria),
+        }
+
+
+@dataclass(frozen=True)
+class ProjectMilestone:
+    milestone_id: str
+    title: str
+    description: str
+    status: str = "pending"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"id": self.milestone_id, "title": self.title, "description": self.description, "status": self.status}
+
+
+@dataclass(frozen=True)
+class ProjectPlan:
+    project_id: str
+    project_name: str
+    plan_version: str
+    milestones: tuple[ProjectMilestone, ...]
+    tasks: tuple[ProjectTask, ...]
+    current_task_id: str | None = None
+    schema: str = PROJECT_PLAN_SCHEMA
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "project_id": self.project_id,
+            "project_name": self.project_name,
+            "plan_version": self.plan_version,
+            "milestones": [item.to_dict() for item in self.milestones],
+            "tasks": [item.to_dict() for item in self.tasks],
+            "current_task_id": self.current_task_id,
+        }
+
+    @property
+    def completed_tasks(self) -> int:
+        return sum(task.status == "completed" for task in self.tasks)
+
+    @property
+    def current_task(self) -> ProjectTask | None:
+        if self.current_task_id is None:
+            return None
+        return next((task for task in self.tasks if task.task_id == self.current_task_id), None)
+
+    @property
+    def current_milestone(self) -> ProjectMilestone | None:
+        task = self.current_task
+        if task is None:
+            return None
+        return next((milestone for milestone in self.milestones if milestone.milestone_id == task.milestone_id), None)
+
+
+def validate_project_plan(value: object, *, expected_project_id: str | None = None) -> ProjectPlan:
+    if not isinstance(value, Mapping) or value.get("schema") != PROJECT_PLAN_SCHEMA:
+        _fail("plan_schema_invalid", "project plan schema must be bdb-project-plan-v1")
+    project_id = _text(value.get("project_id"), "project_id", max_length=96)
+    if not _ID_RE.fullmatch(project_id):
+        _fail("plan_project_id_invalid", "project_id has an unsafe format")
+    if expected_project_id is not None and project_id != expected_project_id:
+        _fail("plan_project_mismatch", "plan project_id does not match the selected project")
+    project_name = _text(value.get("project_name"), "project_name", max_length=200)
+    plan_version = _text(value.get("plan_version"), "plan_version", max_length=64)
+    milestones_raw = value.get("milestones")
+    tasks_raw = value.get("tasks")
+    if not isinstance(milestones_raw, list) or not isinstance(tasks_raw, list) or len(milestones_raw) > 512 or len(tasks_raw) > 2_048:
+        _fail("plan_size_invalid", "milestones/tasks exceed bounded limits")
+    milestones: list[ProjectMilestone] = []
+    milestone_ids: set[str] = set()
+    for raw in milestones_raw:
+        if not isinstance(raw, Mapping):
+            _fail("plan_milestone_invalid", "milestone must be an object")
+        identifier = _text(raw.get("id"), "milestone.id", max_length=96)
+        if not _ID_RE.fullmatch(identifier) or identifier in milestone_ids:
+            _fail("plan_milestone_invalid", "milestone IDs must be unique and bounded")
+        status = _text(raw.get("status", "pending"), "milestone.status", max_length=16)
+        if status not in PLAN_STATUS_VALUES:
+            _fail("plan_status_invalid", "milestone status is unsupported")
+        milestone_ids.add(identifier)
+        milestones.append(ProjectMilestone(identifier, _text(raw.get("title"), "milestone.title", max_length=300), _text(raw.get("description"), "milestone.description", max_length=4_000), status))
+    tasks: list[ProjectTask] = []
+    task_ids: set[str] = set()
+    for raw in tasks_raw:
+        if not isinstance(raw, Mapping):
+            _fail("plan_task_invalid", "task must be an object")
+        identifier = _text(raw.get("id"), "task.id", max_length=96)
+        milestone_id = _text(raw.get("milestone_id"), "task.milestone_id", max_length=96)
+        if not _ID_RE.fullmatch(identifier) or identifier in task_ids or milestone_id not in milestone_ids:
+            _fail("plan_task_invalid", "task IDs and milestone references must be valid")
+        status = _text(raw.get("status", "pending"), "task.status", max_length=16)
+        if status not in PLAN_STATUS_VALUES:
+            _fail("plan_status_invalid", "task status is unsupported")
+        dependencies = _list_of_text(raw.get("dependencies"), "task.dependencies", max_items=64)
+        acceptance = _list_of_text(raw.get("acceptance_criteria"), "task.acceptance_criteria", max_items=64)
+        if any(not _ID_RE.fullmatch(item) for item in dependencies):
+            _fail("plan_dependency_invalid", "task dependency ID is unsafe")
+        task_ids.add(identifier)
+        tasks.append(ProjectTask(identifier, milestone_id, _text(raw.get("title"), "task.title", max_length=300), _text(raw.get("description"), "task.description", max_length=4_000), status, dependencies, acceptance))
+    if any(dep not in task_ids for task in tasks for dep in task.dependencies):
+        _fail("plan_dependency_missing", "task dependency does not exist")
+    graph = {task.task_id: set(task.dependencies) for task in tasks}
+    visiting: set[str] = set()
+    visited: set[str] = set()
+    def visit(identifier: str) -> None:
+        if identifier in visiting:
+            _fail("plan_dependency_cycle", "task dependency graph contains a cycle")
+        if identifier in visited:
+            return
+        visiting.add(identifier)
+        for dependency in graph[identifier]:
+            visit(dependency)
+        visiting.remove(identifier)
+        visited.add(identifier)
+    for identifier in graph:
+        visit(identifier)
+    active = [task.task_id for task in tasks if task.status == "active"]
+    if len(active) > 1:
+        _fail("plan_active_task_ambiguous", "at most one task may be active")
+    current_task_id = value.get("current_task_id")
+    if current_task_id is not None:
+        current_task_id = _text(current_task_id, "current_task_id", max_length=96)
+        if current_task_id not in task_ids:
+            _fail("plan_current_task_missing", "current_task_id does not exist")
+    elif active:
+        current_task_id = active[0]
+    return ProjectPlan(project_id, project_name, plan_version, tuple(milestones), tuple(tasks), current_task_id)
+
+
+@dataclass(frozen=True)
+class ProjectRecord:
+    project_id: str
+    display_name: str
+    repo_alias: str
+    local_repo_path: str
+    github_repo: str | None
+    created_at: str
+    project_status: str
+    brief: ProjectBrief
+    plan_imported: bool = False
+    plan_version: str | None = None
+    total_tasks: int = 0
+    completed_tasks: int = 0
+    current_milestone: str | None = None
+    current_task: str | None = None
+    plan_path: str | None = None
+    last_launch_id: str | None = None
+    last_session_id: str | None = None
+    last_correlation_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not _ID_RE.fullmatch(self.project_id):
+            _fail("project_id_invalid", "project_id is unsafe")
+        if _ALIAS_RE.fullmatch(self.repo_alias) is None:
+            _fail("repo_alias_invalid", "repo_alias is unsafe")
+        _text(self.display_name, "display_name", max_length=200)
+        local = Path(self.local_repo_path).expanduser()
+        if not local.is_absolute():
+            _fail("project_path_invalid", "local_repo_path must be absolute")
+        if self.github_repo is not None and _GITHUB_RE.fullmatch(self.github_repo) is None:
+            _fail("github_repo_invalid", "github_repo must be owner/name")
+        if self.project_status not in PROJECT_STATUS_VALUES:
+            _fail("project_status_invalid", "project_status is unsupported")
+        if self.total_tasks < 0 or self.completed_tasks < 0 or self.completed_tasks > self.total_tasks:
+            _fail("project_progress_invalid", "project progress is invalid")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+            "display_name": self.display_name,
+            "repo_alias": self.repo_alias,
+            "local_repo_path": self.local_repo_path,
+            "github_repo": self.github_repo,
+            "created_at": self.created_at,
+            "project_status": self.project_status,
+            "brief": self.brief.to_dict(),
+            "plan": {
+                "imported": self.plan_imported,
+                "path": self.plan_path,
+                "version": self.plan_version,
+                "total_tasks": self.total_tasks,
+                "completed_tasks": self.completed_tasks,
+                "current_milestone": self.current_milestone,
+                "current_task": self.current_task,
+            },
+            "conversation": {
+                "last_launch_id": self.last_launch_id,
+                "last_session_id": self.last_session_id,
+                "last_correlation_id": self.last_correlation_id,
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> "ProjectRecord":
+        if not isinstance(value, Mapping):
+            _fail("catalog_project_invalid", "catalog project must be an object")
+        plan = value.get("plan") if isinstance(value.get("plan"), Mapping) else {}
+        conversation = value.get("conversation") if isinstance(value.get("conversation"), Mapping) else {}
+        return cls(
+            project_id=_text(value.get("project_id"), "project_id", max_length=96),
+            display_name=_text(value.get("display_name"), "display_name", max_length=200),
+            repo_alias=_text(value.get("repo_alias"), "repo_alias", max_length=32),
+            local_repo_path=_text(value.get("local_repo_path"), "local_repo_path", max_length=2_000),
+            github_repo=value.get("github_repo") if value.get("github_repo") is None else _text(value.get("github_repo"), "github_repo", max_length=240),
+            created_at=_timestamp(value.get("created_at"), "created_at"),
+            project_status=_text(value.get("project_status", "new"), "project_status", max_length=16),
+            brief=ProjectBrief.from_dict(value.get("brief")),
+            plan_imported=bool(plan.get("imported", False)),
+            plan_version=plan.get("version") if plan.get("version") is None else _text(plan.get("version"), "plan.version", max_length=64),
+            total_tasks=int(plan.get("total_tasks", 0)),
+            completed_tasks=int(plan.get("completed_tasks", 0)),
+            current_milestone=plan.get("current_milestone") if plan.get("current_milestone") is None else _text(plan.get("current_milestone"), "plan.current_milestone", max_length=200),
+            current_task=plan.get("current_task") if plan.get("current_task") is None else _text(plan.get("current_task"), "plan.current_task", max_length=96),
+            plan_path=plan.get("path") if plan.get("path") is None else _text(plan.get("path"), "plan.path", max_length=2_000),
+            last_launch_id=conversation.get("last_launch_id") if conversation.get("last_launch_id") is None else _text(conversation.get("last_launch_id"), "conversation.last_launch_id", max_length=96),
+            last_session_id=conversation.get("last_session_id") if conversation.get("last_session_id") is None else _text(conversation.get("last_session_id"), "conversation.last_session_id", max_length=200),
+            last_correlation_id=conversation.get("last_correlation_id") if conversation.get("last_correlation_id") is None else _text(conversation.get("last_correlation_id"), "conversation.last_correlation_id", max_length=200),
+        )
+
+
+def catalog_path(runtime_root: str | Path) -> Path:
+    root = Path(runtime_root).expanduser().absolute()
+    if root.exists() and root.is_symlink():
+        _fail("catalog_root_invalid", "project catalog runtime root must not be a symlink")
+    return root / PROJECT_CATALOG_RELATIVE_PATH
+
+
+def _atomic_write(path: Path, document: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = canonical_json_bytes(dict(document))
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+class ProjectCatalog:
+    """Single bounded writer for vNext project metadata."""
+
+    def __init__(self, runtime_root: str | Path) -> None:
+        self.runtime_root = Path(runtime_root).expanduser().absolute()
+        self.path = catalog_path(self.runtime_root)
+
+    def read(self) -> tuple[ProjectRecord, ...]:
+        if not self.path.exists():
+            return ()
+        if self.path.is_symlink() or not self.path.is_file():
+            _fail("catalog_path_invalid", "project catalog must be a regular file")
+        payload = self.path.read_bytes()
+        if len(payload) > PROJECT_CATALOG_MAX_BYTES:
+            _fail("catalog_too_large", "project catalog exceeds its bound")
+        try:
+            document = json.loads(payload.decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ProjectCatalogError("catalog_corrupt", "project catalog is not valid JSON") from exc
+        if not isinstance(document, Mapping) or document.get("schema") != PROJECT_CATALOG_SCHEMA:
+            _fail("catalog_schema_invalid", "project catalog schema is unsupported")
+        projects_raw = document.get("projects")
+        if not isinstance(projects_raw, list) or len(projects_raw) > 256:
+            _fail("catalog_shape_invalid", "project catalog projects must be bounded")
+        projects = tuple(ProjectRecord.from_dict(item) for item in projects_raw)
+        if len({project.project_id for project in projects}) != len(projects):
+            _fail("catalog_duplicate_project", "project IDs must be unique")
+        supplied_digest = document.get("catalog_digest")
+        without_digest = {"schema": PROJECT_CATALOG_SCHEMA, "projects": [project.to_dict() for project in projects]}
+        if supplied_digest != semantic_digest(without_digest):
+            _fail("catalog_digest_mismatch", "project catalog digest differs")
+        return projects
+
+    def write(self, projects: Iterable[ProjectRecord]) -> None:
+        ordered = tuple(sorted(projects, key=lambda item: (item.display_name.casefold(), item.project_id)))
+        if len(ordered) > 256:
+            _fail("catalog_size_invalid", "project catalog is bounded to 256 projects")
+        base = {"schema": PROJECT_CATALOG_SCHEMA, "projects": [project.to_dict() for project in ordered]}
+        _atomic_write(self.path, {**base, "catalog_digest": semantic_digest(base)})
+
+    def get(self, project_id: str) -> ProjectRecord | None:
+        return next((project for project in self.read() if project.project_id == project_id), None)
+
+    def upsert(self, project: ProjectRecord) -> ProjectRecord:
+        projects = [item for item in self.read() if item.project_id != project.project_id]
+        projects.append(project)
+        self.write(projects)
+        return project
+
+    def import_plan(self, project_id: str, plan_path: str | Path) -> tuple[ProjectRecord, ProjectPlan]:
+        project = self.get(project_id)
+        if project is None:
+            _fail("project_not_found", "project is not in the canonical catalog")
+        source = Path(plan_path).expanduser().absolute()
+        if source.is_symlink() or not source.is_file():
+            _fail("plan_path_invalid", "project-plan.json must be a regular file")
+        payload = source.read_bytes()
+        if len(payload) > PROJECT_PLAN_MAX_BYTES:
+            _fail("plan_too_large", "project plan exceeds its bound")
+        try:
+            document = json.loads(payload.decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ProjectCatalogError("plan_json_invalid", "project plan is not valid JSON") from exc
+        plan = validate_project_plan(document, expected_project_id=project_id)
+        current_milestone = plan.current_milestone.title if plan.current_milestone else None
+        updated = ProjectRecord(
+            **{**project.__dict__, "plan_imported": True, "plan_version": plan.plan_version, "total_tasks": len(plan.tasks), "completed_tasks": plan.completed_tasks, "current_milestone": current_milestone, "current_task": plan.current_task_id, "plan_path": str(source), "project_status": "active"}
+        )
+        self.upsert(updated)
+        return updated, plan
+
+
+def new_project_record(*, project_id: str | None, display_name: str, repo_alias: str, local_repo_path: str | Path, github_repo: str | None, brief: ProjectBrief) -> ProjectRecord:
+    identifier = project_id or str(uuid.uuid4())
+    return ProjectRecord(identifier, display_name.strip(), repo_alias.strip().lower(), str(Path(local_repo_path).expanduser().absolute()), github_repo, _utc_now(), "new", brief)
+
+
+__all__ = [
+    "PROJECT_CATALOG_SCHEMA",
+    "PROJECT_PLAN_SCHEMA",
+    "ProjectBrief",
+    "ProjectCatalog",
+    "ProjectCatalogError",
+    "ProjectMilestone",
+    "ProjectPlan",
+    "ProjectRecord",
+    "ProjectTask",
+    "catalog_path",
+    "new_project_record",
+    "validate_project_plan",
+]
