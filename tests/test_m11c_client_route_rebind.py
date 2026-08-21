@@ -123,6 +123,28 @@ def test_prepare_binds_exact_subject_and_rebind_is_idempotent(monkeypatch: pytes
     assert route["legacy"] == []
 
 
+def test_completed_route_drift_recovers_forward_under_same_plan(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    prepared, authority, deployed, _client, route, rebind_id = _prepare(monkeypatch, tmp_path)
+    plan_sha = prepared["plan"]["route_rebind_plan_sha256"]
+    first = rebind.rebind_client_route(
+        authority_root=authority,
+        deployed_runtime_root=deployed,
+        rebind_id=rebind_id,
+        expected_plan_sha256=plan_sha,
+    )
+    assert first["state"]["phase"] == "COMPLETED"
+    route["target"] = []
+    recovered = rebind.rebind_client_route(
+        authority_root=authority,
+        deployed_runtime_root=deployed,
+        rebind_id=rebind_id,
+        expected_plan_sha256=plan_sha,
+    )
+    assert recovered["state"]["phase"] == "COMPLETED"
+    assert recovered["recovered_completed_drift"] is True
+    assert {item["view"] for item in route["target"]} == {"32", "64"}
+
+
 def test_partial_route_fault_replays_forward_without_old_route(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     prepared, authority, deployed, _client, route, rebind_id = _prepare(monkeypatch, tmp_path)
     plan_sha = prepared["plan"]["route_rebind_plan_sha256"]
