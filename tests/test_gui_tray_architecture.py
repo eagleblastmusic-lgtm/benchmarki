@@ -57,12 +57,13 @@ def test_headless_smoke_never_creates_tray_and_uses_composed_explicit_windows() 
     app = read(GUI / "app.py")
     session_window = read(GUI / "session_history_window.py")
     assert "if args.headless_smoke:" in app
-    assert "window = SessionProjectControlCenterWindow(" in app
-    assert "window = SessionTrayProjectControlCenterWindow(" in app
-    assert "class SessionTrayProjectControlCenterWindow(SessionHistoryWindowMixin, TrayProjectControlCenterWindow)" in session_window
-    assert "auto_load_status=not args.headless_smoke" in app
+    assert "window = VNextControlCenterWindow(runtime_root=runtime_root)" in app
+    assert "SessionProjectControlCenterWindow" not in app
+    assert "SessionTrayProjectControlCenterWindow" not in app
+    assert "class SessionTrayProjectControlCenterWindow" in session_window
+    assert "auto_load_status" not in app
     assert '"tray_created": False' in app
-    assert "tray_controller.start()" in app
+    assert "tray_controller.start()" not in app
 
 
 def test_tray_modules_are_valid_python() -> None:

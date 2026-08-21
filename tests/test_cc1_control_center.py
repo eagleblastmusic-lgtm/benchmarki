@@ -152,7 +152,9 @@ def test_gui_default_is_vnext_and_legacy_is_explicit_only() -> None:
     assert '"--legacy-control-center"' in app
     assert "if args.legacy_control_center:" in app
     assert "window = VNextControlCenterWindow(runtime_root=runtime_root)" in app
-    assert "SessionProjectControlCenterWindow" in app
-    assert "ProjectOperationsService" in app
-    assert "automatic fallback" in app
+    assert "SessionProjectControlCenterWindow" not in app
+    assert "ProjectOperationsService" not in app
+    assert "PAGE_NAMES" in source
+    for page in ("Dashboard", "Projects", "Current operation", "History", "Diagnostics", "Settings / System"):
+        assert page in source
     assert "legacy_fallback" in app
