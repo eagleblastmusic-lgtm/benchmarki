@@ -36,6 +36,7 @@ M12B_PLAN_STATUS = "PREFLIGHT_READY"
 M12B_BLOCKED_STATUS = "PREFLIGHT_BLOCKED"
 M12B_APPROVAL_TOKEN = "M12B-DELETE-APPROVED"
 M12B_JOURNAL_STATES = frozenset({"PREPARED", "APPLYING", "PARTIAL", "COMPLETED", "BLOCKED"})
+M12B_PRODUCTION_OBSERVATION_SCHEMA = "bdb-vnext-m12b-production-acceptance-observation-v1"
 _PROTECTED_CATEGORIES = frozenset(
     {
         "ACTIVE_PRODUCTION_REQUIRED",
@@ -98,6 +99,45 @@ def _check_sha40(value: object, field: str) -> str:
     if not isinstance(value, str) or _SHA40.fullmatch(value) is None:
         _fail("m12b_invalid_source_identity", f"{field} is not an exact Git SHA")
     return value
+
+
+def _production_acceptance_observation(
+    *,
+    execution_scope: str,
+    production_observation: Mapping[str, Any] | None,
+    production_acceptance: bool,
+) -> tuple[bool, dict[str, Any]]:
+    """Resolve acceptance from an exact observation, never from a production flag."""
+
+    if execution_scope == "fixture":
+        if production_observation is not None:
+            return production_observation.get("production_acceptance") is True, dict(production_observation)
+        return production_acceptance is True, {
+            "schema": M12B_PRODUCTION_OBSERVATION_SCHEMA,
+            "source": "fixture",
+            "production_acceptance": production_acceptance is True,
+        }
+    if production_acceptance is True and production_observation is None:
+        _fail(
+            "m12b_production_observation_required",
+            "production acceptance must come from the canonical read-only observation",
+        )
+    if not isinstance(production_observation, Mapping):
+        return False, {
+            "schema": M12B_PRODUCTION_OBSERVATION_SCHEMA,
+            "source": "missing",
+            "production_acceptance": False,
+            "reason": "canonical production observation unavailable",
+        }
+    observation = dict(production_observation)
+    if observation.get("schema") != M12B_PRODUCTION_OBSERVATION_SCHEMA:
+        return False, {
+            **observation,
+            "schema": M12B_PRODUCTION_OBSERVATION_SCHEMA,
+            "production_acceptance": False,
+            "reason": "canonical production observation schema mismatch",
+        }
+    return observation.get("production_acceptance") is True, observation
 
 
 def _absolute(value: str | Path, *, field: str, must_exist: bool = True) -> Path:
@@ -453,6 +493,7 @@ def build_m12b_subject(
     active_source_paths: Iterable[str] = (),
     native_routes: Mapping[str, Any] | None = None,
     production_acceptance: bool = False,
+    production_observation: Mapping[str, Any] | None = None,
     execution_scope: str = "production",
     journal_path: str | Path | None = None,
 ) -> dict[str, Any]:
@@ -523,6 +564,32 @@ def build_m12b_subject(
     unknown = sorted(set(inventory_unknown + reference_unknown + route_unknown))
     if execution_scope not in {"production", "fixture"}:
         _fail("m12b_execution_scope_invalid", "execution_scope is invalid")
+    accepted, acceptance_observation = _production_acceptance_observation(
+        execution_scope=execution_scope,
+        production_observation=production_observation,
+        production_acceptance=production_acceptance,
+    )
+    if execution_scope == "production" and accepted is True:
+        expected_observation = {
+            "source": "m9b_reconciliation_subject",
+            "bootstrap_state_sha256": state_sha,
+            "active_source_commit": source_commit,
+            "active_source_tree": source_tree,
+            "m9b_state": "ACTIVE",
+            "writer_enabled": True,
+            "intake_enabled": True,
+            "m3c_admission_enabled": True,
+            "native_routes": dict(native_routes or {}),
+        }
+        if any(acceptance_observation.get(key) != value for key, value in expected_observation.items()):
+            accepted = False
+            acceptance_observation = {
+                **acceptance_observation,
+                "production_acceptance": False,
+                "reason": "canonical production observation does not bind the exact current subject",
+            }
+    if execution_scope == "production" and accepted is not True:
+        unknown = sorted(set((*unknown, "production acceptance observation not proven")))
     if journal_path is not None:
         journal_path = str(_absolute(journal_path, field="journal_path", must_exist=False))
     categories = Counter(item["category"] for item in classified + refs)
@@ -548,6 +615,7 @@ def build_m12b_subject(
         "client": dict(client),
         "route_rebind": dict(route_rebind),
         "native_routes": dict(native_routes or {}),
+        "production_observation": acceptance_observation,
         "inventory": classified,
         "physical_references": refs,
         "package_closure": package_closure,
@@ -557,7 +625,7 @@ def build_m12b_subject(
         ),
         "category_counts": {key: categories.get(key, 0) for key in sorted(_CATEGORIES)},
         "unknown_paths": unknown,
-        "production_acceptance": production_acceptance is True,
+        "production_acceptance": accepted,
         "execution_scope": execution_scope,
         "journal_path": journal_path,
         "production_deletion_performed": False,
@@ -570,7 +638,7 @@ def build_m12b_subject(
         "subject_sha256": subject_sha,
         "m12a_closure_sha256": closure_digest,
         "m12a_deletion_plan_sha256": deletion_digest,
-        "status": M12B_BLOCKED_STATUS if unknown else M12B_PLAN_STATUS,
+        "status": M12B_BLOCKED_STATUS if unknown or accepted is not True else M12B_PLAN_STATUS,
         "operator_approval_required": True,
         "apply_mode": "EXACT_PATH_BOUND_GUARDED",
         "candidate_targets": candidate_targets,
@@ -583,7 +651,8 @@ def build_m12b_subject(
             "IMMUTABLE_EVIDENCE",
             "LEGACY_COMPATIBLE_USAGE_ZERO",
         ],
-        "production_acceptance": production_acceptance is True,
+        "production_acceptance": accepted,
+        "production_observation": acceptance_observation,
         "execution_scope": execution_scope,
         "journal_path": journal_path,
         "production_deletion_performed": False,
@@ -664,6 +733,8 @@ def prepare_m12b_readiness(
     from bdb_vnext.m11c_windows_clients import query_client_plan
     from bdb_vnext.m11c_windows_clients import observe_windows_native_routes
     from bdb_vnext.m11c_client_route_rebind import query_client_route_rebind
+    from bdb_vnext.m9b_activation import read_activation
+    from bdb_vnext.m9b_reconciliation import _subject as observe_production_subject
     from bdb_vnext.m9b_reconciliation import query_post_active_reconciliation
 
     closure_result = verify_full_closure(runtime_root=runtime, closure_report_sha256=closure_report_sha256)
@@ -683,7 +754,11 @@ def prepare_m12b_readiness(
     maintenance_id = str(state.get("activation_id", "")).removeprefix("m11c-maint-")
     if not maintenance_id:
         _fail("m12b_maintenance_identity_missing", "ACTIVE Bootstrap has no maintenance identity")
-    m9b_result = query_post_active_reconciliation(authority_root=authority, maintenance_id=maintenance_id)
+    m9b_result = query_post_active_reconciliation(
+        authority_root=authority,
+        maintenance_id=maintenance_id,
+        deployed_runtime_root=runtime,
+    )
     m9b = {
         "plan_sha256": m9b_result.get("plan", {}).get("plan_sha256"),
         "state_sha256": m9b_result.get("state", {}).get("state_sha256"),
@@ -719,6 +794,54 @@ def prepare_m12b_readiness(
         "state_sha256": rebind_result.get("state", {}).get("state_sha256"),
     }
     m3c = _m3c(runtime)
+    try:
+        observed_subject = observe_production_subject(
+            authority=authority,
+            deployed_runtime=runtime,
+            client_runtime=client_runtime,
+            maintenance_id=maintenance_id,
+            maintenance_plan_sha256=str(state.get("cutover_plan_sha256", "")),
+            route_rebind_id=rebind_id,
+            route_rebind_plan_sha256=str(rebind["plan_sha256"]),
+        )
+        observed_m9b = observed_subject["m9b"]
+        production_observation = {
+            "schema": M12B_PRODUCTION_OBSERVATION_SCHEMA,
+            "source": "m9b_reconciliation_subject",
+            "production_acceptance": (
+                observed_subject["routes"].get("target_registered") is True
+                and observed_subject["routes"].get("target_conflict") is False
+                and observed_subject["routes"].get("legacy_route_present") is False
+                and observed_m9b.state == "ACTIVE"
+                and observed_m9b.writer_enabled is True
+                and observed_m9b.intake_enabled is True
+            ),
+            "bootstrap_state_sha256": observed_subject["bootstrap"].get("state_sha256"),
+            "active_source_commit": observed_subject["active"].get("source_commit"),
+            "active_source_tree": observed_subject["maintenance"].get("candidate_source_tree"),
+            "m9b_state": observed_m9b.state,
+            "m9b_source_head": observed_m9b.source_head,
+            "writer_enabled": observed_m9b.writer_enabled,
+            "intake_enabled": observed_m9b.intake_enabled,
+            "native_routes": observed_subject["routes"],
+            "m3c_admission_enabled": observed_subject["m3c"].get("kill_switch", {}).get("admission_enabled"),
+        }
+    except Exception as exc:
+        observed_m9b = read_activation(runtime)
+        production_observation = {
+            "schema": M12B_PRODUCTION_OBSERVATION_SCHEMA,
+            "source": "m9b_reconciliation_subject",
+            "production_acceptance": False,
+            "reason": "canonical production subject did not prove acceptance",
+            "error_code": getattr(exc, "code", "production_subject_unavailable"),
+            "error": str(exc),
+            "m9b_state": observed_m9b.state if observed_m9b is not None else None,
+            "m9b_source_head": observed_m9b.source_head if observed_m9b is not None else None,
+            "writer_enabled": observed_m9b.writer_enabled if observed_m9b is not None else None,
+            "intake_enabled": observed_m9b.intake_enabled if observed_m9b is not None else None,
+            "native_routes": native_routes,
+            "m3c_admission_enabled": m3c.get("admission_enabled"),
+        }
     references: list[dict[str, Any]] = []
     _recursive_paths(bootstrap.get("state", {}), category="ACTIVE_PRODUCTION_REQUIRED", authority="bootstrap-state", out=references)
     _recursive_paths(bootstrap.get("slots", {}).get("ACTIVE", {}), category="ACTIVE_PRODUCTION_REQUIRED", authority="bootstrap-active", out=references)
@@ -768,7 +891,7 @@ def prepare_m12b_readiness(
         physical_references=references,
         active_source_paths=active_source_paths,
         native_routes=native_routes,
-        production_acceptance=False,
+        production_observation=production_observation,
         execution_scope="production",
         journal_path=evidence_root / "journals" / f"{subject_id}.json",
     )

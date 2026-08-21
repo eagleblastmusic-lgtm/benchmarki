@@ -90,6 +90,29 @@ def _subject_inputs(*, unknown: bool = False) -> dict:
             "target_registered_views": ["32", "64"],
             "legacy_route_present": False,
         },
+        "production_observation": {
+            "schema": "bdb-vnext-m12b-production-acceptance-observation-v1",
+            "source": "m9b_reconciliation_subject",
+            "production_acceptance": True,
+            "bootstrap_state_sha256": SHA(5),
+            "active_source_commit": SOURCE,
+            "active_source_tree": TREE,
+            "m9b_state": "ACTIVE",
+            "writer_enabled": True,
+            "intake_enabled": True,
+            "m3c_admission_enabled": True,
+            "native_routes": {
+                "target": [
+                    {"root": "HKCU", "view": "32", "value": r"C:\manifest.json"},
+                    {"root": "HKCU", "view": "64", "value": r"C:\manifest.json"},
+                ],
+                "legacy": [],
+                "target_conflict": False,
+                "target_registered": True,
+                "target_registered_views": ["32", "64"],
+                "legacy_route_present": False,
+            },
+        },
         "physical_references": [
             {"path": r"C:\active\bundle", "category": "ACTIVE_PRODUCTION_REQUIRED", "authority": "bootstrap"},
             {"path": r"C:\previous\bundle", "category": "PREVIOUS_RECOVERY_REQUIRED", "authority": "bootstrap"},
@@ -152,7 +175,11 @@ def test_unknown_inventory_is_blocked_and_must_not_delete() -> None:
 
 
 def test_plan_is_immutable_and_apply_boundary_stays_dry_run(tmp_path: Path) -> None:
-    result = build_m12b_subject(**_subject_inputs())
+    inputs = _subject_inputs()
+    inputs["execution_scope"] = "fixture"
+    inputs["production_acceptance"] = True
+    inputs.pop("production_observation")
+    result = build_m12b_subject(**inputs)
     plan = result["plan"]
     plan_path = tmp_path / "m12b-plan.json"
     plan_path.write_text(json.dumps({**plan, "plan_sha256": result["plan_sha256"]}, sort_keys=True), encoding="utf-8")
@@ -162,7 +189,29 @@ def test_plan_is_immutable_and_apply_boundary_stays_dry_run(tmp_path: Path) -> N
     assert dry["status"] == "DRY_RUN_ONLY"
     with pytest.raises(M12bDeletionError) as caught:
         apply_m12b_deletion(plan_path=plan_path, approval_token=M12B_APPROVAL_TOKEN, dry_run=False)
-    assert caught.value.code == "m12b_production_acceptance_required"
+    assert caught.value.code == "m12b_authority_readback_required"
+
+
+def test_production_acceptance_cannot_be_caller_supplied() -> None:
+    inputs = _subject_inputs()
+    inputs.pop("production_observation")
+    inputs["production_acceptance"] = True
+    with pytest.raises(M12bDeletionError) as caught:
+        build_m12b_subject(**inputs)
+    assert caught.value.code == "m12b_production_observation_required"
+
+
+def test_false_production_observation_blocks_preflight() -> None:
+    inputs = _subject_inputs()
+    inputs["production_observation"] = {
+        "schema": "bdb-vnext-m12b-production-acceptance-observation-v1",
+        "source": "m9b_reconciliation_subject",
+        "production_acceptance": False,
+    }
+    result = build_m12b_subject(**inputs)
+    assert result["status"] == M12B_BLOCKED_STATUS
+    assert result["plan"]["production_acceptance"] is False
+    assert "production acceptance observation not proven" in result["plan"]["unknown_paths"]
 
 
 def test_subject_rejects_wrong_source_identity() -> None:

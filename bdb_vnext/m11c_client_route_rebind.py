@@ -526,13 +526,30 @@ def rebind_client_route(
         plan = _load_plan(authority, rebind_id, expected)
         state = _load_state(authority, rebind_id, expected)
         routes, phase = _revalidate(authority=authority, deployed=deployed, plan=plan, state=state, allow_partial=True)
+        recovered_completed_drift = False
         if state["phase"] == "COMPLETED":
-            if phase != "TARGET":
-                _fail("route_rebind_completed_mismatch", "completed rebind no longer has the exact stable target route")
-            result = query_client_route_rebind(authority_root=authority, rebind_id=rebind_id, expected_plan_sha256=expected)
-            result["replayed"] = True
-            result["route_phase"] = phase
-            return result
+            if phase == "TARGET":
+                result = query_client_route_rebind(authority_root=authority, rebind_id=rebind_id, expected_plan_sha256=expected)
+                result["replayed"] = True
+                result["route_phase"] = phase
+                return result
+            if phase not in {"ABSENT", "PARTIAL"}:
+                _fail("route_rebind_completed_mismatch", "completed rebind no longer has an exact recoverable target route")
+            # The immutable plan remains authoritative; only the mutable journal
+            # is reopened so a lost HKCU route can roll forward under the same
+            # Bootstrap-bound subject. The old route is never restored.
+            state = _write_state(
+                authority,
+                rebind_id=rebind_id,
+                plan_sha256=expected,
+                phase="PREPARED",
+                mutation_phase="RECOVERY",
+                bootstrap_state_sha256=plan["bootstrap_state_sha256"],
+                target_manifest_sha256=plan["target_native_manifest_sha256"],
+                target_manifest_path=plan["target_native_manifest_path"],
+                subject_sid=plan["subject_sid"],
+            )
+            recovered_completed_drift = True
         if fault_hook:
             fault_hook("before_first_registry_mutation")
         target = plan["target_native_manifest_path"]
@@ -563,6 +580,7 @@ def rebind_client_route(
             result = query_client_route_rebind(authority_root=authority, rebind_id=rebind_id, expected_plan_sha256=expected)
             result["state"] = completed
             result["replayed"] = False
+            result["recovered_completed_drift"] = recovered_completed_drift
             result["route_phase"] = "TARGET"
             return result
         except M11cClientError as exc:
