@@ -457,6 +457,8 @@ def capture_compatibility_zero(
         raise M12aCompatibilityError(exc.code, str(exc)) from exc
     if routes.get("target_registered") is not True or routes.get("target_conflict") or routes.get("legacy_route_present"):
         _fail("native_route_not_exclusive", "M12a requires exclusive exact vNext Native route ownership")
+    if client_plan.get("source_head") != active.get("source_commit"):
+        _fail("client_source_mismatch", "stable client source head differs from Bootstrap ACTIVE source")
 
     activation_id = state.get("activation_id")
     if not isinstance(activation_id, str) or not activation_id.startswith("m11c-"):
@@ -480,6 +482,14 @@ def capture_compatibility_zero(
         if cutover.get("cutover_plan_sha256") != state.get("cutover_plan_sha256"):
             _fail("cutover_plan_binding_mismatch", "ACTIVE state binds a different immutable cutover plan")
         freeze_digest = _digest_field(cutover.get("m9a_freeze_digest"), "m9a_freeze_digest")
+
+    expected_client_tree = (
+        reconciliation["plan"].get("candidate_source_tree")
+        if reconciliation is not None
+        else active.get("source_tree")
+    )
+    if client_plan.get("source_tree") != expected_client_tree:
+        _fail("client_source_mismatch", "stable client source tree differs from Bootstrap ACTIVE source")
 
     try:
         first = revalidate_side_by_side_digest(
@@ -580,6 +590,7 @@ def capture_compatibility_zero(
         "native_route_exclusive": routes.get("legacy_route_present") is False and routes.get("target_registered") is True,
         "client_runtime_root": str(client_runtime),
         "m9b_reconciliation": reconciliation,
+        "client_route_rebind": reconciliation.get("route_rebind") if reconciliation is not None else None,
         "admission_path_scan": admission_scan,
         "active_python_closure": source_scan,
         "active_browser_closure": browser_scan,
@@ -643,6 +654,7 @@ def _parser() -> argparse.ArgumentParser:
     capture = sub.add_parser("capture")
     capture.add_argument("--authority-root", required=True)
     capture.add_argument("--runtime-root", required=True)
+    capture.add_argument("--client-runtime-root")
     capture.add_argument("--legacy-runtime-root", required=True)
     capture.add_argument("--repo-root", required=True)
     capture.add_argument("--observation-seconds", type=float, default=2.0)
@@ -659,6 +671,7 @@ def main(argv: list[str] | None = None) -> int:
             result = capture_compatibility_zero(
                 authority_root=args.authority_root,
                 runtime_root=args.runtime_root,
+                client_runtime_root=args.client_runtime_root,
                 legacy_runtime_root=args.legacy_runtime_root,
                 repo_root=args.repo_root,
                 observation_seconds=args.observation_seconds,

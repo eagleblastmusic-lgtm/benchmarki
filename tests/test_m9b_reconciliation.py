@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 import bdb_vnext.m9b_reconciliation as reconciliation
+import bdb_vnext.m11c_client_route_rebind as route_rebind
 from bdb_vnext.m9b_activation import ActivationRecord, M9bActivationError, write_activation
 
 
@@ -22,6 +23,7 @@ BROWSER = "sha256:" + "7" * 64
 NATIVE = "sha256:" + "8" * 64
 BUNDLE = "sha256:" + "9" * 64
 CANDIDATE = "sha256:" + "a" * 64
+ROUTE_REBIND = "sha256:" + "e" * 64
 
 
 def _old() -> ActivationRecord:
@@ -169,3 +171,43 @@ def test_reconcile_revalidates_subject_before_m9b_write(monkeypatch: pytest.Monk
             expected_plan_sha256=prepared["plan_sha256"],
         )
     assert caught.value.code == "reconciliation_subject_changed"
+
+
+def test_prepare_binds_completed_stable_route_rebind_lineage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    authority = tmp_path / "authority"
+    deployed = tmp_path / "deployed"
+    client = tmp_path / "stable-client"
+    for path in (authority, deployed, client):
+        path.mkdir()
+    write_activation(deployed, _old())
+    subject = _subject()
+    subject["client_plan"] = {
+        **subject["client_plan"],
+        "native_manifest_path": "C:/stable/native-host.json",
+        "source_head": HEAD,
+        "source_tree": TREE,
+    }
+    subject["route_rebind"] = {
+        "rebind_id": "stable-route",
+        "plan": {
+            "route_rebind_plan_sha256": ROUTE_REBIND,
+            "original_maintenance_id": "m11c-test-reconciliation",
+            "original_maintenance_plan_sha256": MAINTENANCE,
+        },
+        "state": {"phase": "COMPLETED"},
+    }
+    monkeypatch.setattr(reconciliation, "_subject", lambda **_: subject)
+    monkeypatch.setattr(route_rebind, "query_client_route_rebind", lambda **_: subject["route_rebind"])
+    prepared = reconciliation.prepare_post_active_reconciliation(
+        authority_root=authority,
+        deployed_runtime_root=deployed,
+        candidate_client_runtime_root=client,
+        maintenance_id="m11c-test-reconciliation",
+        maintenance_plan_sha256=MAINTENANCE,
+        route_rebind_id="stable-route",
+        route_rebind_plan_sha256=ROUTE_REBIND,
+    )
+    assert prepared["plan"]["schema"] == reconciliation.M9B_RECONCILIATION_PLAN_SCHEMA_V2
+    assert prepared["plan"]["route_rebind_id"] == "stable-route"
+    assert prepared["plan"]["route_rebind_plan_sha256"] == ROUTE_REBIND
+    assert prepared["plan"]["candidate_client_plan_sha256"] == CLIENT
