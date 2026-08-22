@@ -32,3 +32,13 @@
 .bdb-vnext-output[data-state="warning"] {
   font-weight: 600;
 }
+
+.bdb-vnext-project-launch-status {
+  margin: 0.35rem 0;
+  font: inherit;
+  overflow-wrap: anywhere;
+}
+
+.bdb-vnext-project-launch-status[data-state="warning"] {
+  font-weight: 600;
+}
