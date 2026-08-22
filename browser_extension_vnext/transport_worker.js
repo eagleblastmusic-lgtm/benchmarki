@@ -13,7 +13,15 @@ const BROWSER_BUNDLE_SCHEMA = "bdb-vnext-m11c-browser-bundle-v1";
 const CLIENT_FILES_SCHEMA = "bdb-vnext-browser-client-files-v1";
 const MAX_ENTRIES = 128;
 const MAX_REQUEST_BYTES = 256 * 1024;
-const TYPES = new Set(["bdb-vnext-status", "bdb-vnext-submit", "bdb-vnext-lookup", "bdb-vnext-resume-outbox"]);
+const TYPES = new Set([
+  "bdb-vnext-status",
+  "bdb-vnext-submit",
+  "bdb-vnext-lookup",
+  "bdb-vnext-resume-outbox",
+  "bdb-vnext-project-launch-peek",
+  "bdb-vnext-project-launch-claim",
+  "bdb-vnext-project-launch-ack"
+]);
 let storageChain = Promise.resolve();
 
 function requestId(prefix) {
@@ -292,6 +300,34 @@ async function status() {
   return { ok: response.status === "success", response };
 }
 
+function boundedId(value, field) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 128 || /[\u0000]/.test(value)) {
+    throw new Error(`${field} must be bounded text`);
+  }
+  return value;
+}
+
+async function projectLaunchPeek() {
+  const response = await sendNative(native("project_launch_peek"));
+  return { ok: response.status === "project_launch" || response.status === "empty", response };
+}
+
+async function projectLaunchClaim(launchId, claimId) {
+  const response = await sendNative(native("project_launch_claim", {
+    launch_id: boundedId(launchId, "launch_id"),
+    claim_id: boundedId(claimId, "claim_id")
+  }));
+  return { ok: response.status === "claimed", response };
+}
+
+async function projectLaunchAck(launchId, claimId) {
+  const response = await sendNative(native("project_launch_ack", {
+    launch_id: boundedId(launchId, "launch_id"),
+    claim_id: boundedId(claimId, "claim_id")
+  }));
+  return { ok: response.status === "acknowledged", response };
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || typeof message !== "object" || !TYPES.has(message.type)) return false;
   if (sender.id !== chrome.runtime.id) {
@@ -301,7 +337,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const operation = message.type === "bdb-vnext-status" ? status()
     : message.type === "bdb-vnext-submit" ? submit(message.request)
     : message.type === "bdb-vnext-lookup" ? lookup(message.submission_key, message.request_digest)
-    : resumeOutbox();
+    : message.type === "bdb-vnext-resume-outbox" ? resumeOutbox()
+    : message.type === "bdb-vnext-project-launch-peek" ? projectLaunchPeek()
+    : message.type === "bdb-vnext-project-launch-claim" ? projectLaunchClaim(message.launch_id, message.claim_id)
+    : projectLaunchAck(message.launch_id, message.claim_id);
   operation.then(
     (result) => sendResponse(result),
     (error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) })
