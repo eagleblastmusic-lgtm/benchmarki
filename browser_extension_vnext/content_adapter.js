@@ -112,6 +112,7 @@ const PROJECT_BINDINGS_KEY = "bdbVnextProjectLaunchBindingsV1";
 const PROJECT_BINDINGS_LIMIT = 128;
 const PROJECT_POLL_MS = 1200;
 const PROJECT_LEASE_SECONDS = 30;
+const PROJECT_LAUNCH_INSERT_MESSAGE = "bdb-vnext-project-launch-insert";
 const PROJECT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PROJECT_TAB_INSTANCE_KEY = "bdbVnextProjectTabInstanceV1";
 let projectPollActive = false;
@@ -125,12 +126,11 @@ function projectConversationId() {
   return match ? match[1] : null;
 }
 
-function projectPageEligible() {
+function projectPageEligible({ selectedByUser = false } = {}) {
   return Boolean(
     projectConversationId() &&
     document.visibilityState === "visible" &&
-    typeof document.hasFocus === "function" &&
-    document.hasFocus()
+    (selectedByUser || (typeof document.hasFocus === "function" && document.hasFocus()))
   );
 }
 
@@ -323,11 +323,11 @@ async function projectAck(launchId, claimId) {
   return Boolean(result && result.ok === true && result.response && result.response.status === "acknowledged");
 }
 
-async function projectHandleLaunch(launch) {
-  if (projectInsertionActive || !projectPageEligible()) return;
+async function projectHandleLaunch(launch, { selectedByUser = false } = {}) {
+  if (projectInsertionActive || !projectPageEligible({ selectedByUser })) return false;
   const conversationId = projectConversationId();
   const composer = projectFindComposer();
-  if (!conversationId || !composer) return;
+  if (!conversationId || !composer) return false;
   const bindings = await projectReadBindings();
   const existing = projectBindingFor(bindings, launch.launch_id, conversationId);
   if (!existing && projectComposerHasForeignState(composer)) {
@@ -336,13 +336,13 @@ async function projectHandleLaunch(launch) {
       // canonical pending prompt is safe to acknowledge without re-inserting.
     } else {
       projectAnnounce("BDB vNext: composer is not empty; launch left pending.", "warning");
-      return;
+      return false;
     }
   }
   const claimId = existing ? existing.claim_id : projectClaimId(launch.launch_id);
   const claimed = await projectClaim(launch, claimId);
-  if (!claimed) return;
-  if (!projectPageEligible() || projectConversationId() !== conversationId) return;
+  if (!claimed) return false;
+  if (!projectPageEligible({ selectedByUser }) || projectConversationId() !== conversationId) return false;
   await projectWriteBinding(claimed, claimId, conversationId, "CLAIMED");
   projectInsertionActive = true;
   try {
@@ -351,18 +351,34 @@ async function projectHandleLaunch(launch) {
     if (currentText !== claimed.prompt) {
       if (projectComposerHasForeignState(currentComposer) || !projectInsertExact(currentComposer, claimed.prompt)) {
         projectAnnounce("BDB vNext: launch not inserted; composer changed.", "warning");
-        return;
+        return false;
       }
     }
-    if (!projectPageEligible() || projectConversationId() !== conversationId || projectComposerText(projectFindComposer()) !== claimed.prompt) return;
+    if (!projectPageEligible({ selectedByUser }) || projectConversationId() !== conversationId || projectComposerText(projectFindComposer()) !== claimed.prompt) return false;
     const acknowledged = await projectAck(claimed.launch_id, claimId);
     if (acknowledged) {
       await projectWriteBinding(claimed, claimId, conversationId, "ACKED");
       projectAnnounce("BDB vNext: project prompt inserted (not sent).", "success");
+      return true;
     }
+    return false;
   } finally {
     projectInsertionActive = false;
   }
+}
+
+async function projectInsertSelectedLaunch() {
+  if (!projectPageEligible({ selectedByUser: true })) {
+    return { ok: false, code: "conversation_not_eligible" };
+  }
+  const launch = await projectPeek();
+  if (!launch) {
+    return { ok: false, code: "no_pending_prompt" };
+  }
+  const inserted = await projectHandleLaunch(launch, { selectedByUser: true });
+  return inserted
+    ? { ok: true, code: "inserted", launch_id: launch.launch_id }
+    : { ok: false, code: "project_prompt_not_inserted", launch_id: launch.launch_id };
 }
 
 async function projectPoll() {
@@ -376,6 +392,16 @@ async function projectPoll() {
   } finally {
     projectPollActive = false;
   }
+}
+
+if (typeof chrome === "object" && chrome.runtime && chrome.runtime.onMessage) {
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (!message || message.type !== PROJECT_LAUNCH_INSERT_MESSAGE) return false;
+    projectInsertSelectedLaunch()
+      .then(sendResponse)
+      .catch(() => sendResponse({ ok: false, code: "project_prompt_not_inserted" }));
+    return true;
+  });
 }
 
 function scan(root = document) {
