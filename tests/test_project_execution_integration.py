@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
+from bdb_bridge.project_launch import ProjectLaunch as BrowserProjectLaunch
 
 from bdb_vnext.project_catalog import ProjectBrief, ProjectCatalog, ProjectPlan, new_project_record, validate_project_plan
 from bdb_vnext.project_execution import ProjectExecutionCoordinator, ProjectExecutionError
@@ -224,3 +225,23 @@ def test_start_prompt_carries_exact_binding_and_no_auto_send(tmp_path: Path) -> 
     replay = workflow.queue_start_prompt(project_id)
     assert replay.launch_id == launch.launch_id
     assert len(workflow.execution.snapshot(project_id)["bindings"]) == 1
+
+
+def test_start_prompt_launch_is_compatible_with_browser_native_contract(tmp_path: Path) -> None:
+    catalog, _coordinator, project_id = _fixture(tmp_path)
+
+    class Runner:
+        def run(self, args, *, cwd=None, timeout_seconds=120.0):
+            return CommandResult(tuple(args), 0, HEAD + "\n", "")
+
+    queue_path = tmp_path / "launch.json"
+    queue = ProjectLaunchQueueAdapter(queue_path)
+    workflow = ProjectWorkflow(catalog.runtime_root, catalog=catalog, command_runner=Runner(), queue=queue)
+    launch = workflow.queue_start_prompt(project_id)
+
+    document = json.loads(queue_path.read_text(encoding="utf-8"))
+    browser_launch = BrowserProjectLaunch.from_dict(document["pending"])
+    assert browser_launch.launch_id == launch.launch_id
+    assert browser_launch.auto_send is False
+    assert document["pending"]["project_id"] == project_id
+    assert document["pending"]["task_id"] == launch.task_id
