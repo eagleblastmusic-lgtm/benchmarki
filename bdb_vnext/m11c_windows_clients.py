@@ -170,6 +170,35 @@ def _copy_browser_bundle(source: Path, target: Path, expected_digest: str) -> No
         raise
 
 
+def _copy_native_executable(source: Path, target: Path, expected_digest: str) -> None:
+    """Place the exact Native bytes inside the staged runtime.
+
+    Chrome launches the executable from the Native Messaging manifest without
+    knowing the staged config path.  Keeping the exact bytes under
+    ``runtime/clients/native-host`` lets the frozen entrypoint resolve the
+    matching runtime config structurally, while preserving the artifact
+    digest and refusing to overwrite a conflicting staged executable.
+    """
+
+    if target.exists():
+        if target.is_symlink() or not target.is_file() or _digest_bytes(target.read_bytes()) != expected_digest:
+            _fail("native_stage_conflict", "existing staged Native Host bytes differ")
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging = target.parent / f".{target.name}.partial-{uuid.uuid4().hex}"
+    try:
+        shutil.copyfile(source, staging)
+        if _digest_bytes(staging.read_bytes()) != expected_digest:
+            _fail("native_stage_mismatch", "staged Native Host bytes differ from source")
+        os.replace(staging, target)
+    except Exception:
+        try:
+            staging.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def _native_config(*, runtime: Path, legacy: Path, bootstrap: Path) -> dict[str, Any]:
     return {
         "schema": NATIVE_CONFIG_SCHEMA,
@@ -220,9 +249,12 @@ def stage_client_plan(
     _copy_browser_bundle(browser_source, staged_browser, browser["bundle_digest"])
 
     config_path = runtime / "config" / "native-host.json"
+    staged_executable = runtime / "clients" / "native-host" / executable.name
+    executable_digest = _digest_bytes(executable.read_bytes())
+    _copy_native_executable(executable, staged_executable, executable_digest)
     manifest_path = runtime / "clients" / "native-host" / f"{NATIVE_HOST_NAME}.json"
     config = _native_config(runtime=runtime, legacy=legacy, bootstrap=bootstrap)
-    native_manifest = _native_manifest(executable)
+    native_manifest = _native_manifest(staged_executable)
     _atomic_json(config_path, config)
     _atomic_json(manifest_path, native_manifest)
 
@@ -239,8 +271,8 @@ def stage_client_plan(
         "browser_bundle_root": str(staged_browser),
         "browser_bundle_digest": browser["bundle_digest"],
         "native_host_name": NATIVE_HOST_NAME,
-        "native_host_executable": str(executable),
-        "native_host_executable_sha256": _digest_bytes(executable.read_bytes()),
+        "native_host_executable": str(staged_executable),
+        "native_host_executable_sha256": executable_digest,
         "native_config_path": str(config_path),
         "native_config_sha256": _digest_bytes(canonical_json_bytes(config)),
         "native_manifest_path": str(manifest_path),

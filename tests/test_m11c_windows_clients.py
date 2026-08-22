@@ -70,12 +70,31 @@ def test_stage_client_plan_copies_exact_browser_and_builds_native_manifest(tmp_p
     assert plan["browser_install_mode"] == BROWSER_INSTALL_MODE
     assert plan["browser_operator_action_required"] is True
     assert Path(plan["browser_bundle_root"]) == runtime / "clients" / "browser-extension"
-    assert Path(plan["native_host_executable"]) == executable.absolute()
+    staged_executable = Path(plan["native_host_executable"])
+    assert staged_executable == runtime / "clients" / "native-host" / executable.name
+    assert staged_executable.read_bytes() == executable.read_bytes()
     assert plan["native_host_name"] == NATIVE_HOST_NAME
     manifest = Path(plan["native_manifest_path"]).read_text(encoding="utf-8")
     assert NATIVE_HOST_NAME in manifest
     assert ORIGIN in manifest
     assert query_client_plan(runtime_root=runtime)["plan"]["client_plan_sha256"] == plan["client_plan_sha256"]
+
+
+def test_conflicting_staged_native_bytes_fail_closed(tmp_path: Path) -> None:
+    runtime, _legacy, _bootstrap, _executable, result = _stage(tmp_path)
+    staged = Path(result["plan"]["native_host_executable"])
+    staged.write_bytes(b"foreign-native-bytes")
+    with pytest.raises(M11cClientError) as exc:
+        stage_client_plan(
+            runtime_root=runtime,
+            legacy_runtime_root=tmp_path / "legacy",
+            bootstrap_authority_root=tmp_path / "ProgramData" / "BartoszDevBridge-Next" / "bootstrap",
+            browser_source_root=BROWSER_SOURCE,
+            native_host_executable=tmp_path / "Scripts" / "bdb-vnext-native-host.exe",
+            source_head=HEAD,
+            source_tree=TREE,
+        )
+    assert exc.value.code == "native_stage_conflict"
 
 
 def test_staged_browser_tamper_is_rejected(tmp_path: Path) -> None:
