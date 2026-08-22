@@ -149,16 +149,20 @@ function projectFindComposer() {
     "[contenteditable='true'][role='textbox']",
     "[contenteditable='true']"
   ];
-  const found = [];
-  const seen = new Set();
   for (const selector of selectors) {
+    const found = [];
     for (const element of document.querySelectorAll(selector)) {
-      if (seen.has(element) || !projectVisible(element)) continue;
-      seen.add(element);
+      if (!projectVisible(element)) continue;
+      const messageOwner = typeof element.closest === "function"
+        ? element.closest("[data-message-author-role='assistant'], [data-message-author-role='user']")
+        : null;
+      if (messageOwner) continue;
       found.push(element);
     }
+    if (found.length === 1) return found[0];
+    if (found.length > 1) return null;
   }
-  return found.length === 1 ? found[0] : null;
+  return null;
 }
 
 function projectComposerText(composer) {

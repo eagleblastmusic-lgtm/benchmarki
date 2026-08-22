@@ -110,6 +110,107 @@ def test_vnext_project_launch_browser_path_is_bounded_and_submission_path_remain
     assert "bdb-vnext-submission-v1" in adapter
 
 
+def test_vnext_project_find_composer_uses_ordered_selector_priority_and_fails_closed(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the Browser content contract")
+    harness = tmp_path / "project-composer-resolution.cjs"
+    harness.write_text(
+        textwrap.dedent(
+            r'''
+            "use strict";
+            const assert = require("node:assert/strict");
+            const fs = require("node:fs");
+            const vm = require("node:vm");
+
+            class Element {
+              constructor({ id = "", owner = null } = {}) {
+                this.id = id;
+                this.owner = owner;
+                this.style = {};
+                this.dataset = {};
+                this.textContent = "";
+              }
+              get innerText() { return this.textContent; }
+              set innerText(value) { this.textContent = value; }
+              getBoundingClientRect() { return { width: 600, height: 30 }; }
+              closest() { return this.owner; }
+            }
+
+            class TextArea extends Element {}
+
+            function resolveComposer(source, scenario) {
+              const precise = new Element({ id: "prompt-textarea" });
+              const assistant = new Element({ owner: null });
+              assistant.closest = () => assistant;
+              const genericOne = new Element();
+              const genericTwo = new Element();
+              const fallback = new Element();
+              const candidates = {
+                "#prompt-textarea": scenario === "priority" ? [precise] : [],
+                "textarea[data-testid='textbox']": [],
+                "textarea[placeholder*='Message']": [],
+                "[contenteditable='true'][role='textbox']": scenario === "ambiguous"
+                  ? [genericOne, genericTwo]
+                  : scenario === "fallback" ? [fallback] : [],
+                "[contenteditable='true']": scenario === "priority"
+                  ? [assistant]
+                  : scenario === "ambiguous" ? [genericOne, genericTwo]
+                  : scenario === "fallback" ? [fallback] : []
+              };
+              const context = {
+                console,
+                HTMLElement: Element,
+                HTMLTextAreaElement: TextArea,
+                HTMLInputElement: class extends Element {},
+                InputEvent: class {},
+                Event: class {},
+                TextEncoder,
+                Set,
+                Map,
+                crypto: { randomUUID: () => "22222222-2222-4222-8222-222222222222" },
+                window: { getComputedStyle: () => ({ visibility: "visible", display: "block" }) },
+                location: { protocol: "https:", hostname: "chatgpt.com", pathname: "/c/abcdef12-3456-4789-abcd-abcdef123456" },
+                document: {
+                  visibilityState: "visible",
+                  hasFocus: () => true,
+                  documentElement: {},
+                  querySelector: () => null,
+                  querySelectorAll: (selector) => selector === "pre code" ? [] : (candidates[selector] || []),
+                  createElement: () => new Element(),
+                  execCommand: () => false
+                },
+                MutationObserver: class { observe() {} },
+                setInterval: (fn) => ({ unref() {}, fn }),
+                chrome: {}
+              };
+              context.globalThis = context;
+              vm.createContext(context);
+              vm.runInContext(source, context, { filename: "content_adapter.js" });
+              return { result: context.projectFindComposer(), precise, fallback };
+            }
+
+            const source = fs.readFileSync(process.argv[2], "utf8");
+            const priority = resolveComposer(source, "priority");
+            assert.equal(priority.result, priority.precise, "precise composer must win over generic assistant contenteditable");
+            const ambiguous = resolveComposer(source, "ambiguous");
+            assert.equal(ambiguous.result, null, "multiple matches for one fallback selector must fail closed");
+            const fallback = resolveComposer(source, "fallback");
+            assert.equal(fallback.result, fallback.fallback, "one valid fallback textbox must be selected");
+            '''
+        ),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [node, str(harness), str(ROOT / "browser_extension_vnext" / "content_adapter.js")],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
 def test_vnext_project_launch_inserts_exact_multiline_prompt_without_send(tmp_path: Path) -> None:
     node = shutil.which("node")
     if node is None:
