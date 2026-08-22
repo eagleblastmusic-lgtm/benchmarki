@@ -126,9 +126,13 @@ function projectConversationId() {
   return match ? match[1] : null;
 }
 
+function projectBlankNewChat() {
+  return location.protocol === "https:" && location.hostname === "chatgpt.com" && (location.pathname === "/" || location.pathname === "");
+}
+
 function projectPageEligible({ selectedByUser = false } = {}) {
   return Boolean(
-    projectConversationId() &&
+    (projectConversationId() || (selectedByUser && projectBlankNewChat())) &&
     document.visibilityState === "visible" &&
     (selectedByUser || (typeof document.hasFocus === "function" && document.hasFocus()))
   );
@@ -326,10 +330,11 @@ async function projectAck(launchId, claimId) {
 async function projectHandleLaunch(launch, { selectedByUser = false } = {}) {
   if (projectInsertionActive || !projectPageEligible({ selectedByUser })) return false;
   const conversationId = projectConversationId();
+  const blankNewChat = !conversationId && selectedByUser && projectBlankNewChat();
   const composer = projectFindComposer();
-  if (!conversationId || !composer) return false;
+  if ((!conversationId && !blankNewChat) || !composer) return false;
   const bindings = await projectReadBindings();
-  const existing = projectBindingFor(bindings, launch.launch_id, conversationId);
+  const existing = conversationId ? projectBindingFor(bindings, launch.launch_id, conversationId) : null;
   if (!existing && projectComposerHasForeignState(composer)) {
     if (projectComposerText(composer) === launch.prompt) {
       // Storage may have been lost after insertion but before ACK. The exact
@@ -342,8 +347,11 @@ async function projectHandleLaunch(launch, { selectedByUser = false } = {}) {
   const claimId = existing ? existing.claim_id : projectClaimId(launch.launch_id);
   const claimed = await projectClaim(launch, claimId);
   if (!claimed) return false;
-  if (!projectPageEligible({ selectedByUser }) || projectConversationId() !== conversationId) return false;
-  await projectWriteBinding(claimed, claimId, conversationId, "CLAIMED");
+  const sameSelection = conversationId
+    ? projectConversationId() === conversationId
+    : !projectConversationId() && projectBlankNewChat();
+  if (!projectPageEligible({ selectedByUser }) || !sameSelection) return false;
+  if (conversationId) await projectWriteBinding(claimed, claimId, conversationId, "CLAIMED");
   projectInsertionActive = true;
   try {
     const currentComposer = projectFindComposer();
@@ -354,10 +362,13 @@ async function projectHandleLaunch(launch, { selectedByUser = false } = {}) {
         return false;
       }
     }
-    if (!projectPageEligible({ selectedByUser }) || projectConversationId() !== conversationId || projectComposerText(projectFindComposer()) !== claimed.prompt) return false;
+    const finalSelection = conversationId
+      ? projectConversationId() === conversationId
+      : !projectConversationId() && projectBlankNewChat();
+    if (!projectPageEligible({ selectedByUser }) || !finalSelection || projectComposerText(projectFindComposer()) !== claimed.prompt) return false;
     const acknowledged = await projectAck(claimed.launch_id, claimId);
     if (acknowledged) {
-      await projectWriteBinding(claimed, claimId, conversationId, "ACKED");
+      if (conversationId) await projectWriteBinding(claimed, claimId, conversationId, "ACKED");
       projectAnnounce("BDB vNext: project prompt inserted (not sent).", "success");
       return true;
     }

@@ -429,3 +429,114 @@ def test_vnext_popup_inserts_pending_prompt_into_user_selected_conversation(tmp_
     assert "Wstaw prompt początkowy" in popup
     assert 'chrome.tabs.query({ active: true, currentWindow: true })' in popup_js
     assert 'type: "bdb-vnext-project-launch-insert"' in popup_js
+
+
+def test_vnext_popup_inserts_pending_prompt_into_genuinely_new_chat(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the Browser content contract")
+    harness = tmp_path / "project-launch-new-chat.cjs"
+    harness.write_text(
+        textwrap.dedent(
+            r'''
+            "use strict";
+            const assert = require("node:assert/strict");
+            const fs = require("node:fs");
+            const vm = require("node:vm");
+            class Element {
+              constructor() { this.textContent = ""; this.dataset = {}; this.style = {}; }
+              get innerText() { return this.textContent; }
+              set innerText(value) { this.textContent = value; }
+              getBoundingClientRect() { return { width: 600, height: 30 }; }
+              querySelector() { return null; }
+              querySelectorAll(selector) { return selector.includes("contenteditable") ? [this] : []; }
+              focus() { this.focused = true; }
+              dispatchEvent() {}
+              insertAdjacentElement() {}
+              setAttribute() {}
+            }
+            const composer = new Element();
+            const messages = [];
+            const listeners = [];
+            const store = {};
+            const launchId = "11111111-1111-4111-8111-111111111111";
+            const claimId = "22222222-2222-4222-8222-222222222222";
+            const launch = {
+              schema: "bdb-project-launch-v1",
+              launch_id: launchId,
+              repo_alias: "demo-project",
+              prompt: "initial project prompt",
+              auto_send: false,
+              created_at: "2026-08-22T00:00:00Z",
+              expires_at: "2026-08-22T00:10:00Z"
+            };
+            const context = {
+              console,
+              HTMLElement: Element,
+              HTMLTextAreaElement: class extends Element {},
+              HTMLInputElement: class extends Element {},
+              InputEvent: class {},
+              Event: class {},
+              TextEncoder,
+              Set,
+              Map,
+              crypto: { randomUUID: () => claimId },
+              window: { getComputedStyle: () => ({ visibility: "visible", display: "block" }) },
+              location: { protocol: "https:", hostname: "chatgpt.com", pathname: "/" },
+              document: {
+                visibilityState: "visible",
+                hasFocus: () => false,
+                documentElement: {},
+                querySelector: () => null,
+                querySelectorAll: (selector) => selector.includes("contenteditable") ? [composer] : [],
+                createElement: () => new Element(),
+                execCommand: () => false
+              },
+              MutationObserver: class { observe() {} },
+              setInterval: () => ({ unref() {} }),
+              chrome: {
+                storage: { local: {
+                  async get(key) { return Object.prototype.hasOwnProperty.call(store, key) ? { [key]: store[key] } : {}; },
+                  async set(values) { Object.assign(store, values); }
+                }},
+                runtime: {
+                  onMessage: { addListener(listener) { listeners.push(listener); } },
+                  async sendMessage(message) {
+                    messages.push(message);
+                    if (message.type === "bdb-vnext-project-launch-peek") return { ok: true, response: { status: "project_launch", launch } };
+                    if (message.type === "bdb-vnext-project-launch-claim") return { ok: true, response: { status: "claimed", launch } };
+                    if (message.type === "bdb-vnext-project-launch-ack") return { ok: true, response: { status: "acknowledged" } };
+                    throw new Error("unexpected message");
+                  }
+                }
+              }
+            };
+            context.globalThis = context;
+            vm.createContext(context);
+            vm.runInContext(fs.readFileSync(process.argv[2], "utf8"), context, { filename: process.argv[2] });
+            setTimeout(async () => {
+              assert.equal(listeners.length, 1, "new-chat content adapter must expose popup insertion");
+              messages.length = 0;
+              const result = await new Promise((resolve) => listeners[0]({ type: "bdb-vnext-project-launch-insert" }, {}, resolve));
+              assert.equal(result.ok, true);
+              assert.equal(result.code, "inserted");
+              assert.equal(composer.textContent, launch.prompt);
+              assert.deepEqual(messages.map((item) => item.type), [
+                "bdb-vnext-project-launch-peek",
+                "bdb-vnext-project-launch-claim",
+                "bdb-vnext-project-launch-ack"
+              ]);
+              assert.equal(messages.some((item) => item.type === "bdb-vnext-submit"), false);
+            }, 25);
+            '''
+        ),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [node, str(harness), str(ROOT / "browser_extension_vnext" / "content_adapter.js")],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
