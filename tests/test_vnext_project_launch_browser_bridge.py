@@ -427,8 +427,10 @@ def test_vnext_popup_inserts_pending_prompt_into_user_selected_conversation(tmp_
     popup_js = (ROOT / "browser_extension_vnext" / "popup.js").read_text(encoding="utf-8")
     assert 'id="insert-project-prompt"' in popup
     assert "Wstaw prompt początkowy" in popup
+    assert "nowej bez /c/" in popup
     assert 'chrome.tabs.query({ active: true, currentWindow: true })' in popup_js
     assert 'type: "bdb-vnext-project-launch-insert"' in popup_js
+    assert "nowa bez /c/" in popup_js
 
 
 def test_vnext_popup_inserts_pending_prompt_into_genuinely_new_chat(tmp_path: Path) -> None:

@@ -41,7 +41,7 @@ insertProjectPromptButton.addEventListener("click", async () => {
     if (!result || result.ok !== true) {
       const code = result && result.code ? result.code : "project_prompt_not_inserted";
       const messages = {
-        conversation_not_eligible: "Wybierz zwykłą rozmowę ChatGPT z adresem /c/... i pozostaw pusty composer.",
+        conversation_not_eligible: "Wybierz zwykłą rozmowę ChatGPT (nowa bez /c/... też jest obsługiwana) i pozostaw pusty composer.",
         no_pending_prompt: "Brak oczekującego promptu. Najpierw wybierz projekt w BDB i kliknij „Wstaw prompt planu”.",
         composer_not_empty: "Composer nie jest pusty — nic nie nadpisano.",
         project_prompt_not_inserted: "Prompt nie został wstawiony; niczego nie wysłano."
