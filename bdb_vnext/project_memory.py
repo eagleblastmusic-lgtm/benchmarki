@@ -11,11 +11,13 @@ import json
 import os
 import re
 import secrets
+import time
 import uuid
-from dataclasses import dataclass, replace
+from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence, TypeVar
 
 from bdb_shared.evidence import canonical_json_bytes, semantic_digest
 
@@ -42,6 +44,8 @@ _EVENT_TYPES = frozenset({
     "PROJECT_CREATED", "PLAN_IMPORTED", "PLAN_UPDATED", "TASK_STARTED", "TASK_REVIEW", "TASK_COMPLETED", "TASK_BLOCKED",
     "DECISION_ADDED", "DECISION_SUPERSEDED", "INBOX_ITEM_ADDED", "INBOX_ITEM_RESOLVED", "RISK_ADDED", "RISK_RESOLVED",
     "TECH_DEBT_ADDED", "TECH_DEBT_RESOLVED", "ATTENTION_ADDED", "ATTENTION_RESOLVED", "CHECKPOINT_CREATED", "HANDOFF_CREATED",
+    "EXECUTION_BOUND", "EXECUTION_STARTED", "EXECUTION_COMPLETED", "TASK_REVIEW", "TASK_REVIEW_ACCEPTED", "TASK_REVIEW_CHANGES_REQUESTED",
+    "TASK_COMPLETED", "TASK_BLOCKED", "EXECUTION_STALE_RESULT", "EXECUTION_REPLAYED", "MILESTONE_COMPLETED", "PROJECT_REVIEW_REQUESTED",
 })
 HANDOFF_MODES = (
     "CONTINUE_IMPLEMENTATION", "NEW_CHAT_PROJECT_HANDOFF", "ARCHITECTURE_REVIEW", "PROJECT_REVIEW", "DEBUGGING",
@@ -254,9 +258,13 @@ class ProjectMemoryState:
     technical_debt: tuple[DebtRecord, ...] = ()
     attention: tuple[AttentionItem, ...] = ()
     checkpoints: tuple[Checkpoint, ...] = ()
+    # Execution is a bounded sub-document of Project Memory, not a second
+    # project state.  The execution coordinator owns its shape and keeps
+    # large receipts out of this document.
+    execution: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"schema": PROJECT_MEMORY_SCHEMA, "project_id": self.project_id, "events": [item.to_dict() for item in self.events], "decisions": [item.to_dict() for item in self.decisions], "inbox": [item.to_dict() for item in self.inbox], "risks": [item.to_dict() for item in self.risks], "technical_debt": [item.to_dict() for item in self.technical_debt], "attention": [item.to_dict() for item in self.attention], "checkpoints": [item.to_dict() for item in self.checkpoints]}
+        return {"schema": PROJECT_MEMORY_SCHEMA, "project_id": self.project_id, "events": [item.to_dict() for item in self.events], "decisions": [item.to_dict() for item in self.decisions], "inbox": [item.to_dict() for item in self.inbox], "risks": [item.to_dict() for item in self.risks], "technical_debt": [item.to_dict() for item in self.technical_debt], "attention": [item.to_dict() for item in self.attention], "checkpoints": [item.to_dict() for item in self.checkpoints], "execution": dict(self.execution)}
 
 
 @dataclass(frozen=True)
@@ -349,8 +357,9 @@ def semantic_plan_diff(old: ProjectPlan, new: ProjectPlan) -> PlanDiff:
     return PlanDiff(tuple(milestones), tuple(tasks), tuple(dependency_items), tuple(acceptance_items), current)
 
 
-def _completed_protection(old: ProjectPlan, new: ProjectPlan) -> tuple[str, ...]:
-    old_tasks = {task.task_id: task for task in old.tasks if task.status == "completed"}
+def _completed_protection(old: ProjectPlan, new: ProjectPlan, *, execution_completed: Iterable[str] = ()) -> tuple[str, ...]:
+    completed_ids = set(execution_completed)
+    old_tasks = {task.task_id: task for task in old.tasks if task.status == "completed" or task.task_id in completed_ids}
     new_tasks = {task.task_id: task for task in new.tasks}
     blocked: list[str] = []
     for identifier, task in old_tasks.items():
@@ -412,12 +421,59 @@ class ProjectMemoryStore:
         debt = tuple(DebtRecord(item["debt_id"], item["project_id"], item["title"], item["description"], item["created_at"], item["status"], tuple(item.get("related_task_ids", [])), item.get("suggested_review_milestone")) for item in collections["technical_debt"])
         attention = tuple(AttentionItem(item["attention_id"], item["project_id"], item["type"], item["title"], item["description"], item["created_at"], item.get("status", "open")) for item in collections["attention"])
         checkpoints = tuple(Checkpoint(item["checkpoint_id"], item["project_id"], item["created_at"], item["label"], item.get("plan_version"), item.get("git_head"), tuple(item.get("completed_task_ids", [])), item.get("current_task_id"), tuple(item.get("active_decision_ids", [])), tuple(item.get("open_blocker_ids", [])), item.get("human_summary")) for item in collections["checkpoints"])
+        execution = document.get("execution", {})
+        if not isinstance(execution, Mapping) or len(canonical_json_bytes(dict(execution))) > 512 * 1024:
+            _fail("memory_execution_shape_invalid", "execution state is outside its bound")
+        execution = dict(execution)
         if any(event.project_id != self.project_id for event in events) or any(event.event_id != f"{self.project_id}:e{index:06d}" for index, event in enumerate(events, 1)):
             _fail("memory_event_order_invalid", "project events must form one append-only sequence")
-        return ProjectMemoryState(self.project_id, events, decisions, inbox, risks, debt, attention, checkpoints)
+        return ProjectMemoryState(self.project_id, events, decisions, inbox, risks, debt, attention, checkpoints, execution)
 
     def _write_state(self, state: ProjectMemoryState) -> None:
         _atomic_write(self.memory_path, state.to_dict())
+
+    @contextmanager
+    def _execution_lock(self) -> Iterator[None]:
+        """Bounded cross-process lock for execution transitions.
+
+        A live lock is never overwritten.  A lock older than the bounded
+        transition lease is treated as a crashed writer marker and reclaimed;
+        the state document itself is never deleted or repaired implicitly.
+        """
+        self.root.mkdir(parents=True, exist_ok=True)
+        lock = self.root / "execution.lock"
+        descriptor: int | None = None
+        deadline = time.monotonic() + 3.0
+        while descriptor is None:
+            try:
+                descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                try:
+                    if time.time() - lock.stat().st_mtime > 120:
+                        lock.unlink()
+                        continue
+                except FileNotFoundError:
+                    continue
+                if time.monotonic() >= deadline:
+                    _fail("memory_busy", "project execution memory is busy")
+                time.sleep(0.01)
+        try:
+            yield
+        finally:
+            os.close(descriptor)
+            lock.unlink(missing_ok=True)
+
+    _T = TypeVar("_T")
+
+    def execution_transaction(self, operation: Callable[[ProjectMemoryState], tuple[ProjectMemoryState, _T]]) -> _T:
+        """Commit one bounded execution transition atomically with its events."""
+        with self._execution_lock():
+            current = self.read_state()
+            updated, result = operation(current)
+            if updated.project_id != self.project_id:
+                _fail("memory_project_mismatch", "execution transition changed project identity")
+            self._write_state(updated)
+            return result
 
     def _append_event(self, state: ProjectMemoryState, event_type: str, summary: str, *, task_id: str | None = None, milestone_id: str | None = None, plan_version: str | None = None, git_head: str | None = None, correlation_id: str | None = None) -> ProjectMemoryState:
         if event_type not in _EVENT_TYPES:
@@ -530,7 +586,10 @@ class ProjectMemoryStore:
         if current is None:
             diff = semantic_plan_diff(candidate, candidate)
             return PlanUpdatePreview(self.project_id, plan_version_number(candidate.plan_version) == 1, None if plan_version_number(candidate.plan_version) == 1 else "plan_initial_version_invalid", None, _version(candidate.plan_version), None, _plan_digest(candidate), diff)
-        current_number = plan_version_number(current.plan_version); next_number = plan_version_number(candidate.plan_version); protection = _completed_protection(current, candidate)
+        current_number = plan_version_number(current.plan_version); next_number = plan_version_number(candidate.plan_version)
+        current_state = self.read_state()
+        execution_statuses = current_state.execution.get("task_statuses", {}) if isinstance(current_state.execution, Mapping) else {}
+        protection = _completed_protection(current, candidate, execution_completed=(task_id for task_id, status in execution_statuses.items() if status in {"completed", "skipped"}))
         reason: str | None = None
         if next_number != current_number + 1: reason = "plan_successor_required"
         elif candidate.supersedes_version is None or plan_version_number(candidate.supersedes_version) != current_number: reason = "plan_supersedes_mismatch"
@@ -564,28 +623,72 @@ class ProjectMemoryStore:
 def resolve_next_action(project: ProjectRecord, plan: ProjectPlan | None, state: ProjectMemoryState, *, plan_update_pending: bool = False) -> NextAction:
     if not project.plan_imported or plan is None: return NextAction("IMPORT_PLAN", "Wczytaj plan projektu", "Projekt nie ma aktywnego planu.", 1)
     if plan_update_pending: return NextAction("REVIEW_PLAN_UPDATE", "Przejrzyj aktualizację planu", "Nowa wersja planu czeka na zatwierdzenie.", 2)
+    statuses = _execution_task_statuses(state, plan)
+    if state.execution.get("stale_result"):
+        return NextAction("RECONCILIATION_REQUIRED", "Wymaga reconciliacji", "Późny wynik wykonania nie pasuje do aktualnego planu lub repozytorium.", 3)
+    review_task = next((task for task in plan.tasks if statuses.get(task.task_id, task.status) == "review"), None)
+    if review_task is not None:
+        return NextAction("REVIEW_REQUIRED", f"Przejrzyj: {review_task.task_id} — {review_task.title}", "Zadanie ma wynik wymagający ręcznej akceptacji.", 4)
+    blocked_task = next((task for task in plan.tasks if statuses.get(task.task_id, task.status) == "blocked"), None)
+    if blocked_task is not None:
+        return NextAction("RESOLVE_BLOCKER", f"Rozwiąż blocker: {blocked_task.task_id}", "Ostatnia próba wykonania nie przeszła walidacji.", 5)
     open_attention = [item for item in state.attention if item.status == "open"]
     for item in open_attention:
         if item.type == "decision_required": return NextAction("USER_DECISION_REQUIRED", "Wymaga Twojej decyzji", item.title, 3)
     if any(item.status == "open" and item.type == "review_required" for item in open_attention): return NextAction("REVIEW_REQUIRED", "Wymaga przeglądu", "Otwarty element wymaga przeglądu.", 4)
     if any(item.status == "open" and item.type == "blocked" for item in open_attention): return NextAction("RESOLVE_BLOCKER", "Rozwiąż blocker", "Projekt jest zablokowany.", 5)
-    current = plan.current_task
-    if current is not None and current.status in {"active", "pending", "review"}: return NextAction("CONTINUE_TASK", f"Kontynuuj: {current.task_id} — {current.title}", current.description, 6)
-    if plan.tasks and all(task.status in {"completed", "skipped"} for task in plan.tasks): return NextAction("PROJECT_REVIEW", "Przejrzyj projekt", "Wszystkie zadania planu są zakończone.", 7)
+    current = next((task for task in plan.tasks if task.task_id == state.execution.get("current_task_id")), None) or plan.current_task
+    if current is not None and statuses.get(current.task_id, current.status) == "review":
+        return NextAction("REVIEW_REQUIRED", f"Przejrzyj: {current.task_id} — {current.title}", "Zadanie ma wynik wymagający ręcznej akceptacji.", 4)
+    available = available_project_tasks(plan, state)
+    if len(available) > 1:
+        return NextAction("CHOOSE_TASK", f"{len(available)} zadań jest gotowych", "Wybierz zadanie; plan nie narzuca kolejności.", 6)
+    if available:
+        task = available[0]
+        return NextAction("CONTINUE_TASK", f"Kontynuuj: {task.task_id} — {task.title}", task.description, 6)
+    if plan.tasks and all(statuses.get(task.task_id, task.status) in {"completed", "skipped"} for task in plan.tasks):
+        return NextAction("PROJECT_REVIEW", "Przejrzyj projekt", "Wszystkie zadania planu są zakończone.", 7)
     return NextAction("CONTINUE_TASK", "Kontynuuj projekt", "Wybierz następne zadanie z planu.", 6)
 
 
 def project_health(state: ProjectMemoryState, plan: ProjectPlan | None) -> str:
     if plan is None or any(item.status == "open" and item.type == "blocked" for item in state.attention): return "BLOCKED"
+    execution = state.execution
+    if execution.get("stale_result") or any(item.get("status") == "STALE_RESULT" for item in execution.get("attempts", []) if isinstance(item, Mapping)): return "BLOCKED"
+    if any(status == "blocked" for status in _execution_task_statuses(state, plan).values()): return "BLOCKED"
     if any(item.status == "open" and item.type in {"decision_required", "review_required", "plan_review_required"} for item in state.attention) or any(item.status == "open" and item.severity == "high" for item in state.risks): return "ATTENTION"
     return "OK"
 
 
 def project_status_sentence(project: ProjectRecord, plan: ProjectPlan | None, state: ProjectMemoryState) -> str:
     if plan is None: return f"Projekt {project.display_name} nie ma jeszcze zaimportowanego planu."
-    current = plan.current_task_id or "brak bieżącego zadania"; milestone = plan.current_milestone.milestone_id if plan.current_milestone else "brak etapu"; blocker_count = sum(item.status == "open" and item.type == "blocked" for item in state.attention)
+    statuses = _execution_task_statuses(state, plan)
+    current = str(state.execution.get("current_task_id") or plan.current_task_id or "brak bieżącego zadania"); current_task = next((item for item in plan.tasks if item.task_id == current), None); milestone = current_task.milestone_id if current_task else (plan.current_milestone.milestone_id if plan.current_milestone else "brak etapu"); blocker_count = sum(item.status == "open" and item.type == "blocked" for item in state.attention) + sum(status == "blocked" for status in statuses.values())
     suffix = f"; praca czeka na {blocker_count} blocker" if blocker_count else "; brak blockerów"
-    return f"Projekt jest na {milestone}/{current}, wykonano {plan.completed_tasks}/{len(plan.tasks)} zadań, plan v{plan.plan_version}{suffix}."
+    completed = sum(status in {"completed", "skipped"} for status in statuses.values())
+    return f"Projekt jest na {milestone}/{current}, wykonano {completed}/{len(plan.tasks)} zadań, plan v{plan.plan_version}{suffix}."
+
+
+def _execution_task_statuses(state: ProjectMemoryState, plan: ProjectPlan | None) -> dict[str, str]:
+    if plan is None:
+        return {}
+    raw = state.execution.get("task_statuses", {}) if isinstance(state.execution, Mapping) else {}
+    if not isinstance(raw, Mapping):
+        return {task.task_id: task.status for task in plan.tasks}
+    return {task.task_id: str(raw.get(task.task_id, task.status)) for task in plan.tasks}
+
+
+def available_project_tasks(plan: ProjectPlan | None, state: ProjectMemoryState) -> tuple[ProjectTask, ...]:
+    if plan is None:
+        return ()
+    statuses = _execution_task_statuses(state, plan)
+    result = []
+    for task in plan.tasks:
+        if statuses.get(task.task_id, task.status) not in {"pending", "active"}:
+            continue
+        if all(statuses.get(dep, "pending") in {"completed", "skipped"} for dep in task.dependencies):
+            result.append(task)
+    return tuple(result)
 
 
 def changes_since(state: ProjectMemoryState, *, after_event_id: str | None = None, limit: int = 20) -> tuple[ProjectEvent, ...]:
@@ -606,7 +709,10 @@ def bounded_history_summary(project: ProjectRecord, plan: ProjectPlan | None, st
 
 def build_handoff_prompt(project: ProjectRecord, plan: ProjectPlan | None, state: ProjectMemoryState, *, mode: str, git_head: str | None = None) -> str:
     if mode not in HANDOFF_MODES: _fail("handoff_mode_invalid", "handoff mode is unsupported")
-    summary = bounded_history_summary(project, plan, state)
+    cursor = state.execution.get("last_handoff_event_id") if isinstance(state.execution, Mapping) else None
+    summary = bounded_history_summary(project, plan, state, after_event_id=cursor)
+    if cursor:
+        summary = "Od ostatniego handoffu (event cursor " + str(cursor) + "):\n" + summary
     instruction = {
         "CONTINUE_IMPLEMENTATION": "Kontynuuj aktualne zadanie po pobraniu bounded contextu przez BDB.",
         "NEW_CHAT_PROJECT_HANDOFF": "To jest nowa rozmowa projektu; najpierw potwierdź canonical stan i nie powtarzaj ukończonych prac.",
@@ -619,9 +725,25 @@ def build_handoff_prompt(project: ProjectRecord, plan: ProjectPlan | None, state
     }[mode]
     pinned = ", ".join(project.brief.pinned_files) if project.brief.pinned_files else "none"
     environment = ", ".join(project.brief.environment_hints) if project.brief.environment_hints else "none"
-    return (f"Tryb handoffu: {mode}\nRepo alias: {project.repo_alias}\nGitHub repo: {project.github_repo or 'not configured'}\nCurrent Git HEAD: {git_head or 'unknown'}\nWażne pliki (repo-relative): {pinned}\nŚrodowisko (wskazówki): {environment}\n\n{summary}\n\nInstrukcja: {instruction}\nNie wysyłaj nic automatycznie i nie kopiuj całego repozytorium, diffów ani sekretów.")[:30_000]
+    task = None
+    if plan is not None:
+        current_task_id = state.execution.get("current_task_id") if isinstance(state.execution, Mapping) else None
+        task = next((item for item in plan.tasks if item.task_id == current_task_id), None) if current_task_id else None
+        if task is None:
+            available = available_project_tasks(plan, state)
+            if len(available) == 1:
+                task = available[0]
+            elif not available and (not isinstance(state.execution, Mapping) or state.execution.get("task_statuses", {}).get(plan.current_task_id, plan.current_task.status if plan.current_task else "pending") not in {"completed", "skipped"}):
+                task = plan.current_task
+    task_lines = ""
+    if task:
+        task_lines = "\n".join((f"Current task goal: {task.description}", f"Task dependencies: {', '.join(task.dependencies) or 'none'}", "Acceptance criteria:", *[f"- {criterion}" for criterion in task.acceptance_criteria]))
+    active_decisions = "\n".join(f"- {item.title}: {item.decision}" for item in state.decisions if item.status == "active") or "none"
+    attention = "\n".join(f"- {item.type}: {item.title} — {item.description}" for item in state.attention if item.status == "open") or "none"
+    binding = state.execution.get("current_binding_id", "none") if isinstance(state.execution, Mapping) else "none"
+    return (f"Tryb handoffu: {mode}\nProject ID: {project.project_id}\nRepo alias: {project.repo_alias}\nGitHub repo: {project.github_repo or 'not configured'}\nPlan version: {plan.plan_version if plan else 'none'}\nCurrent Git HEAD: {git_head or 'unknown'}\nExecution binding: {binding}\nWażne pliki (repo-relative): {pinned}\nŚrodowisko (wskazówki): {environment}\n\n{summary}\n\n{task_lines}\n\nAktywne decyzje:\n{active_decisions}\n\nOtwarte uwagi/blockery:\n{attention}\n\nInstrukcja: najpierw potwierdź aktualne zadanie; nie powtarzaj ukończonych prac; używaj BDB do bounded repo contextu; zachowaj correlation.\n{instruction}\nNie wysyłaj nic automatycznie i nie kopiuj całego repozytorium, diffów ani sekretów.")[:30_000]
 
 
 __all__ = [
-    "HANDOFF_MODES", "AttentionItem", "Checkpoint", "DebtRecord", "DecisionRecord", "InboxItem", "NextAction", "PlanDiff", "PlanDiffItem", "PlanUpdatePreview", "ProjectEvent", "ProjectMemoryError", "ProjectMemoryState", "ProjectMemoryStore", "RiskRecord", "bounded_history_summary", "build_handoff_prompt", "changes_since", "memory_root", "plan_version_number", "project_health", "project_status_sentence", "resolve_next_action", "semantic_plan_diff",
+    "HANDOFF_MODES", "AttentionItem", "Checkpoint", "DebtRecord", "DecisionRecord", "InboxItem", "NextAction", "PlanDiff", "PlanDiffItem", "PlanUpdatePreview", "ProjectEvent", "ProjectMemoryError", "ProjectMemoryState", "ProjectMemoryStore", "RiskRecord", "available_project_tasks", "bounded_history_summary", "build_handoff_prompt", "changes_since", "memory_root", "plan_version_number", "project_health", "project_status_sentence", "resolve_next_action", "semantic_plan_diff",
 ]

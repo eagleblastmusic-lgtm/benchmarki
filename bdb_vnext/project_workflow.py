@@ -11,13 +11,14 @@ import os
 import json
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from .project_catalog import PROJECT_PLAN_MAX_BYTES, ProjectBrief, ProjectCatalog, ProjectCatalogError, ProjectPlan, ProjectRecord, new_project_record, validate_project_plan
 from .project_launch import ProjectLaunch, ProjectLaunchQueueAdapter, ProjectLaunchQueueError
-from .project_memory import HANDOFF_MODES, PlanUpdatePreview, ProjectMemoryState, ProjectMemoryStore, build_handoff_prompt
+from .project_memory import HANDOFF_MODES, PlanUpdatePreview, ProjectMemoryState, ProjectMemoryStore, available_project_tasks, build_handoff_prompt
+from .project_execution import ProjectExecutionBinding, ProjectExecutionCoordinator, ProjectExecutionError
 
 
 _ALIAS_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
@@ -147,32 +148,56 @@ def project_plan_markdown(plan: ProjectPlan) -> str:
     return "\n".join(lines)
 
 
-def build_start_prompt(project: ProjectRecord) -> str:
-    return _build_execution_prompt(project, "Rozpoczynamy projekt")
+def build_start_prompt(project: ProjectRecord, *, plan: ProjectPlan | None = None, state: ProjectMemoryState | None = None, git_head: str | None = None, binding: ProjectExecutionBinding | None = None) -> str:
+    return _build_execution_prompt(project, "Rozpoczynamy projekt", plan=plan, state=state, git_head=git_head, binding=binding)
 
 
-def build_continue_prompt(project: ProjectRecord) -> str:
-    return _build_execution_prompt(project, "Kontynuujemy projekt")
+def build_continue_prompt(project: ProjectRecord, *, plan: ProjectPlan | None = None, state: ProjectMemoryState | None = None, git_head: str | None = None, binding: ProjectExecutionBinding | None = None) -> str:
+    return _build_execution_prompt(project, "Kontynuujemy projekt", plan=plan, state=state, git_head=git_head, binding=binding)
 
 
-def _build_execution_prompt(project: ProjectRecord, heading: str) -> str:
+def _build_execution_prompt(project: ProjectRecord, heading: str, *, plan: ProjectPlan | None = None, state: ProjectMemoryState | None = None, git_head: str | None = None, binding: ProjectExecutionBinding | None = None) -> str:
     if not project.plan_imported:
         raise ProjectWorkflowError("project_plan_required", "Project Plan must be imported before Start/Continue")
-    completed = project.completed_tasks
-    total = project.total_tasks
+    current_plan = plan
+    current_task = None
+    available_task_ids: tuple[str, ...] = ()
+    if current_plan is not None:
+        current_task_id = state.execution.get("current_task_id") if state is not None and isinstance(state.execution, Mapping) else None
+        current_task = next((item for item in current_plan.tasks if item.task_id == current_task_id), None) if current_task_id else None
+        if current_task is None:
+            available = available_project_tasks(current_plan, state or ProjectMemoryState(project.project_id))
+            available_task_ids = tuple(item.task_id for item in available)
+            if len(available) == 1:
+                current_task = available[0]
+            elif not available and (state is None or state.execution.get("task_statuses", {}).get(current_plan.current_task_id, current_plan.current_task.status if current_plan.current_task else "pending") not in {"completed", "skipped"}):
+                current_task = current_plan.current_task
+    task_statuses = state.execution.get("task_statuses", {}) if state is not None and isinstance(state.execution, Mapping) else {}
+    completed = sum(str(task_statuses.get(task.task_id, task.status)) in {"completed", "skipped"} for task in current_plan.tasks) if current_plan else project.completed_tasks
+    total = len(current_plan.tasks) if current_plan else project.total_tasks
     lines = [
         heading + f" {project.display_name}.",
         f"Project ID: {project.project_id}",
         f"Repo alias: {project.repo_alias}",
         f"GitHub repo: {project.github_repo or 'not configured'}",
-        f"Plan version: {project.plan_version}",
+        f"Plan version: {current_plan.plan_version if current_plan else project.plan_version}",
         f"Postęp: {completed}/{total}",
-        f"Aktualny milestone: {project.current_milestone or 'nieustalony'}",
-        f"Aktualne zadanie: {project.current_task or 'nieustalone'}",
+        f"Aktualny milestone: {current_task.milestone_id if current_task else project.current_milestone or 'nieustalony'}",
+        f"Aktualne zadanie: {current_task.task_id if current_task else project.current_task or 'nieustalone'}",
+        f"Cel zadania: {current_task.description if current_task else 'potwierdź canonical task przez BDB'}",
+        f"Zależności: {', '.join(current_task.dependencies) if current_task and current_task.dependencies else 'brak'}",
+        "Acceptance criteria: " + ("; ".join(current_task.acceptance_criteria) if current_task and current_task.acceptance_criteria else "brak jawnych kryteriów"),
+        f"Repo HEAD przed wykonaniem: {git_head or 'unknown'}",
+        f"Execution binding: {binding.execution_binding_id if binding else 'prepared by BDB before execution'}",
+        f"Gotowe zadania do wyboru: {', '.join(available_task_ids) if available_task_ids else 'brak lub jednoznaczne zadanie'}",
         "Najpierw pobierz aktualny bounded context przez BDB.",
         "Nie wykonuj ponownie ukończonych zadań.",
         "Sprawdź zgodność HEAD/plan/current task, a następnie pracuj nad aktualnym zadaniem.",
     ]
+    if state is not None:
+        active_decisions = [item.title + ": " + item.decision for item in state.decisions if item.status == "active"]
+        attention = [item.type + ": " + item.title for item in state.attention if item.status == "open"]
+        lines.extend(["Aktywne decyzje: " + ("; ".join(active_decisions) if active_decisions else "brak"), "Otwarte uwagi: " + ("; ".join(attention) if attention else "brak")])
     return "\n".join(lines)
 
 
@@ -184,6 +209,7 @@ class ProjectWorkflow:
         self.runner = command_runner or SubprocessCommandRunner()
         self.github = github or GhRepositoryAdapter(self.runner)
         self.queue = queue or ProjectLaunchQueueAdapter()
+        self.execution = ProjectExecutionCoordinator(self.catalog.runtime_root, catalog=self.catalog)
 
     def register_existing(self, *, display_name: str, repo_alias: str, local_repo_path: str | Path, brief: ProjectBrief, github_repo: str | None = None) -> ProjectRecord:
         source = Path(local_repo_path).expanduser().absolute()
@@ -197,6 +223,7 @@ class ProjectWorkflow:
                     github_repo = candidate
         record = new_project_record(project_id=None, display_name=display_name, repo_alias=repo_alias, local_repo_path=source, github_repo=github_repo, brief=brief)
         self.catalog.upsert(record)
+        self._ensure_project_memory(record)
         return record
 
     def create_new(self, *, display_name: str, repo_alias: str, projects_root: str | Path, brief: ProjectBrief, github_name: str) -> ProjectCreationResult:
@@ -232,6 +259,7 @@ class ProjectWorkflow:
             github_repo = self.github.create_private_repository(local_repo=source, repo_name=github_name.strip())
             record = new_project_record(project_id=None, display_name=display_name, repo_alias=repo_alias, local_repo_path=source, github_repo=github_repo, brief=brief)
             self.catalog.upsert(record)
+            self._ensure_project_memory(record)
             return ProjectCreationResult(True, record, local_repo_path=str(source), github_repo=github_repo)
         except ProjectWorkflowError as exc:
             return ProjectCreationResult(False, error_code=exc.code, error_message=str(exc), local_repo_path=str(source))
@@ -284,12 +312,17 @@ class ProjectWorkflow:
         if project is None:
             raise ProjectWorkflowError("project_not_found", "project is not in the canonical catalog")
         memory = self.memory(project_id)
-        prompt = build_handoff_prompt(project, memory.current_plan(), memory.read_state(), mode=mode, git_head=git_head)
+        prompt = build_handoff_prompt(project, memory.current_plan(), memory.read_state(), mode=mode, git_head=git_head or self.current_repo_head(project))
         try:
             launch = self.queue.enqueue(repo_alias=project.repo_alias, prompt=prompt, ttl_minutes=10)
         except ProjectLaunchQueueError as exc:
             raise ProjectWorkflowError(exc.code, str(exc)) from exc
-        memory.append_event("HANDOFF_CREATED", f"Utworzono handoff {mode}", correlation_id=launch.launch_id)
+        event = memory.append_event("HANDOFF_CREATED", f"Utworzono handoff {mode}", correlation_id=launch.launch_id)
+        def mark_cursor(state: ProjectMemoryState) -> tuple[ProjectMemoryState, None]:
+            execution = dict(state.execution) if isinstance(state.execution, Mapping) else {}
+            execution["last_handoff_event_id"] = event.event_id
+            return replace(state, execution=execution), None
+        memory.execution_transaction(mark_cursor)
         self.catalog.upsert(ProjectRecord(**{**project.__dict__, "last_launch_id": launch.launch_id}))
         return launch
 
@@ -311,10 +344,41 @@ class ProjectWorkflow:
         return self._queue(project_id, build_plan_prompt)
 
     def queue_start_prompt(self, project_id: str) -> ProjectLaunch:
-        return self._queue(project_id, build_start_prompt)
+        return self._queue_execution_prompt(project_id, "start")
 
     def queue_continue_prompt(self, project_id: str) -> ProjectLaunch:
-        return self._queue(project_id, build_continue_prompt)
+        return self._queue_execution_prompt(project_id, "continue")
+
+    def current_repo_head(self, project: ProjectRecord) -> str:
+        result = self.runner.run(("git", "rev-parse", "HEAD"), cwd=Path(project.local_repo_path), timeout_seconds=30)
+        if result.returncode != 0 or not re.fullmatch(r"[0-9a-fA-F]{40,64}", result.stdout.strip()):
+            raise ProjectWorkflowError("repo_head_unavailable", "registered project HEAD could not be read")
+        return result.stdout.strip().lower()
+
+    def _queue_execution_prompt(self, project_id: str, kind: str) -> ProjectLaunch:
+        project = self.catalog.get(project_id)
+        if project is None:
+            raise ProjectWorkflowError("project_not_found", "project is not in the canonical catalog")
+        memory = self.memory(project_id); plan = memory.current_plan(); state = memory.read_state()
+        if plan is None:
+            raise ProjectWorkflowError("project_plan_required", "Project Plan must be imported before Start/Continue")
+        head = self.current_repo_head(project)
+        try:
+            binding = self.execution.new_binding(project_id, expected_repo_head_before=head)
+            prompt = build_start_prompt(project, plan=plan, state=state, git_head=head, binding=binding) if kind == "start" else build_continue_prompt(project, plan=plan, state=state, git_head=head, binding=binding)
+            pending = self.queue.peek()
+            if pending is not None:
+                if pending.launch_id != binding.launch_id or pending.execution_binding_id != binding.execution_binding_id:
+                    raise ProjectWorkflowError("queue_pending", "project launch queue already contains another canonical binding")
+                launch = pending
+            else:
+                launch = self.queue.enqueue(repo_alias=project.repo_alias, prompt=prompt, ttl_minutes=10, launch_id=binding.launch_id, project_id=binding.project_id, plan_version=binding.plan_version, task_id=binding.task_id, execution_binding_id=binding.execution_binding_id, correlation_id=binding.correlation_id, command_id=binding.command_id, expected_repo_head_before=binding.expected_repo_head_before)
+            self.execution.persist_binding(binding)
+        except (ProjectExecutionError, ProjectLaunchQueueError) as exc:
+            raise ProjectWorkflowError(getattr(exc, "code", "project_execution_binding_failed"), str(exc)) from exc
+        updated = ProjectRecord(**{**project.__dict__, "last_launch_id": launch.launch_id, "last_correlation_id": binding.correlation_id})
+        self.catalog.upsert(updated)
+        return launch
 
     def _queue(self, project_id: str, builder: Callable[[ProjectRecord], str]) -> ProjectLaunch:
         project = self.catalog.get(project_id)
@@ -334,12 +398,20 @@ class ProjectWorkflow:
             raise ProjectWorkflowError("git_command_failed", result.stderr.strip() or "Git command failed")
         return result
 
+    def _ensure_project_memory(self, project: ProjectRecord) -> None:
+        memory = ProjectMemoryStore(self.catalog.runtime_root, project.project_id)
+        if not memory.read_state().events:
+            memory.append_event("PROJECT_CREATED", f"Zarejestrowano projekt {project.display_name}")
+
 
 __all__ = [
     "CommandResult",
     "GhRepositoryAdapter",
     "GitHubRepositoryAdapter",
     "ProjectCreationResult",
+    "ProjectExecutionBinding",
+    "ProjectExecutionCoordinator",
+    "ProjectExecutionError",
     "ProjectWorkflow",
     "ProjectWorkflowError",
     "SubprocessCommandRunner",

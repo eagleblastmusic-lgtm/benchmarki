@@ -166,6 +166,13 @@ def test_project_workflow_does_not_import_legacy_operator_or_bridge() -> None:
         assert "from bdb_bridge" not in source
 
 
+def test_tracked_start_launcher_is_non_installing_and_non_admin() -> None:
+    content = Path("Start-BDB.ps1").read_text(encoding="utf-8")
+    assert "pip install" not in content.lower()
+    assert "Start-Process -Verb RunAs" not in content
+    assert "bdb_gui.app" in content
+
+
 def test_project_center_empty_start_and_advanced_smoke(tmp_path: Path) -> None:
     pytest.importorskip("PySide6")
     from PySide6.QtWidgets import QApplication
