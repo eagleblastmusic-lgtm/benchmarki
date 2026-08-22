@@ -186,7 +186,10 @@ class ProjectExecutionCoordinator:
         if head != "unknown" and _HEAD_RE.fullmatch(head) is None:
             _fail("repo_head_invalid", "expected_repo_head_before is not a Git object identity")
         suffix = uuid.uuid4().hex
-        return ProjectExecutionBinding(f"binding-{suffix}", project.project_id, plan.plan_version, task.task_id, launch_id or f"launch-{suffix}", correlation_id or f"corr-{suffix}", command_id or f"command-{suffix}", project.repo_alias, head, _utc_now())
+        # The Browser/Native launch contract requires launch_id to be a UUID.
+        # Keep the vNext binding/correlation/command identifiers namespaced as
+        # before, but generate a browser-compatible launch identity by default.
+        return ProjectExecutionBinding(f"binding-{suffix}", project.project_id, plan.plan_version, task.task_id, launch_id or str(uuid.uuid4()), correlation_id or f"corr-{suffix}", command_id or f"command-{suffix}", project.repo_alias, head, _utc_now())
 
     def persist_binding(self, binding: ProjectExecutionBinding) -> ProjectExecutionBinding:
         _identifier(binding.project_id, "project_id")
