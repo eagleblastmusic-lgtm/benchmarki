@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QInputDialog,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -151,14 +152,14 @@ class ProjectCenterWindow(QMainWindow):
         page = QWidget(); layout = QVBoxLayout(page); layout.addWidget(QLabel("Moje projekty")); self._project_table = QTableWidget(0, 5); self._project_table.setObjectName("ProjectCatalogTable"); self._project_table.setHorizontalHeaderLabels(("Nazwa", "Status", "Postęp", "Etap", "Zadanie")); self._project_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); self._project_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); self._project_table.itemSelectionChanged.connect(self._select_project_row); layout.addWidget(self._project_table, 1); return page
 
     def _make_current_page(self) -> QWidget:
-        page = QWidget(); layout = QVBoxLayout(page); self._project_title = QLabel("Wybierz projekt"); self._project_title.setObjectName("CurrentProjectTitle"); layout.addWidget(self._project_title); self._project_progress = QLabel("Plan nie został zaimportowany."); self._project_progress.setObjectName("CurrentProjectProgress"); layout.addWidget(self._project_progress)
+        page = QWidget(); layout = QVBoxLayout(page); self._project_title = QLabel("Wybierz projekt"); self._project_title.setObjectName("CurrentProjectTitle"); layout.addWidget(self._project_title); self._project_progress = QLabel("Plan nie został zaimportowany."); self._project_progress.setObjectName("CurrentProjectProgress"); layout.addWidget(self._project_progress); self._execution_status = QLabel("Wykonanie: brak aktywnej próby"); self._execution_status.setObjectName("ProjectExecutionStatus"); self._execution_status.setWordWrap(True); layout.addWidget(self._execution_status)
         self._project_detail = QTextEdit(); self._project_detail.setReadOnly(True); self._project_detail.setObjectName("CurrentProjectDetail"); layout.addWidget(self._project_detail, 1)
         self._memory_tabs = QTabWidget(); self._memory_tabs.setObjectName("ProjectMemoryTabs")
         for name, object_name in (("Plan", "ProjectPlanView"), ("Historia", "ProjectHistoryView"), ("Decyzje / Inbox", "ProjectDecisionsInboxView"), ("Ryzyka / dług / checkpointy", "ProjectRisksDebtCheckpointsView")):
             view = QTextEdit(); view.setReadOnly(True); view.setObjectName(object_name); self._memory_tabs.addTab(view, name)
         layout.addWidget(self._memory_tabs, 1)
-        actions = QHBoxLayout(); self._import_plan_button = QPushButton("Wczytaj plan"); self._import_plan_button.setObjectName("ImportPlanButton"); self._import_plan_button.clicked.connect(self._import_plan); self._start_button = QPushButton("Rozpocznij w ChatGPT"); self._start_button.setObjectName("StartProjectButton"); self._start_button.clicked.connect(lambda: self._queue_prompt("start")); self._continue_button = QPushButton("Kontynuuj w ChatGPT"); self._continue_button.setObjectName("ContinueProjectButton"); self._continue_button.clicked.connect(lambda: self._queue_prompt("continue")); self._plan_prompt_button = QPushButton("Wstaw prompt planu"); self._plan_prompt_button.setObjectName("PlanPromptButton"); self._plan_prompt_button.clicked.connect(lambda: self._queue_prompt("plan")); self._handoff_mode = QComboBox(); self._handoff_mode.setObjectName("ProjectHandoffMode"); self._handoff_mode.addItems(HANDOFF_MODES); self._handoff_button = QPushButton("Nowa rozmowa / Handoff"); self._handoff_button.setObjectName("ProjectHandoffButton"); self._handoff_button.clicked.connect(self._queue_handoff)
-        for button in (self._import_plan_button, self._plan_prompt_button, self._start_button, self._continue_button, self._handoff_mode, self._handoff_button): actions.addWidget(button)
+        actions = QHBoxLayout(); self._import_plan_button = QPushButton("Wczytaj plan"); self._import_plan_button.setObjectName("ImportPlanButton"); self._import_plan_button.clicked.connect(self._import_plan); self._start_button = QPushButton("Rozpocznij w ChatGPT"); self._start_button.setObjectName("StartProjectButton"); self._start_button.clicked.connect(lambda: self._queue_prompt("start")); self._continue_button = QPushButton("Kontynuuj w ChatGPT"); self._continue_button.setObjectName("ContinueProjectButton"); self._continue_button.clicked.connect(lambda: self._queue_prompt("continue")); self._plan_prompt_button = QPushButton("Wstaw prompt planu"); self._plan_prompt_button.setObjectName("PlanPromptButton"); self._plan_prompt_button.clicked.connect(lambda: self._queue_prompt("plan")); self._handoff_mode = QComboBox(); self._handoff_mode.setObjectName("ProjectHandoffMode"); self._handoff_mode.addItems(HANDOFF_MODES); self._handoff_button = QPushButton("Nowa rozmowa / Handoff"); self._handoff_button.setObjectName("ProjectHandoffButton"); self._handoff_button.clicked.connect(self._queue_handoff); self._approve_review_button = QPushButton("Zatwierdź review"); self._approve_review_button.setObjectName("ApproveProjectReviewButton"); self._approve_review_button.clicked.connect(self._approve_review); self._changes_review_button = QPushButton("Wymaga poprawki"); self._changes_review_button.setObjectName("RequestProjectChangesButton"); self._changes_review_button.clicked.connect(self._request_changes); self._project_review_button = QPushButton("Przegląd projektu"); self._project_review_button.setObjectName("ProjectReviewButton"); self._project_review_button.clicked.connect(self._request_project_review)
+        for button in (self._import_plan_button, self._plan_prompt_button, self._start_button, self._continue_button, self._handoff_mode, self._handoff_button, self._approve_review_button, self._changes_review_button, self._project_review_button): actions.addWidget(button)
         actions.addStretch(1); layout.addLayout(actions); self._set_project_action_state(); return page
 
     def _make_advanced_page(self) -> QWidget:
@@ -201,8 +202,8 @@ class ProjectCenterWindow(QMainWindow):
     def _select_project(self, project_id: str | None) -> None:
         self._current_project_id = project_id; project = next((item for item in self._projects if item.project_id == project_id), None)
         if project is None:
-            self._project_title.setText("Wybierz projekt"); self._project_progress.setText("Nie zaimportowano planu projektu."); self._project_detail.setPlainText("{}" if not self._projects else "Wybierz projekt z listy."); self._render_memory(None); self._set_project_action_state(); return
-        self._project_title.setText(project.display_name); self._project_progress.setText(f"Postęp: {project.completed_tasks}/{project.total_tasks}" if project.plan_imported else "Nie zaimportowano planu projektu."); self._project_detail.setPlainText(json.dumps(project.to_dict(), ensure_ascii=False, sort_keys=True, indent=2)); self._render_memory(project); self._set_project_action_state()
+            self._project_title.setText("Wybierz projekt"); self._project_progress.setText("Nie zaimportowano planu projektu."); self._project_detail.setPlainText("{}" if not self._projects else "Wybierz projekt z listy."); self._render_memory(None); self._render_execution(None); self._set_project_action_state(); return
+        self._project_title.setText(project.display_name); self._project_progress.setText(f"Postęp: {project.completed_tasks}/{project.total_tasks}" if project.plan_imported else "Nie zaimportowano planu projektu."); self._project_detail.setPlainText(json.dumps(project.to_dict(), ensure_ascii=False, sort_keys=True, indent=2)); self._render_memory(project); self._render_execution(project); self._set_project_action_state()
 
     def _set_project_action_state(self) -> None:
         project = next((item for item in self._projects if item.project_id == self._current_project_id), None)
@@ -210,6 +211,67 @@ class ProjectCenterWindow(QMainWindow):
         self._import_plan_button.setEnabled(has_project); self._import_plan_button.setText("Wczytaj aktualizację planu" if has_plan else "Wczytaj plan"); self._plan_prompt_button.setEnabled(has_project); self._start_button.setEnabled(has_plan); self._continue_button.setEnabled(has_plan); self._handoff_mode.setEnabled(has_project); self._handoff_button.setEnabled(has_project)
         self._start_button.setToolTip("Wymagany import bdb-project-plan-v1" if not has_plan else "Wstaw bounded prompt do pustego composera ChatGPT")
         self._continue_button.setToolTip(self._start_button.toolTip())
+        review = False
+        if has_project:
+            try:
+                review = self._workflow.execution.snapshot(project.project_id).get("task_statuses", {}).get(project.current_task or "") == "review"
+            except Exception:
+                review = False
+        self._approve_review_button.setEnabled(review); self._changes_review_button.setEnabled(review); self._project_review_button.setEnabled(has_project)
+
+    def _render_execution(self, project: ProjectRecord | None) -> None:
+        if project is None:
+            self._execution_status.setText("Wykonanie: brak aktywnej próby")
+            return
+        try:
+            snapshot = self._workflow.execution.snapshot(project.project_id)
+            statuses = snapshot.get("task_statuses", {})
+            attempts = snapshot.get("attempts", [])
+            last = attempts[-1] if attempts else None
+            current = snapshot.get("current_task_id") or project.current_task or "brak"
+            if last and last.get("result_status") == "REVIEW_REQUIRED":
+                text = f"Wykonanie: {current} — Gotowe do przeglądu\nAcceptance: REVIEW_REQUIRED\nAttempt: {last.get('attempt_id')}"
+            elif last and last.get("result_status") == "FAIL":
+                text = f"Wykonanie: {current} — Wymaga poprawki\n{last.get('failure_code') or 'validation failed'}"
+            elif statuses and all(value in {"completed", "skipped"} for value in statuses.values()) and project.total_tasks:
+                text = "Wykonanie: zakończone\nAcceptance: PASS"
+            else:
+                text = f"Wykonanie: {current} — {statuses.get(current, 'pending')}"
+            self._execution_status.setText(text)
+        except Exception as exc:
+            self._execution_status.setText(f"Wykonanie: stan niedostępny ({getattr(exc, 'code', 'unavailable')})")
+
+    def _approve_review(self) -> None:
+        if self._current_project_id is None: return
+        project = next((item for item in self._projects if item.project_id == self._current_project_id), None)
+        if project is None or not project.current_task: return
+        reason, accepted = QInputDialog.getText(self, "Zatwierdź review", "Uzasadnienie:")
+        if not accepted: return
+        try:
+            self._workflow.execution.approve_review(project.project_id, project.current_task, reason=reason or "approved by user")
+        except Exception as exc:
+            self._status.setText(f"BDB: review zatrzymany — {getattr(exc, 'code', 'review_failed')}"); return
+        self.start_bootstrap(); self._select_project(project.project_id)
+
+    def _request_changes(self) -> None:
+        if self._current_project_id is None: return
+        project = next((item for item in self._projects if item.project_id == self._current_project_id), None)
+        if project is None or not project.current_task: return
+        reason, accepted = QInputDialog.getText(self, "Wymaga poprawki", "Co należy poprawić?")
+        if not accepted: return
+        try:
+            self._workflow.execution.request_changes(project.project_id, project.current_task, reason=reason or "changes requested")
+        except Exception as exc:
+            self._status.setText(f"BDB: poprawka zatrzymana — {getattr(exc, 'code', 'review_failed')}"); return
+        self.start_bootstrap(); self._select_project(project.project_id)
+
+    def _request_project_review(self) -> None:
+        if self._current_project_id is None: return
+        try:
+            self._workflow.execution.request_project_review(self._current_project_id)
+        except Exception as exc:
+            self._status.setText(f"BDB: review projektu zatrzymany — {getattr(exc, 'code', 'review_failed')}"); return
+        self._status.setText("BDB: przegląd projektu zapisany w Project Memory")
 
     def _render_memory(self, project: ProjectRecord | None) -> None:
         views = [self._memory_tabs.widget(index) for index in range(self._memory_tabs.count())]
@@ -307,7 +369,13 @@ class ProjectCenterWindow(QMainWindow):
             except (ProjectMemoryError, ProjectWorkflowError):
                 health = "UNAVAILABLE"
                 next_action = "UNAVAILABLE"
-        return {"window_object_name": self.objectName(), "window_constructed": True, "read_only_startup": True, "bootstrap_completed": self._bootstrap_completed, "bootstrap_ok": self._bootstrap_ok, "bootstrap_error_code": self._bootstrap_error_code, "semantic_source": "bdb_vnext.control_center_query", "project_catalog_source": "bdb_vnext.project_catalog", "project_memory_source": "bdb_vnext.project_memory", "legacy_fallback": False, "page_names": list(PROJECT_PAGE_NAMES), "page_count": self._pages.count(), "project_count": len(self._projects), "work_count": len(snapshot.works) if snapshot is not None else 0, "current_project_id": self._current_project_id, "auto_send": False, "send_operations_invoked": 0, "mutation_operations_invoked": self._mutation_operations_invoked, "advanced_available": True, "snapshot_source": "bdb_vnext.control_center_query", "status_vector": status_vector, "health": health, "next_action": next_action, "pending_plan_update": self._pending_plan_preview is not None, "actions_enabled": False, "auto_resume_invoked": False}
+        execution = None
+        if project is not None:
+            try:
+                execution = self._workflow.execution.snapshot(project.project_id)
+            except Exception:
+                execution = {"status": "UNAVAILABLE"}
+        return {"window_object_name": self.objectName(), "window_constructed": True, "read_only_startup": True, "bootstrap_completed": self._bootstrap_completed, "bootstrap_ok": self._bootstrap_ok, "bootstrap_error_code": self._bootstrap_error_code, "semantic_source": "bdb_vnext.control_center_query", "project_catalog_source": "bdb_vnext.project_catalog", "project_memory_source": "bdb_vnext.project_memory", "project_execution_source": "bdb_vnext.project_execution", "legacy_fallback": False, "page_names": list(PROJECT_PAGE_NAMES), "page_count": self._pages.count(), "project_count": len(self._projects), "work_count": len(snapshot.works) if snapshot is not None else 0, "current_project_id": self._current_project_id, "auto_send": False, "send_operations_invoked": 0, "mutation_operations_invoked": self._mutation_operations_invoked, "advanced_available": True, "snapshot_source": "bdb_vnext.control_center_query", "status_vector": status_vector, "health": health, "next_action": next_action, "execution": execution, "pending_plan_update": self._pending_plan_preview is not None, "actions_enabled": False, "auto_resume_invoked": False}
 
 
 __all__ = ["PROJECT_PAGE_NAMES", "ProjectCenterWindow", "slugify_project_alias", "validate_wizard_payload"]
