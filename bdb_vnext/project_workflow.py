@@ -19,6 +19,7 @@ from .project_catalog import PROJECT_PLAN_MAX_BYTES, ProjectBrief, ProjectCatalo
 from .project_launch import ProjectLaunch, ProjectLaunchQueueAdapter, ProjectLaunchQueueError
 from .project_memory import HANDOFF_MODES, PlanUpdatePreview, ProjectMemoryState, ProjectMemoryStore, available_project_tasks, build_handoff_prompt
 from .project_execution import ProjectExecutionBinding, ProjectExecutionCoordinator, ProjectExecutionError
+from .work_planning import WorkPlanningPrompt, WorkPlanningPromptBuilder, WorkPlanningPromptError
 
 
 _ALIAS_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
@@ -117,7 +118,7 @@ def build_plan_prompt(project: ProjectRecord) -> str:
         "Zapoznaj się z poniższym bounded project briefem.",
         "Nie implementuj jeszcze kodu.",
         "Przeanalizuj projekt, wskaż brakujące decyzje i zaprojektuj architekturę.",
-        "Następnie przygotuj szczegółowy prompt dla ChatGPT Work, który utworzy Project Plan w formacie bdb-project-plan-v1.",
+        "Przygotuj merytoryczną, bounded planning directive dla Work: co należy zaplanować, poprawić i zachować. Nie twórz jeszcze project-plan.json ani kolejnego promptu.",
         "",
         f"Projekt: {project.display_name}",
         f"Project ID: {project.project_id}",
@@ -204,12 +205,13 @@ def _build_execution_prompt(project: ProjectRecord, heading: str, *, plan: Proje
 class ProjectWorkflow:
     """Canonical catalog workflow used by the project-centric GUI."""
 
-    def __init__(self, runtime_root: str | Path, *, catalog: ProjectCatalog | None = None, command_runner: CommandRunner | None = None, github: GitHubRepositoryAdapter | None = None, queue: ProjectLaunchQueueAdapter | None = None) -> None:
+    def __init__(self, runtime_root: str | Path, *, catalog: ProjectCatalog | None = None, command_runner: CommandRunner | None = None, github: GitHubRepositoryAdapter | None = None, queue: ProjectLaunchQueueAdapter | None = None, work_planning_builder: WorkPlanningPromptBuilder | None = None) -> None:
         self.catalog = catalog or ProjectCatalog(runtime_root)
         self.runner = command_runner or SubprocessCommandRunner()
         self.github = github or GhRepositoryAdapter(self.runner)
         self.queue = queue or ProjectLaunchQueueAdapter()
         self.execution = ProjectExecutionCoordinator(self.catalog.runtime_root, catalog=self.catalog)
+        self.work_planning_builder = work_planning_builder or WorkPlanningPromptBuilder()
 
     def register_existing(self, *, display_name: str, repo_alias: str, local_repo_path: str | Path, brief: ProjectBrief, github_repo: str | None = None) -> ProjectRecord:
         source = Path(local_repo_path).expanduser().absolute()
@@ -276,6 +278,28 @@ class ProjectWorkflow:
         if self.catalog.get(project_id) is None:
             raise ProjectWorkflowError("project_not_found", "project is not in the canonical catalog")
         return ProjectMemoryStore(self.catalog.runtime_root, project_id)
+
+    def work_planning_state(self, project_id: str) -> dict[str, str | None]:
+        project = self.catalog.get(project_id)
+        if project is None:
+            raise ProjectWorkflowError("project_not_found", "project is not in the canonical catalog")
+        current = self.memory(project_id).current_plan() if project.plan_imported else None
+        if project.plan_imported and current is None:
+            raise ProjectWorkflowError("planning_current_plan_unavailable", "active project plan could not be read from Project Memory")
+        expected, supersedes = self.work_planning_builder.expected_versions(current)
+        return {"mode": self.work_planning_builder.mode_for(current), "current_plan_version": current.plan_version if current else None, "expected_plan_version": expected, "supersedes_version": supersedes}
+
+    def build_work_prompt(self, project_id: str, planning_directive: str) -> WorkPlanningPrompt:
+        project = self.catalog.get(project_id)
+        if project is None:
+            raise ProjectWorkflowError("project_not_found", "project is not in the canonical catalog")
+        current = self.memory(project_id).current_plan() if project.plan_imported else None
+        if project.plan_imported and current is None:
+            raise ProjectWorkflowError("planning_current_plan_unavailable", "active project plan could not be read from Project Memory")
+        try:
+            return self.work_planning_builder.build(mode=self.work_planning_builder.mode_for(current), project=project, brief=project.brief, current_plan=current, planning_directive=planning_directive)
+        except WorkPlanningPromptError as exc:
+            raise ProjectWorkflowError(exc.code, str(exc)) from exc
 
     def read_memory(self, project_id: str) -> ProjectMemoryState:
         return self.memory(project_id).read_state()
@@ -415,6 +439,9 @@ __all__ = [
     "ProjectWorkflow",
     "ProjectWorkflowError",
     "SubprocessCommandRunner",
+    "WorkPlanningPrompt",
+    "WorkPlanningPromptBuilder",
+    "WorkPlanningPromptError",
     "HANDOFF_MODES",
     "brief_markdown",
     "build_continue_prompt",

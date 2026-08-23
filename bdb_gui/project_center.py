@@ -14,6 +14,7 @@ from typing import Any, Callable
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -105,6 +106,76 @@ class _NewProjectDialog(QDialog):
         self.accept()
 
 
+class _WorkPlanningDialog(QDialog):
+    def __init__(self, *, project: ProjectRecord, state: dict[str, str | None], build_prompt: Callable[[str], Any], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Przygotuj prompt dla Work")
+        self.setObjectName("WorkPlanningPromptDialog")
+        self.resize(900, 700)
+        self._build_prompt = build_prompt
+        layout = QVBoxLayout(self)
+        heading = QLabel(f"Projekt: {project.display_name} ({project.project_id})")
+        heading.setObjectName("WorkPlanningProjectIdentity")
+        heading.setWordWrap(True)
+        layout.addWidget(heading)
+        mode = str(state.get("mode") or "UNKNOWN")
+        version = str(state.get("expected_plan_version") or "UNKNOWN")
+        current = state.get("current_plan_version") or "brak"
+        self._mode = QLabel(f"Tryb: {mode} · bieżąca wersja: {current} · następna wersja: {version}")
+        self._mode.setObjectName("WorkPlanningMode")
+        self._mode.setWordWrap(True)
+        layout.addWidget(self._mode)
+        layout.addWidget(QLabel("Wklej odpowiedź z ChatGPT (planning directive):"))
+        self._directive = QTextEdit()
+        self._directive.setObjectName("ChatGPTPlanningDirectiveInput")
+        self._directive.setPlaceholderText("Wklej tutaj dokładną odpowiedź zwykłego ChatGPT…")
+        layout.addWidget(self._directive, 1)
+        actions = QHBoxLayout()
+        self._generate = QPushButton("Generuj prompt dla Work")
+        self._generate.setObjectName("GenerateWorkPromptButton")
+        self._generate.clicked.connect(self._generate_prompt)
+        actions.addWidget(self._generate)
+        self._copy = QPushButton("Kopiuj prompt dla Work")
+        self._copy.setObjectName("CopyWorkPromptButton")
+        self._copy.setEnabled(False)
+        self._copy.clicked.connect(self._copy_prompt)
+        actions.addWidget(self._copy)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+        self._validation = QLabel("")
+        self._validation.setObjectName("WorkPlanningValidation")
+        self._validation.setWordWrap(True)
+        layout.addWidget(self._validation)
+        self._preview = QTextEdit()
+        self._preview.setObjectName("WorkPromptPreview")
+        self._preview.setReadOnly(True)
+        self._preview.setPlaceholderText("Podgląd pojawi się po wygenerowaniu promptu.")
+        layout.addWidget(self._preview, 2)
+        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close.rejected.connect(self.reject)
+        layout.addWidget(close)
+
+    def _generate_prompt(self) -> None:
+        try:
+            result = self._build_prompt(self._directive.toPlainText())
+        except ProjectWorkflowError as exc:
+            self._copy.setEnabled(False)
+            self._preview.clear()
+            self._validation.setText(f"Nie można przygotować promptu: {exc.code} — {exc}")
+            return
+        self._preview.setPlainText(result.prompt)
+        self._copy.setEnabled(True)
+        self._validation.setText(f"Wygenerowano prompt dla Work · {result.mode} · schema {result.schema_digest}")
+
+    def _copy_prompt(self) -> None:
+        value = self._preview.toPlainText()
+        if not value:
+            self._validation.setText("Najpierw wygeneruj prompt dla Work.")
+            return
+        QApplication.clipboard().setText(value)
+        self._validation.setText("Prompt skopiowano do schowka. BDB niczego nie wysyła.")
+
+
 class ProjectCenterWindow(QMainWindow):
     dashboard_ready = Signal()
 
@@ -158,8 +229,8 @@ class ProjectCenterWindow(QMainWindow):
         for name, object_name in (("Plan", "ProjectPlanView"), ("Historia", "ProjectHistoryView"), ("Decyzje / Inbox", "ProjectDecisionsInboxView"), ("Ryzyka / dług / checkpointy", "ProjectRisksDebtCheckpointsView")):
             view = QTextEdit(); view.setReadOnly(True); view.setObjectName(object_name); self._memory_tabs.addTab(view, name)
         layout.addWidget(self._memory_tabs, 1)
-        actions = QHBoxLayout(); self._import_plan_button = QPushButton("Wczytaj plan"); self._import_plan_button.setObjectName("ImportPlanButton"); self._import_plan_button.clicked.connect(self._import_plan); self._start_button = QPushButton("Rozpocznij w ChatGPT"); self._start_button.setObjectName("StartProjectButton"); self._start_button.clicked.connect(lambda: self._queue_prompt("start")); self._continue_button = QPushButton("Kontynuuj w ChatGPT"); self._continue_button.setObjectName("ContinueProjectButton"); self._continue_button.clicked.connect(lambda: self._queue_prompt("continue")); self._plan_prompt_button = QPushButton("Wstaw prompt planu"); self._plan_prompt_button.setObjectName("PlanPromptButton"); self._plan_prompt_button.clicked.connect(lambda: self._queue_prompt("plan")); self._handoff_mode = QComboBox(); self._handoff_mode.setObjectName("ProjectHandoffMode"); self._handoff_mode.addItems(HANDOFF_MODES); self._handoff_button = QPushButton("Nowa rozmowa / Handoff"); self._handoff_button.setObjectName("ProjectHandoffButton"); self._handoff_button.clicked.connect(self._queue_handoff); self._approve_review_button = QPushButton("Zatwierdź review"); self._approve_review_button.setObjectName("ApproveProjectReviewButton"); self._approve_review_button.clicked.connect(self._approve_review); self._changes_review_button = QPushButton("Wymaga poprawki"); self._changes_review_button.setObjectName("RequestProjectChangesButton"); self._changes_review_button.clicked.connect(self._request_changes); self._project_review_button = QPushButton("Przegląd projektu"); self._project_review_button.setObjectName("ProjectReviewButton"); self._project_review_button.clicked.connect(self._request_project_review)
-        for button in (self._import_plan_button, self._plan_prompt_button, self._start_button, self._continue_button, self._handoff_mode, self._handoff_button, self._approve_review_button, self._changes_review_button, self._project_review_button): actions.addWidget(button)
+        actions = QHBoxLayout(); self._import_plan_button = QPushButton("Wczytaj plan"); self._import_plan_button.setObjectName("ImportPlanButton"); self._import_plan_button.clicked.connect(self._import_plan); self._plan_prompt_button = QPushButton("Wstaw prompt planu"); self._plan_prompt_button.setObjectName("PlanPromptButton"); self._plan_prompt_button.clicked.connect(lambda: self._queue_prompt("plan")); self._work_prompt_button = QPushButton("Przygotuj dla Work"); self._work_prompt_button.setObjectName("WorkPromptButton"); self._work_prompt_button.clicked.connect(self._prepare_for_work); self._start_button = QPushButton("Rozpocznij w ChatGPT"); self._start_button.setObjectName("StartProjectButton"); self._start_button.clicked.connect(lambda: self._queue_prompt("start")); self._continue_button = QPushButton("Kontynuuj w ChatGPT"); self._continue_button.setObjectName("ContinueProjectButton"); self._continue_button.clicked.connect(lambda: self._queue_prompt("continue")); self._handoff_mode = QComboBox(); self._handoff_mode.setObjectName("ProjectHandoffMode"); self._handoff_mode.addItems(HANDOFF_MODES); self._handoff_button = QPushButton("Nowa rozmowa / Handoff"); self._handoff_button.setObjectName("ProjectHandoffButton"); self._handoff_button.clicked.connect(self._queue_handoff); self._approve_review_button = QPushButton("Zatwierdź review"); self._approve_review_button.setObjectName("ApproveProjectReviewButton"); self._approve_review_button.clicked.connect(self._approve_review); self._changes_review_button = QPushButton("Wymaga poprawki"); self._changes_review_button.setObjectName("RequestProjectChangesButton"); self._changes_review_button.clicked.connect(self._request_changes); self._project_review_button = QPushButton("Przegląd projektu"); self._project_review_button.setObjectName("ProjectReviewButton"); self._project_review_button.clicked.connect(self._request_project_review)
+        for button in (self._import_plan_button, self._plan_prompt_button, self._work_prompt_button, self._start_button, self._continue_button, self._handoff_mode, self._handoff_button, self._approve_review_button, self._changes_review_button, self._project_review_button): actions.addWidget(button)
         actions.addStretch(1); layout.addLayout(actions); self._set_project_action_state(); return page
 
     def _make_advanced_page(self) -> QWidget:
@@ -208,7 +279,7 @@ class ProjectCenterWindow(QMainWindow):
     def _set_project_action_state(self) -> None:
         project = next((item for item in self._projects if item.project_id == self._current_project_id), None)
         has_project = project is not None; has_plan = bool(project and project.plan_imported)
-        self._import_plan_button.setEnabled(has_project); self._import_plan_button.setText("Wczytaj aktualizację planu" if has_plan else "Wczytaj plan"); self._plan_prompt_button.setEnabled(has_project); self._start_button.setEnabled(has_plan); self._continue_button.setEnabled(has_plan); self._handoff_mode.setEnabled(has_project); self._handoff_button.setEnabled(has_project)
+        self._import_plan_button.setEnabled(has_project); self._import_plan_button.setText("Wczytaj aktualizację planu" if has_plan else "Wczytaj plan"); self._plan_prompt_button.setEnabled(has_project); self._work_prompt_button.setEnabled(has_project); self._start_button.setEnabled(has_plan); self._continue_button.setEnabled(has_plan); self._handoff_mode.setEnabled(has_project); self._handoff_button.setEnabled(has_project)
         self._start_button.setToolTip("Wymagany import bdb-project-plan-v1" if not has_plan else "Wstaw bounded prompt do pustego composera ChatGPT")
         self._continue_button.setToolTip(self._start_button.toolTip())
         review = False
@@ -302,6 +373,20 @@ class ProjectCenterWindow(QMainWindow):
             self._status.setText(f"BDB: handoff zatrzymany — {exc.code}"); return
         self._status.setText(f"BDB: handoff oczekuje w ChatGPT ({launch.launch_id}); Send pozostaje ręczny")
         self._projects = self._catalog.read(); self._render_catalog(self._projects)
+
+    def _prepare_for_work(self) -> None:
+        if self._current_project_id is None:
+            return
+        project = next((item for item in self._projects if item.project_id == self._current_project_id), None)
+        if project is None:
+            return
+        try:
+            state = self._workflow.work_planning_state(project.project_id)
+        except ProjectWorkflowError as exc:
+            self._status.setText(f"BDB: prompt dla Work zatrzymany — {exc.code}")
+            return
+        dialog = _WorkPlanningDialog(project=project, state=state, build_prompt=lambda directive: self._workflow.build_work_prompt(project.project_id, directive), parent=self)
+        dialog.exec()
 
     def _new_project(self) -> None:
         dialog = _NewProjectDialog(self)

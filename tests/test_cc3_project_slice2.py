@@ -108,6 +108,8 @@ def test_prompts_are_bounded_and_exclude_absolute_local_path() -> None:
     continue_prompt = build_continue_prompt(record)
     assert "C:/private-user-repo" not in plan_prompt
     assert "project-demo-1" in plan_prompt
+    assert "planning directive" in plan_prompt
+    assert "prompt dla ChatGPT Work" not in plan_prompt
     assert "Plan version: 1.0" in continue_prompt
     assert "Postęp: 2/4" in continue_prompt
     assert "Send" not in continue_prompt

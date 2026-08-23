@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-project-plan-v1",
+  "title": "BDB vNext Project Plan v1",
+  "description": "Formal structural contract for the BDB vNext project plan. Status and current_task_id describe the imported baseline; Project Memory / Journal remains the runtime execution authority. Identity, dependency, current-task and rich-reference checks remain semantic validation in BDB. planning_context is an additive bounded extension.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "project_id", "project_name", "plan_version", "milestones", "tasks"],
+  "properties": {
+    "schema": {"const": "bdb-project-plan-v1"},
+    "project_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$"},
+    "project_name": {"type": "string", "minLength": 1, "maxLength": 200},
+    "plan_version": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "string", "pattern": "^\\d+(?:\\.0+)?$"}]},
+    "supersedes_version": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "string", "pattern": "^\\d+(?:\\.0+)?$"}]},
+    "created_at": {"type": "string", "minLength": 2, "maxLength": 64, "pattern": "Z$"},
+    "revision_reason": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "revision_summary": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "milestones": {"type": "array", "maxItems": 512, "items": {"$ref": "#/$defs/milestone"}},
+    "tasks": {"type": "array", "maxItems": 2048, "items": {"$ref": "#/$defs/task"}},
+    "current_task_id": {"oneOf": [{"type": "null"}, {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$"}]},
+    "planning_context": {"$ref": "#/$defs/planningContext"}
+  },
+  "$defs": {
+    "status": {"type": "string", "enum": ["pending", "active", "review", "completed", "blocked", "skipped"], "description": "Imported plan baseline status; runtime execution status is owned by Project Memory / Journal."},
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$"},
+    "textList64": {"type": "array", "maxItems": 64, "items": {"type": "string", "minLength": 1, "maxLength": 8000}},
+    "textList128": {"type": "array", "maxItems": 128, "items": {"type": "string", "minLength": 1, "maxLength": 2000}},
+    "idList64": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+    "milestone": {
+      "type": "object", "additionalProperties": false, "required": ["id", "title", "description"],
+      "properties": {"id": {"$ref": "#/$defs/id"}, "title": {"type": "string", "minLength": 1, "maxLength": 300}, "description": {"type": "string", "minLength": 1, "maxLength": 4000}, "status": {"$ref": "#/$defs/status"}}
+    },
+    "task": {
+      "type": "object", "additionalProperties": false, "required": ["id", "milestone_id", "title", "description"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"}, "milestone_id": {"$ref": "#/$defs/id"}, "title": {"type": "string", "minLength": 1, "maxLength": 300}, "description": {"type": "string", "minLength": 1, "maxLength": 4000}, "status": {"$ref": "#/$defs/status"}, "dependencies": {"$ref": "#/$defs/idList64"}, "acceptance_criteria": {"$ref": "#/$defs/textList64"}, "deliverables": {"$ref": "#/$defs/textList64"}, "verification": {"$ref": "#/$defs/textList64"}, "tests": {"$ref": "#/$defs/textList64"}, "decision_ids": {"$ref": "#/$defs/idList64"}, "specification_ids": {"$ref": "#/$defs/idList64"}, "risk_ids": {"$ref": "#/$defs/idList64"}
+      }
+    },
+    "requirements": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"functional": {"$ref": "#/$defs/textList128"}, "quality": {"$ref": "#/$defs/textList128"}}
+    },
+    "scope": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"in_scope": {"$ref": "#/$defs/textList128"}, "out_of_scope": {"$ref": "#/$defs/textList128"}}
+    },
+    "decision": {
+      "type": "object", "additionalProperties": false, "required": ["id", "title", "decision"],
+      "properties": {"id": {"$ref": "#/$defs/id"}, "title": {"type": "string", "minLength": 1, "maxLength": 4000}, "decision": {"type": "string", "minLength": 1, "maxLength": 4000}, "rationale": {"type": "string", "minLength": 1, "maxLength": 4000}, "classification": {"type": "string", "enum": ["architectural_decision", "product_decision", "scope_decision", "design_decision", "architecture_requirement", "recommended_default", "domain_contract", "interaction_decision", "other"]}}
+    },
+    "openQuestion": {
+      "type": "object", "additionalProperties": false, "required": ["id", "question"],
+      "properties": {"id": {"$ref": "#/$defs/id"}, "question": {"type": "string", "minLength": 1, "maxLength": 4000}, "recommended_default": {"type": "string", "minLength": 1, "maxLength": 4000}, "owner": {"type": "string", "minLength": 1, "maxLength": 4000}, "deadline": {"type": "string", "minLength": 1, "maxLength": 4000}, "blocking_effect": {"type": "string", "minLength": 1, "maxLength": 4000}}
+    },
+    "specification": {
+      "type": "object", "additionalProperties": false, "required": ["id", "category", "title", "body"],
+      "properties": {"id": {"$ref": "#/$defs/id"}, "category": {"type": "string", "enum": ["domain", "data", "ui", "ux", "validation", "accessibility", "performance", "security", "testing", "release", "operations", "other"]}, "title": {"type": "string", "minLength": 1, "maxLength": 4000}, "body": {"type": "string", "minLength": 1, "maxLength": 4000}}
+    },
+    "architectureItem": {
+      "type": "object", "additionalProperties": false, "required": ["id", "name", "responsibility"],
+      "properties": {"id": {"$ref": "#/$defs/id"}, "name": {"type": "string", "minLength": 1, "maxLength": 4000}, "responsibility": {"type": "string", "minLength": 1, "maxLength": 4000}, "interfaces": {"$ref": "#/$defs/textList64"}}
+    },
+    "architecture": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"summary": {"type": "string", "minLength": 1, "maxLength": 8000}, "components": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/architectureItem"}}, "interfaces": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/architectureItem"}}, "patterns": {"$ref": "#/$defs/textList128"}}
+    },
+    "testStrategy": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"unit": {"$ref": "#/$defs/textList128"}, "integration": {"$ref": "#/$defs/textList128"}, "e2e": {"$ref": "#/$defs/textList128"}, "manual": {"$ref": "#/$defs/textList128"}, "automation": {"$ref": "#/$defs/textList128"}}
+    },
+    "risk": {
+      "type": "object", "additionalProperties": false, "required": ["id", "title", "description", "severity", "mitigation"],
+      "properties": {"id": {"$ref": "#/$defs/id"}, "title": {"type": "string", "minLength": 1, "maxLength": 4000}, "description": {"type": "string", "minLength": 1, "maxLength": 4000}, "severity": {"type": "string", "minLength": 1, "maxLength": 32}, "mitigation": {"type": "string", "minLength": 1, "maxLength": 4000}}
+    },
+    "gate": {
+      "type": "object", "additionalProperties": false, "required": ["id", "title", "criteria"],
+      "properties": {"id": {"$ref": "#/$defs/id"}, "title": {"type": "string", "minLength": 1, "maxLength": 4000}, "criteria": {"type": "string", "minLength": 1, "maxLength": 4000}}
+    },
+    "acceptanceScenario": {
+      "type": "object", "additionalProperties": false, "required": ["id", "title", "given", "when", "then"],
+      "properties": {"id": {"$ref": "#/$defs/id"}, "title": {"type": "string", "minLength": 1, "maxLength": 4000}, "given": {"type": "string", "minLength": 1, "maxLength": 4000}, "when": {"type": "string", "minLength": 1, "maxLength": 4000}, "then": {"type": "string", "minLength": 1, "maxLength": 4000}}
+    },
+    "planningContext": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "objective": {"type": "string", "minLength": 1, "maxLength": 8000},
+        "requirements": {"$ref": "#/$defs/requirements"},
+        "scope": {"$ref": "#/$defs/scope"},
+        "assumptions": {"$ref": "#/$defs/textList128"},
+        "decisions": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/decision"}},
+        "open_questions": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/openQuestion"}},
+        "specifications": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/specification"}},
+        "architecture": {"$ref": "#/$defs/architecture"},
+        "test_strategy": {"$ref": "#/$defs/testStrategy"},
+        "risks": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/risk"}},
+        "gates": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/gate"}},
+        "acceptance_scenarios": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/acceptanceScenario"}},
+        "definition_of_done": {"$ref": "#/$defs/textList128"}
+      }
+    }
+  }
+}

@@ -27,6 +27,16 @@ PROJECT_CATALOG_MAX_BYTES = 2 * 1024 * 1024
 PROJECT_PLAN_MAX_BYTES = 1024 * 1024
 PROJECT_STATUS_VALUES = frozenset({"new", "active", "paused", "blocked", "completed", "archived", "unknown"})
 PLAN_STATUS_VALUES = frozenset({"pending", "active", "review", "completed", "blocked", "skipped"})
+PLANNING_SPECIFICATION_CATEGORIES = frozenset({"domain", "data", "ui", "ux", "validation", "accessibility", "performance", "security", "testing", "release", "operations", "other"})
+DECISION_CLASSIFICATIONS = frozenset({
+    "architectural_decision", "product_decision", "scope_decision", "design_decision",
+    "architecture_requirement", "recommended_default", "domain_contract", "interaction_decision", "other",
+})
+PLANNING_CONTEXT_KEYS = frozenset({
+    "objective", "requirements", "scope", "assumptions", "decisions", "open_questions", "specifications",
+    "architecture", "test_strategy", "risks", "gates", "acceptance_scenarios", "definition_of_done",
+})
+TASK_OPTIONAL_KEYS = frozenset({"deliverables", "verification", "tests", "decision_ids", "specification_ids", "risk_ids"})
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$")
 _ALIAS_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 _GITHUB_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
@@ -59,6 +69,120 @@ def _list_of_text(value: object, field_name: str, *, max_items: int = 128) -> tu
     if not isinstance(value, list) or len(value) > max_items:
         _fail("project_field_invalid", f"{field_name} must be a bounded list")
     return tuple(_text(item, f"{field_name}[]", max_length=1_000) for item in value)
+
+
+def _require_mapping(value: object, field_name: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        _fail("plan_field_invalid", f"{field_name} must be an object")
+    return value
+
+
+def _reject_unknown_keys(value: Mapping[str, Any], allowed: set[str], field_name: str) -> None:
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        _fail("plan_field_unknown", f"{field_name} contains unsupported fields: {', '.join(unknown)}")
+
+
+def _bounded_text_list(value: object, field_name: str, *, max_items: int = 128, max_length: int = 2_000) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > max_items:
+        _fail("plan_field_invalid", f"{field_name} must be a bounded list")
+    return [_text(item, f"{field_name}[]", max_length=max_length) for item in value]
+
+
+def _record_list(value: object, field_name: str, *, required: set[str], optional: set[str], max_items: int = 128) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > max_items:
+        _fail("plan_field_invalid", f"{field_name} must be a bounded list")
+    records: list[dict[str, Any]] = []
+    identifiers: set[str] = set()
+    allowed = required | optional
+    for index, raw in enumerate(value):
+        item = _require_mapping(raw, f"{field_name}[{index}]")
+        _reject_unknown_keys(item, allowed, f"{field_name}[{index}]")
+        missing = required - set(item)
+        if missing:
+            _fail("plan_field_invalid", f"{field_name}[{index}] is missing: {', '.join(sorted(missing))}")
+        identifier = _text(item.get("id"), f"{field_name}[{index}].id", max_length=96)
+        if not _ID_RE.fullmatch(identifier) or identifier in identifiers:
+            _fail("plan_field_invalid", f"{field_name} IDs must be unique and bounded")
+        identifiers.add(identifier)
+        normalized: dict[str, Any] = {"id": identifier}
+        for key in sorted(set(item) - {"id"}):
+            if key == "interfaces":
+                normalized[key] = _bounded_text_list(item[key], f"{field_name}[{index}].interfaces", max_items=64, max_length=8_000)
+            else:
+                normalized[key] = _text(item[key], f"{field_name}[{index}].{key}", max_length=4_000)
+        records.append(normalized)
+    return records
+
+
+def _planning_context(value: object) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    context = _require_mapping(value, "planning_context")
+    _reject_unknown_keys(context, set(PLANNING_CONTEXT_KEYS), "planning_context")
+    normalized: dict[str, Any] = {}
+    if "objective" in context:
+        normalized["objective"] = _text(context["objective"], "planning_context.objective", max_length=8_000)
+    for key in ("requirements", "scope"):
+        if key not in context:
+            continue
+        section = _require_mapping(context[key], f"planning_context.{key}")
+        names = ("functional", "quality") if key == "requirements" else ("in_scope", "out_of_scope")
+        _reject_unknown_keys(section, set(names), f"planning_context.{key}")
+        normalized[key] = {name: _bounded_text_list(section.get(name), f"planning_context.{key}.{name}") for name in names if name in section}
+    if "assumptions" in context:
+        normalized["assumptions"] = _bounded_text_list(context["assumptions"], "planning_context.assumptions")
+    if "decisions" in context:
+        decisions = _record_list(context["decisions"], "planning_context.decisions", required={"id", "title", "decision"}, optional={"rationale", "classification"})
+        for item in decisions:
+            classification = item.get("classification")
+            if classification is not None and classification not in DECISION_CLASSIFICATIONS:
+                _fail("plan_field_invalid", "planning_context.decisions classification is unsupported")
+        normalized["decisions"] = decisions
+    if "open_questions" in context:
+        normalized["open_questions"] = _record_list(
+            context["open_questions"],
+            "planning_context.open_questions",
+            required={"id", "question"},
+            optional={"recommended_default", "owner", "deadline", "blocking_effect"},
+            max_items=128,
+        )
+    if "specifications" in context:
+        specifications = _record_list(context["specifications"], "planning_context.specifications", required={"id", "category", "title", "body"}, optional=set())
+        for item in specifications:
+            if item["category"] not in PLANNING_SPECIFICATION_CATEGORIES:
+                _fail("plan_field_invalid", "planning_context.specifications category is unsupported")
+        normalized["specifications"] = specifications
+    if "architecture" in context:
+        architecture = _require_mapping(context["architecture"], "planning_context.architecture")
+        _reject_unknown_keys(architecture, {"summary", "components", "interfaces", "patterns"}, "planning_context.architecture")
+        normalized_architecture: dict[str, Any] = {}
+        if "summary" in architecture:
+            normalized_architecture["summary"] = _text(architecture["summary"], "planning_context.architecture.summary", max_length=8_000)
+        if "components" in architecture:
+            normalized_architecture["components"] = _record_list(architecture["components"], "planning_context.architecture.components", required={"id", "name", "responsibility"}, optional={"interfaces"})
+        if "interfaces" in architecture:
+            normalized_architecture["interfaces"] = _record_list(architecture["interfaces"], "planning_context.architecture.interfaces", required={"id", "name", "responsibility"}, optional=set())
+        if "patterns" in architecture:
+            normalized_architecture["patterns"] = _bounded_text_list(architecture["patterns"], "planning_context.architecture.patterns")
+        normalized["architecture"] = normalized_architecture
+    if "test_strategy" in context:
+        strategy = _require_mapping(context["test_strategy"], "planning_context.test_strategy")
+        _reject_unknown_keys(strategy, {"unit", "integration", "e2e", "manual", "automation"}, "planning_context.test_strategy")
+        normalized["test_strategy"] = {name: _bounded_text_list(strategy.get(name), f"planning_context.test_strategy.{name}") for name in ("unit", "integration", "e2e", "manual", "automation") if name in strategy}
+    if "risks" in context:
+        normalized["risks"] = _record_list(context["risks"], "planning_context.risks", required={"id", "title", "description", "severity", "mitigation"}, optional=set())
+    if "gates" in context:
+        normalized["gates"] = _record_list(context["gates"], "planning_context.gates", required={"id", "title", "criteria"}, optional=set())
+    if "acceptance_scenarios" in context:
+        normalized["acceptance_scenarios"] = _record_list(context["acceptance_scenarios"], "planning_context.acceptance_scenarios", required={"id", "title", "given", "when", "then"}, optional=set())
+    if "definition_of_done" in context:
+        normalized["definition_of_done"] = _bounded_text_list(context["definition_of_done"], "planning_context.definition_of_done")
+    return normalized
 
 
 def _utc_now() -> str:
@@ -144,9 +268,18 @@ class ProjectTask:
     status: str = "pending"
     dependencies: tuple[str, ...] = ()
     acceptance_criteria: tuple[str, ...] = ()
+    deliverables: tuple[str, ...] = ()
+    verification: tuple[str, ...] = ()
+    tests: tuple[str, ...] = ()
+    decision_ids: tuple[str, ...] = ()
+    specification_ids: tuple[str, ...] = ()
+    risk_ids: tuple[str, ...] = ()
+    # Preserve explicit empty rich fields on round-trip without changing the
+    # digest/shape of legacy plans that never carried them.
+    optional_fields: frozenset[str] = frozenset()
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        document = {
             "id": self.task_id,
             "milestone_id": self.milestone_id,
             "title": self.title,
@@ -155,6 +288,10 @@ class ProjectTask:
             "dependencies": list(self.dependencies),
             "acceptance_criteria": list(self.acceptance_criteria),
         }
+        for key, value in (("deliverables", self.deliverables), ("verification", self.verification), ("tests", self.tests), ("decision_ids", self.decision_ids), ("specification_ids", self.specification_ids), ("risk_ids", self.risk_ids)):
+            if value or key in self.optional_fields:
+                document[key] = list(value)
+        return document
 
 
 @dataclass(frozen=True)
@@ -183,6 +320,7 @@ class ProjectPlan:
     created_at: str | None = None
     revision_reason: str | None = None
     revision_summary: str | None = None
+    planning_context: Mapping[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         document = {
@@ -200,6 +338,8 @@ class ProjectPlan:
         for key, value in (("supersedes_version", self.supersedes_version), ("created_at", self.created_at), ("revision_reason", self.revision_reason), ("revision_summary", self.revision_summary)):
             if value is not None:
                 document[key] = value
+        if self.planning_context is not None:
+            document["planning_context"] = json.loads(json.dumps(self.planning_context, ensure_ascii=False, sort_keys=True))
         return document
 
     @property
@@ -223,6 +363,7 @@ class ProjectPlan:
 def validate_project_plan(value: object, *, expected_project_id: str | None = None) -> ProjectPlan:
     if not isinstance(value, Mapping) or value.get("schema") != PROJECT_PLAN_SCHEMA:
         _fail("plan_schema_invalid", "project plan schema must be bdb-project-plan-v1")
+    _reject_unknown_keys(value, {"schema", "project_id", "project_name", "plan_version", "supersedes_version", "created_at", "revision_reason", "revision_summary", "milestones", "tasks", "current_task_id", "planning_context"}, "project plan")
     project_id = _text(value.get("project_id"), "project_id", max_length=96)
     if not _ID_RE.fullmatch(project_id):
         _fail("plan_project_id_invalid", "project_id has an unsafe format")
@@ -273,6 +414,7 @@ def validate_project_plan(value: object, *, expected_project_id: str | None = No
     for raw in tasks_raw:
         if not isinstance(raw, Mapping):
             _fail("plan_task_invalid", "task must be an object")
+        _reject_unknown_keys(raw, {"id", "milestone_id", "title", "description", "status", "dependencies", "acceptance_criteria", *TASK_OPTIONAL_KEYS}, "task")
         identifier = _text(raw.get("id"), "task.id", max_length=96)
         milestone_id = _text(raw.get("milestone_id"), "task.milestone_id", max_length=96)
         if not _ID_RE.fullmatch(identifier) or identifier in task_ids or milestone_id not in milestone_ids:
@@ -284,8 +426,18 @@ def validate_project_plan(value: object, *, expected_project_id: str | None = No
         acceptance = _list_of_text(raw.get("acceptance_criteria"), "task.acceptance_criteria", max_items=64)
         if any(not _ID_RE.fullmatch(item) for item in dependencies):
             _fail("plan_dependency_invalid", "task dependency ID is unsafe")
+        deliverables = _bounded_text_list(raw.get("deliverables"), "task.deliverables", max_items=64, max_length=8_000)
+        verification = _bounded_text_list(raw.get("verification"), "task.verification", max_items=64, max_length=8_000)
+        tests = _bounded_text_list(raw.get("tests"), "task.tests", max_items=64, max_length=8_000)
+        decision_ids = _list_of_text(raw.get("decision_ids"), "task.decision_ids", max_items=64)
+        specification_ids = _list_of_text(raw.get("specification_ids"), "task.specification_ids", max_items=64)
+        risk_ids = _list_of_text(raw.get("risk_ids"), "task.risk_ids", max_items=64)
+        optional_fields = frozenset(key for key in TASK_OPTIONAL_KEYS if key in raw)
+        for field_name, identifiers in (("decision_ids", decision_ids), ("specification_ids", specification_ids), ("risk_ids", risk_ids)):
+            if any(not _ID_RE.fullmatch(item) for item in identifiers) or len(set(identifiers)) != len(identifiers):
+                _fail("plan_reference_invalid", f"task.{field_name} contains unsafe or duplicate IDs")
         task_ids.add(identifier)
-        tasks.append(ProjectTask(identifier, milestone_id, _text(raw.get("title"), "task.title", max_length=300), _text(raw.get("description"), "task.description", max_length=4_000), status, dependencies, acceptance))
+        tasks.append(ProjectTask(identifier, milestone_id, _text(raw.get("title"), "task.title", max_length=300), _text(raw.get("description"), "task.description", max_length=4_000), status, dependencies, acceptance, tuple(deliverables), tuple(verification), tuple(tests), tuple(decision_ids), tuple(specification_ids), tuple(risk_ids), optional_fields))
     if any(dep not in task_ids for task in tasks for dep in task.dependencies):
         _fail("plan_dependency_missing", "task dependency does not exist")
     graph = {task.task_id: set(task.dependencies) for task in tasks}
@@ -313,7 +465,21 @@ def validate_project_plan(value: object, *, expected_project_id: str | None = No
             _fail("plan_current_task_missing", "current_task_id does not exist")
     elif active:
         current_task_id = active[0]
-    return ProjectPlan(project_id, project_name, plan_version, tuple(milestones), tuple(tasks), current_task_id, PROJECT_PLAN_SCHEMA, supersedes, created_at, revision_reason, revision_summary)
+    planning_context = _planning_context(value.get("planning_context"))
+    if planning_context is not None:
+        decision_ids = {item["id"] for item in planning_context.get("decisions", [])}
+        specification_ids = {item["id"] for item in planning_context.get("specifications", [])}
+        risk_ids = {item["id"] for item in planning_context.get("risks", [])}
+        for task in tasks:
+            if any(item not in decision_ids for item in task.decision_ids):
+                _fail("plan_reference_missing", f"task {task.task_id} references an unknown decision")
+            if any(item not in specification_ids for item in task.specification_ids):
+                _fail("plan_reference_missing", f"task {task.task_id} references an unknown specification")
+            if any(item not in risk_ids for item in task.risk_ids):
+                _fail("plan_reference_missing", f"task {task.task_id} references an unknown risk")
+    elif any(task.decision_ids or task.specification_ids or task.risk_ids for task in tasks):
+        _fail("plan_reference_missing", "task rich references require planning_context")
+    return ProjectPlan(project_id, project_name, plan_version, tuple(milestones), tuple(tasks), current_task_id, PROJECT_PLAN_SCHEMA, supersedes, created_at, revision_reason, revision_summary, planning_context)
 
 
 @dataclass(frozen=True)
@@ -546,6 +712,10 @@ def new_project_record(*, project_id: str | None, display_name: str, repo_alias:
 __all__ = [
     "PROJECT_CATALOG_SCHEMA",
     "PROJECT_PLAN_SCHEMA",
+    "DECISION_CLASSIFICATIONS",
+    "PLANNING_CONTEXT_KEYS",
+    "PLANNING_SPECIFICATION_CATEGORIES",
+    "TASK_OPTIONAL_KEYS",
     "ProjectBrief",
     "ProjectCatalog",
     "ProjectCatalogError",
