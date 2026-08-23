@@ -250,11 +250,12 @@ async function projectExecutionStatusFor(projectId, executionBindingId, conversa
 }
 
 function projectAutoStop(reason) {
+  const previous = projectAutoState;
   projectAutoEpoch += 1;
   projectAutoState = {
     phase: "stopped",
-    launch_id: null,
-    execution_binding_id: null,
+    launch_id: previous.launch_id || null,
+    execution_binding_id: previous.execution_binding_id || null,
     token: String(reason || "stopped")
   };
 }
