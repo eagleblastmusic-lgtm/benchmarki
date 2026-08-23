@@ -334,14 +334,17 @@ async function projectExecutionSubmit(result, conversationId, launchId) {
   if (!result || typeof result !== "object" || Array.isArray(result) || result.schema !== "bdb-project-execution-submission-v1") {
     throw new Error("project execution result schema is invalid");
   }
-  if (typeof conversationId !== "string" || !conversationId || typeof launchId !== "string" || !launchId) {
-    throw new Error("project execution binding identity is required");
+  if (typeof conversationId !== "string" || !conversationId) {
+    throw new Error("project execution conversation identity is required");
   }
-  const response = await sendNative(native("project_execution_submit", {
+  const request = {
     result,
-    conversation_id: boundedId(conversationId, "conversation_id"),
-    launch_id: boundedId(launchId, "launch_id")
-  }));
+    conversation_id: boundedId(conversationId, "conversation_id")
+  };
+  if (launchId !== undefined && launchId !== null) {
+    request.launch_id = boundedId(launchId, "launch_id");
+  }
+  const response = await sendNative(native("project_execution_submit", request));
   return { ok: response.status === "project_execution", receipt: response.receipt || null };
 }
 

@@ -221,10 +221,10 @@ function decorate(block, submission) {
   mountPanel(block, panel, panelClass, panelKind, panelKey, decoratedPanels, decorated);
 }
 
-async function projectExecutionBindingForConversation(conversationId) {
-  if (!conversationId) return null;
+async function projectExecutionBindingForConversation(conversationId, result) {
+  if (!conversationId || !result || typeof result.project_id !== "string" || typeof result.execution_binding_id !== "string") return null;
   const bindings = await projectReadBindings();
-  return Object.values(bindings).find((value) => value && value.conversation_id === conversationId && typeof value.project_id === "string" && typeof value.execution_binding_id === "string" && typeof value.launch_id === "string") || null;
+  return Object.values(bindings).find((value) => value && value.conversation_id === conversationId && value.project_id === result.project_id && value.execution_binding_id === result.execution_binding_id && typeof value.launch_id === "string" && value.launch_id.length > 0) || null;
 }
 
 function decorateProjectExecution(block, result) {
@@ -248,14 +248,14 @@ function decorateProjectExecution(block, result) {
     setResult(output, "Submitting project result through canonical vNext transport…");
     try {
       const conversationId = projectConversationId();
-      const binding = await projectExecutionBindingForConversation(conversationId);
-      if (!binding) throw new Error("project_execution_binding_not_found");
-      const response = await chrome.runtime.sendMessage({
+      const binding = await projectExecutionBindingForConversation(conversationId, result);
+      const request = {
         type: "bdb-vnext-project-execution-submit",
         result,
-        conversation_id: conversationId,
-        launch_id: binding.launch_id
-      });
+        conversation_id: conversationId
+      };
+      if (binding) request.launch_id = binding.launch_id;
+      const response = await chrome.runtime.sendMessage(request);
       if (response && response.ok === true && response.receipt) {
         const receipt = response.receipt;
         const next = receipt.current_task_id ? ` · Next: ${receipt.current_task_id}` : "";

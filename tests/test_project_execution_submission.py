@@ -164,6 +164,85 @@ def test_native_project_execution_submit_uses_canonical_coordinator_and_replays(
     assert len(coordinator.snapshot(project_id)["attempts"]) == 1
 
 
+def test_native_project_execution_submit_recovers_canonical_binding_without_launch_hint(tmp_path: Path) -> None:
+    catalog, coordinator, project_id = _fixture(tmp_path)
+    binding = coordinator.start(project_id, expected_repo_head_before=HEAD)
+    coordinator.bind_conversation(project_id, binding.execution_binding_id, "chatgpt-conversation-1")
+    config = VNextNativeConfig(runtime_root=catalog.runtime_root, legacy_runtime_root=tmp_path / "legacy", bootstrap_authority_root=tmp_path / "bootstrap")
+    message = {
+        "schema": M9B_NATIVE_REQUEST_SCHEMA,
+        "request_id": "native-project-result-recovery",
+        "action": "project_execution_submit",
+        "protocol_generation": PROTOCOL_GENERATION,
+        "browser_extension_id": BROWSER_EXTENSION_ID,
+        "conversation_id": "chatgpt-conversation-1",
+        "result": _result(project_id, binding),
+    }
+    response = handle_message(config, message)
+    assert response["status"] == "project_execution"
+    assert response["receipt"]["accepted"] is True
+    assert len(coordinator.snapshot(project_id)["attempts"]) == 1
+
+
+def test_native_project_execution_submit_rejects_mismatched_launch_hint(tmp_path: Path) -> None:
+    catalog, coordinator, project_id = _fixture(tmp_path)
+    binding = coordinator.start(project_id, expected_repo_head_before=HEAD)
+    coordinator.bind_conversation(project_id, binding.execution_binding_id, "chatgpt-conversation-1")
+    config = VNextNativeConfig(runtime_root=catalog.runtime_root, legacy_runtime_root=tmp_path / "legacy", bootstrap_authority_root=tmp_path / "bootstrap")
+    message = {
+        "schema": M9B_NATIVE_REQUEST_SCHEMA,
+        "request_id": "native-project-result-mismatch",
+        "action": "project_execution_submit",
+        "protocol_generation": PROTOCOL_GENERATION,
+        "browser_extension_id": BROWSER_EXTENSION_ID,
+        "conversation_id": "chatgpt-conversation-1",
+        "launch_id": "foreign-launch-id",
+        "result": _result(project_id, binding),
+    }
+    with pytest.raises(Exception) as error:
+        handle_message(config, message)
+    assert getattr(error.value, "code", None) == "execution_launch_mismatch"
+    assert len(coordinator.snapshot(project_id)["attempts"]) == 0
+
+
+def test_native_project_execution_submit_missing_canonical_binding_fails_closed(tmp_path: Path) -> None:
+    catalog, _coordinator, project_id = _fixture(tmp_path)
+    binding = type("B", (), {"task_id": "t1", "execution_binding_id": "missing-binding", "correlation_id": "corr-1", "command_id": "command-1"})()
+    config = VNextNativeConfig(runtime_root=catalog.runtime_root, legacy_runtime_root=tmp_path / "legacy", bootstrap_authority_root=tmp_path / "bootstrap")
+    message = {
+        "schema": M9B_NATIVE_REQUEST_SCHEMA,
+        "request_id": "native-project-result-missing",
+        "action": "project_execution_submit",
+        "protocol_generation": PROTOCOL_GENERATION,
+        "browser_extension_id": BROWSER_EXTENSION_ID,
+        "conversation_id": "chatgpt-conversation-1",
+        "result": _result(project_id, binding),
+    }
+    with pytest.raises(Exception) as error:
+        handle_message(config, message)
+    assert getattr(error.value, "code", None) == "execution_binding_not_found"
+
+
+def test_native_project_execution_submit_rejects_binding_owned_by_other_conversation(tmp_path: Path) -> None:
+    catalog, coordinator, project_id = _fixture(tmp_path)
+    binding = coordinator.start(project_id, expected_repo_head_before=HEAD)
+    coordinator.bind_conversation(project_id, binding.execution_binding_id, "chatgpt-conversation-owner")
+    config = VNextNativeConfig(runtime_root=catalog.runtime_root, legacy_runtime_root=tmp_path / "legacy", bootstrap_authority_root=tmp_path / "bootstrap")
+    message = {
+        "schema": M9B_NATIVE_REQUEST_SCHEMA,
+        "request_id": "native-project-result-conversation",
+        "action": "project_execution_submit",
+        "protocol_generation": PROTOCOL_GENERATION,
+        "browser_extension_id": BROWSER_EXTENSION_ID,
+        "conversation_id": "chatgpt-conversation-other",
+        "result": _result(project_id, binding),
+    }
+    with pytest.raises(Exception) as error:
+        handle_message(config, message)
+    assert getattr(error.value, "code", None) == "execution_conversation_mismatch"
+    assert len(coordinator.snapshot(project_id)["attempts"]) == 0
+
+
 def test_execution_prompt_requires_one_versioned_json_result_and_cost_aware_policy(tmp_path: Path) -> None:
     catalog, coordinator, project_id = _fixture(tmp_path)
 

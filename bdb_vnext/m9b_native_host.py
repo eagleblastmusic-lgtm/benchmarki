@@ -326,12 +326,19 @@ def handle_message(
 
     if action == "project_execution_submit":
         conversation_id = _conversation_id(message.get("conversation_id"))
-        launch_id = _bounded_text(message.get("launch_id"), field="launch_id", maximum=64)
+        launch_hint = message.get("launch_id")
+        if launch_hint is not None:
+            launch_hint = _bounded_text(launch_hint, field="launch_id", maximum=64)
         raw_result = message.get("result")
         try:
             submission = ProjectExecutionSubmission.from_mapping(raw_result)
-            workflow = ProjectWorkflow(config.runtime_root, catalog=ProjectCatalog(config.runtime_root))
-            receipt = workflow.submit_project_execution_result(submission.to_dict(), conversation_id=conversation_id, launch_id=launch_id)
+            catalog = ProjectCatalog(config.runtime_root)
+            coordinator = ProjectExecutionCoordinator(config.runtime_root, catalog=catalog)
+            binding = coordinator.binding(submission.project_id, submission.execution_binding_id)
+            if launch_hint is not None and launch_hint != binding.launch_id:
+                _fail("execution_launch_mismatch", "Browser launch hint differs from canonical binding")
+            workflow = ProjectWorkflow(config.runtime_root, catalog=catalog)
+            receipt = workflow.submit_project_execution_result(submission.to_dict(), conversation_id=conversation_id, launch_id=binding.launch_id)
             return _project_execution_response(config, request_id, receipt)
         except (ProjectExecutionError, ProjectWorkflowError) as exc:
             raise M9bNativeError(getattr(exc, "code", "project_execution_failed"), str(exc)) from exc

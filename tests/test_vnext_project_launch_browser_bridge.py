@@ -178,6 +178,88 @@ def test_vnext_project_execution_result_is_json_only_and_has_separate_submit_sur
     assert "JSON.parse(text)" in adapter
 
 
+def test_vnext_project_execution_submit_uses_canonical_recovery_without_local_binding(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the Browser content contract")
+    harness = tmp_path / "project-execution-recovery.cjs"
+    harness.write_text(
+        textwrap.dedent(
+            r'''
+            "use strict";
+            const assert = require("node:assert/strict");
+            const fs = require("node:fs");
+            const vm = require("node:vm");
+
+            class Element {
+              constructor(kind = "div", text = "") { this.kind = kind; this.textContent = text; this.children = []; this.dataset = {}; this.style = {}; this.parentElement = null; this.listeners = {}; }
+              get innerText() { return this.textContent; }
+              set innerText(value) { this.textContent = value; }
+              getBoundingClientRect() { return { width: 600, height: 30 }; }
+              querySelector() { return null; }
+              querySelectorAll() { return []; }
+              closest(selector) { if (selector === "pre") return host; if (selector.includes("assistant")) return assistant; return null; }
+              append(...items) { this.children.push(...items); for (const item of items) item.parentElement = this; if (this.kind === "assistant") inserted.push(...items); }
+              appendChild(item) { this.append(item); return item; }
+              insertAdjacentElement(_where, item) { inserted.push(item); }
+              setAttribute() {}
+              focus() {}
+              dispatchEvent() {}
+              remove() { if (this.parentElement) this.parentElement.children = this.parentElement.children.filter((item) => item !== this); this.parentElement = null; }
+              addEventListener(type, fn) { this.listeners[type] = fn; }
+            }
+
+            const mode = process.argv[3];
+            const result = { schema: "bdb-project-execution-submission-v1", project_id: "project-1", plan_version: "1", task_id: "P0-01", execution_binding_id: "binding-1", correlation_id: "corr-1", command_id: "command-1", repo_alias: "premium-calculator", head_before: "a".repeat(40), head_after: "b".repeat(40), execution_status: "PASS", validation_status: "PASS", promotion_status: "NOT_RUN", result_summary: "done", evidence_refs: [], criteria: [] };
+            const assistant = new Element("assistant");
+            const host = new Element("pre");
+            const block = new Element("code", JSON.stringify(result));
+            const inserted = [];
+            const messages = [];
+            const bindings = mode === "empty" ? {} : mode === "matching" ? {
+              "launch-1": { conversation_id: "abcdef12-3456-4789-abcd-abcdef123456", project_id: "project-1", execution_binding_id: "binding-1", launch_id: "launch-1" }
+            } : {
+              "launch-wrong": { conversation_id: "abcdef12-3456-4789-abcd-abcdef123456", project_id: "project-1", execution_binding_id: "binding-other", launch_id: "launch-wrong" },
+              "launch-1": { conversation_id: "abcdef12-3456-4789-abcd-abcdef123456", project_id: "project-1", execution_binding_id: "binding-1", launch_id: "launch-1" }
+            };
+            const context = {
+              console, HTMLElement: Element, HTMLTextAreaElement: class extends Element {}, HTMLInputElement: class extends Element {},
+              InputEvent: class {}, Event: class {}, TextEncoder, Set, Map, crypto: { randomUUID: () => "11111111-1111-4111-8111-111111111111" },
+              window: { getComputedStyle: () => ({ visibility: "visible", display: "block" }) },
+              location: { protocol: "https:", hostname: "chatgpt.com", pathname: "/c/abcdef12-3456-4789-abcd-abcdef123456" },
+              document: { visibilityState: "visible", hasFocus: () => true, documentElement: {}, querySelector: () => null, querySelectorAll: (selector) => selector === "pre code" ? [block] : [], createElement: (kind) => new Element(kind), execCommand: () => false },
+              MutationObserver: class { observe() {} }, setInterval: () => ({ unref() {} }),
+              chrome: {
+                storage: { local: { async get() { return { bdbVnextProjectLaunchBindingsV1: bindings }; }, async set() {} } },
+                runtime: { onMessage: { addListener() {} }, async sendMessage(message) {
+                  messages.push(message);
+                  if (message.type === "bdb-vnext-project-launch-peek") return { ok: true, response: { status: "empty" } };
+                  if (message.type === "bdb-vnext-project-execution-submit") return { ok: true, receipt: { task_id: "task-1", replayed: false } };
+                  return { ok: false, error: "not invoked" };
+                } }
+              }
+            };
+            context.globalThis = context;
+            vm.createContext(context);
+            vm.runInContext(fs.readFileSync(process.argv[2], "utf8"), context, { filename: process.argv[2] });
+            setTimeout(async () => {
+              assert.equal(inserted.length, 1);
+              await inserted[0].children[0].listeners.click();
+              const submit = messages.find((message) => message.type === "bdb-vnext-project-execution-submit");
+              assert.ok(submit, "project result must reach Native even without local binding");
+              assert.equal(submit.conversation_id, "abcdef12-3456-4789-abcd-abcdef123456");
+              if (mode === "empty") assert.equal(Object.hasOwn(submit, "launch_id"), false);
+              else assert.equal(submit.launch_id, "launch-1");
+            }, 25);
+            '''
+        ),
+        encoding="utf-8",
+    )
+    for mode in ("empty", "matching", "multiple"):
+        completed = subprocess.run([node, str(harness), str(ROOT / "browser_extension_vnext" / "content_adapter.js"), mode], capture_output=True, text=True, check=False, timeout=10)
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
 def test_vnext_project_execution_result_is_detected_from_streamed_dom_mutations(tmp_path: Path) -> None:
     node = shutil.which("node")
     if node is None:
