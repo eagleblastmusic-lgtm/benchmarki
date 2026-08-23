@@ -162,6 +162,24 @@ def test_rich_plan_round_trip_is_lossless_and_digest_stable() -> None:
     assert restored.planning_context["open_questions"][0]["blocking_effect"] == "Blocks release scheduling"
 
 
+def test_architecture_interfaces_accepts_nested_interfaces_and_round_trips() -> None:
+    document = _plan_document()
+    document["planning_context"] = {
+        "architecture": {
+            "interfaces": [{
+                "id": "i1",
+                "name": "EditorPort",
+                "responsibility": "Bounded model handoff",
+                "interfaces": ["BDB_EDIT_V1", "Native Messaging"],
+            }],
+        },
+    }
+    plan = validate_project_plan(document, expected_project_id="planning-fixture")
+    restored = validate_project_plan(plan.to_dict(), expected_project_id="planning-fixture")
+    assert restored.planning_context == plan.planning_context
+    assert restored.planning_context["architecture"]["interfaces"][0]["interfaces"] == ["BDB_EDIT_V1", "Native Messaging"]
+
+
 def test_legacy_plan_without_open_questions_or_decision_classification_still_validates() -> None:
     plan = validate_project_plan(_plan_document(), expected_project_id="planning-fixture")
     assert "planning_context" not in plan.to_dict()

@@ -166,7 +166,7 @@ def _planning_context(value: object) -> dict[str, Any] | None:
         if "components" in architecture:
             normalized_architecture["components"] = _record_list(architecture["components"], "planning_context.architecture.components", required={"id", "name", "responsibility"}, optional={"interfaces"})
         if "interfaces" in architecture:
-            normalized_architecture["interfaces"] = _record_list(architecture["interfaces"], "planning_context.architecture.interfaces", required={"id", "name", "responsibility"}, optional=set())
+            normalized_architecture["interfaces"] = _record_list(architecture["interfaces"], "planning_context.architecture.interfaces", required={"id", "name", "responsibility"}, optional={"interfaces"})
         if "patterns" in architecture:
             normalized_architecture["patterns"] = _bounded_text_list(architecture["patterns"], "planning_context.architecture.patterns")
         normalized["architecture"] = normalized_architecture
