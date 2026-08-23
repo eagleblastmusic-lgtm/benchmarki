@@ -3,6 +3,9 @@
 const SUBMISSION_SCHEMA = "bdb-vnext-submission-v1";
 const PROJECT_EXECUTION_SCHEMA = "bdb-project-execution-submission-v1";
 const MAX_SUBMISSION_TEXT = 256 * 1024;
+const CONTENT_ADAPTER_RUNTIME_FINGERPRINT = "bdb-vnext-content-adapter-live-sweep-v1";
+const CANONICAL_RESULT_SWEEP_MS = 750;
+const MAX_CANONICAL_SWEEP_BLOCKS = 256;
 const decorated = new WeakSet();
 const executionDecorated = new WeakSet();
 
@@ -506,22 +509,65 @@ function codeBlocks(root) {
   return blocks;
 }
 
-function scan(root = document) {
-  for (const block of codeBlocks(root)) {
-    if (!(block instanceof HTMLElement) || decorated.has(block)) {
-      continue;
-    }
-    const projectResult = parseProjectExecutionResult(block);
-    if (projectResult) {
-      decorateProjectExecution(block, projectResult);
-      continue;
-    }
-    const submission = parseSubmission(block);
-    if (submission) {
-      decorate(block, submission);
-    }
+function canonicalResultText(block) {
+  return typeof block.textContent === "string" ? block.textContent.trim() : "";
+}
+
+function isCanonicalResultCandidate(block) {
+  const text = canonicalResultText(block);
+  return Boolean(
+    text &&
+    text.length <= MAX_SUBMISSION_TEXT &&
+    (text.includes(PROJECT_EXECUTION_SCHEMA) || text.includes(SUBMISSION_SCHEMA))
+  );
+}
+
+function scanBlock(block) {
+  if (!(block instanceof HTMLElement) || decorated.has(block) || executionDecorated.has(block)) {
+    return;
+  }
+  if (!isCanonicalResultCandidate(block)) {
+    return;
+  }
+  const projectResult = parseProjectExecutionResult(block);
+  if (projectResult) {
+    decorateProjectExecution(block, projectResult);
+    return;
+  }
+  const submission = parseSubmission(block);
+  if (submission) {
+    decorate(block, submission);
   }
 }
+
+function scan(root = document) {
+  for (const block of codeBlocks(root)) {
+    scanBlock(block);
+  }
+}
+
+function sweepCanonicalResults() {
+  if (document.visibilityState !== "visible") {
+    return;
+  }
+  const blocks = codeBlocks(document);
+  const limit = Math.min(blocks.length, MAX_CANONICAL_SWEEP_BLOCKS);
+  for (let index = 0; index < limit; index += 1) {
+    scanBlock(blocks[index]);
+  }
+}
+
+function publishRuntimeFingerprint() {
+  const root = document && document.documentElement;
+  if (root && root.dataset) {
+    root.dataset.bdbVnextContentAdapter = CONTENT_ADAPTER_RUNTIME_FINGERPRINT;
+  }
+}
+
+publishRuntimeFingerprint();
+scan(document);
+const canonicalSweepTimer = setInterval(sweepCanonicalResults, CANONICAL_RESULT_SWEEP_MS);
+if (canonicalSweepTimer && typeof canonicalSweepTimer.unref === "function") canonicalSweepTimer.unref();
 
 const STREAM_SCAN_DEBOUNCE_MS = 50;
 const pendingMutationRoots = new Set();

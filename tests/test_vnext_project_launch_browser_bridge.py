@@ -259,8 +259,9 @@ def test_vnext_project_execution_result_is_detected_from_streamed_dom_mutations(
             const mode = process.argv[3];
             const project = JSON.stringify({ schema: "bdb-project-execution-submission-v1", project_id: "project-1", plan_version: "1", task_id: "P0-01", execution_binding_id: "binding-1", correlation_id: "corr-1", command_id: "command-1", repo_alias: "premium-calculator", head_before: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", head_after: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", execution_status: "PASS", validation_status: "PASS", promotion_status: "NOT_RUN", result_summary: "done", evidence_refs: [], criteria: [] });
             const generic = JSON.stringify({ schema: "bdb-vnext-submission-v1", submission_key: "submission-1", intent_revision: {}, intent: {}, conversation_binding: {}, consumer_binding: {} });
-            const invalid = mode === "yaml" ? "BDB_SUBMISSION:\nschema: bdb-project-execution-submission-v1\nstatus: COMPLETED" : "{\"schema\":\"bdb-project-execution-submission-v1\"}";
-            const finalText = mode === "project" || mode === "duplicate" ? project : mode === "generic" ? generic : invalid;
+            const invalid = mode === "yaml" || mode === "sweep-yaml" ? "BDB_SUBMISSION:\nschema: bdb-project-execution-submission-v1\nstatus: COMPLETED" : "{\"schema\":\"bdb-project-execution-submission-v1\"}";
+            const finalText = mode === "project" || mode === "duplicate" || mode === "sweep" || mode === "delayed" || mode === "hidden" ? project : mode === "generic" || mode === "sweep-generic" ? generic : invalid;
+            const safetyMode = new Set(["sweep", "delayed", "hidden", "sweep-generic", "sweep-partial", "sweep-yaml"]).has(mode);
             const assistant = new Element("assistant");
             const pre = new Element("pre");
             const code = new Element("code");
@@ -273,8 +274,11 @@ def test_vnext_project_execution_result_is_detected_from_streamed_dom_mutations(
             const inserted = [];
             let observerCallback = null;
             let observerOptions = null;
+            let observerInvoked = false;
+            let sweepCallback = null;
+            const documentState = { visibility: "visible" };
             class FakeMutationObserver {
-              constructor(callback) { observerCallback = callback; }
+              constructor(callback) { observerCallback = (...args) => { observerInvoked = true; callback(...args); }; }
               observe(_target, options) { observerOptions = options; }
             }
             const context = {
@@ -291,7 +295,7 @@ def test_vnext_project_execution_result_is_detected_from_streamed_dom_mutations(
               window: { getComputedStyle: () => ({ visibility: "visible", display: "block" }) },
               location: { protocol: "https:", hostname: "chatgpt.com", pathname: "/c/abcdef12-3456-4789-abcd-abcdef123456" },
               document: {
-                visibilityState: "visible",
+                get visibilityState() { return documentState.visibility; },
                 hasFocus: () => true,
                 documentElement,
                 querySelector: () => null,
@@ -302,7 +306,10 @@ def test_vnext_project_execution_result_is_detected_from_streamed_dom_mutations(
               MutationObserver: FakeMutationObserver,
               setTimeout,
               clearTimeout,
-              setInterval: () => ({ unref() {} }),
+              setInterval: (callback, interval) => {
+                if (interval === 750) sweepCallback = callback;
+                return { unref() {} };
+              },
               chrome: {
                 storage: { local: { async get() { return {}; }, async set() {} } },
                 runtime: {
@@ -318,33 +325,73 @@ def test_vnext_project_execution_result_is_detected_from_streamed_dom_mutations(
             vm.createContext(context);
             vm.runInContext(fs.readFileSync(process.argv[2], "utf8"), context, { filename: "content_adapter.js" });
             assert.equal(observerOptions.characterData, true, "stream observer must include characterData");
+            assert.equal(documentElement.dataset.bdbVnextContentAdapter, "bdb-vnext-content-adapter-live-sweep-v1");
+            assert.equal(typeof sweepCallback, "function", "bounded canonical-result sweep must be scheduled");
             assert.equal(inserted.length, 0, "partial stream must not create a panel");
 
-            for (const chunk of [finalText.slice(0, 11), finalText.slice(0, 37), finalText]) {
-              text.data = chunk;
-              observerCallback([{ type: "characterData", target: text, addedNodes: [] }]);
-            }
-            observerCallback([{ type: "childList", target: code, addedNodes: [text] }]);
-
-            setTimeout(() => {
-              const expectedButton = mode === "project" || mode === "duplicate" ? "BDB vNext: Submit result" : mode === "generic" ? "BDB vNext: Submit" : null;
-              if (expectedButton) {
-                assert.equal(inserted.length, 1, "a streamed canonical result gets one panel");
-                assert.equal(inserted[0].children[0].textContent, expectedButton);
+            if (safetyMode) {
+              const assertSafetyResult = () => {
+                const expectedButton = mode === "sweep-generic" ? "BDB vNext: Submit" : mode === "sweep-partial" || mode === "sweep-yaml" ? null : "BDB vNext: Submit result";
+                if (expectedButton) {
+                  assert.equal(inserted.length, 1, "safety sweep detects one canonical result");
+                  assert.equal(inserted[0].children[0].textContent, expectedButton);
+                } else {
+                  assert.equal(inserted.length, 0, "invalid JSON/YAML must stay undecorated during safety sweep");
+                }
+              };
+              const runSafetySweep = () => {
+                if (mode === "hidden") {
+                  documentState.visibility = "hidden";
+                  sweepCallback();
+                  assert.equal(inserted.length, 0, "hidden document must not run the canonical-result sweep");
+                  documentState.visibility = "visible";
+                }
+                sweepCallback();
+                sweepCallback();
+                assert.equal(observerInvoked, false, "safety sweep must not depend on a MutationObserver callback");
+                setTimeout(assertSafetyResult, 5);
+              };
+              if (mode === "delayed") {
+                setTimeout(() => {
+                  const delayedPre = new Element("pre");
+                  const delayedCode = new Element("code");
+                  delayedPre.append(delayedCode);
+                  delayedCode.append(new TextNode(finalText));
+                  assistant.append(delayedPre);
+                  setTimeout(runSafetySweep, 5);
+                }, 5);
               } else {
-                assert.equal(inserted.length, 0, "invalid JSON/YAML must stay undecorated");
-              }
-              if (mode === "duplicate") {
                 text.data = finalText;
-                observerCallback([{ type: "characterData", target: text, addedNodes: [] }]);
-                setTimeout(() => assert.equal(inserted.length, 1, "a decorated block must not receive a duplicate panel"), 60);
+                runSafetySweep();
               }
-            }, 80);
+            } else {
+
+              for (const chunk of [finalText.slice(0, 11), finalText.slice(0, 37), finalText]) {
+                text.data = chunk;
+                observerCallback([{ type: "characterData", target: text, addedNodes: [] }]);
+              }
+              observerCallback([{ type: "childList", target: code, addedNodes: [text] }]);
+
+              setTimeout(() => {
+                const expectedButton = mode === "project" || mode === "duplicate" ? "BDB vNext: Submit result" : mode === "generic" ? "BDB vNext: Submit" : null;
+                if (expectedButton) {
+                  assert.equal(inserted.length, 1, "a streamed canonical result gets one panel");
+                  assert.equal(inserted[0].children[0].textContent, expectedButton);
+                } else {
+                  assert.equal(inserted.length, 0, "invalid JSON/YAML must stay undecorated");
+                }
+                if (mode === "duplicate") {
+                  text.data = finalText;
+                  observerCallback([{ type: "characterData", target: text, addedNodes: [] }]);
+                  setTimeout(() => assert.equal(inserted.length, 1, "a decorated block must not receive a duplicate panel"), 60);
+                }
+              }, 80);
+            }
             '''
         ),
         encoding="utf-8",
     )
-    for mode in ("project", "duplicate", "generic", "json", "yaml"):
+    for mode in ("project", "duplicate", "generic", "json", "yaml", "sweep", "delayed", "hidden", "sweep-generic", "sweep-partial", "sweep-yaml"):
         completed = subprocess.run(
             [node, str(harness), str(ROOT / "browser_extension_vnext" / "content_adapter.js"), mode],
             capture_output=True,
