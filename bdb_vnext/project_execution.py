@@ -21,8 +21,12 @@ from .project_memory import ProjectMemoryState, ProjectMemoryStore, available_pr
 
 
 PROJECT_EXECUTION_SCHEMA = "bdb-project-execution-v1"
+PROJECT_EXECUTION_SUBMISSION_SCHEMA = "bdb-project-execution-submission-v1"
+PROJECT_EXECUTION_CHECKPOINT_SCHEMA = "bdb-project-execution-checkpoint-v1"
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _HEAD_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_CONVERSATION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
+_REPO_ALIAS_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 
 
 class ProjectExecutionError(RuntimeError):
@@ -58,21 +62,213 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
+def _parse_checkpoint_time(value: object) -> datetime:
+    text = _text(value, "last_progress_at", max_length=64)
+    try:
+        parsed = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+    except ValueError as exc:
+        _fail("checkpoint_time_invalid", "last_progress_at must be an ISO-8601 timestamp")
+    if parsed.tzinfo is None:
+        _fail("checkpoint_time_invalid", "last_progress_at must include timezone")
+    return parsed.astimezone(timezone.utc)
+
+
 def _status(value: object, field: str) -> str:
     value = _text(value, field, max_length=32).upper()
     return value
 
 
+def _head(value: object, field: str, *, allow_unknown: bool = False) -> str | None:
+    if value is None and not allow_unknown:
+        _fail("execution_field_invalid", f"{field} is required")
+    if value is None:
+        return None
+    text = _text(value, field, max_length=128)
+    if allow_unknown and text == "unknown":
+        return text
+    if _HEAD_RE.fullmatch(text.lower()) is None:
+        _fail("repo_head_invalid", f"{field} is not a Git object identity")
+    return text.lower()
+
+
+def _conversation(value: object, field: str = "conversation_id") -> str:
+    text = _text(value, field, max_length=128)
+    if _CONVERSATION_RE.fullmatch(text) is None:
+        _fail("execution_conversation_invalid", f"{field} has an unsafe format")
+    return text
+
+
+@dataclass(frozen=True)
+class ProjectExecutionSubmission:
+    """Strict machine result emitted by Work for one canonical launch binding."""
+
+    project_id: str
+    plan_version: str
+    task_id: str
+    execution_binding_id: str
+    correlation_id: str
+    command_id: str
+    repo_alias: str
+    head_before: str
+    head_after: str | None
+    execution_status: str
+    validation_status: str
+    promotion_status: str
+    result_summary: str
+    evidence_refs: tuple[str, ...] = ()
+    criteria: tuple[Mapping[str, Any], ...] = ()
+    canonical_refs: Mapping[str, Any] | None = None
+    failure_code: str | None = None
+    schema: str = PROJECT_EXECUTION_SUBMISSION_SCHEMA
+
+    @classmethod
+    def from_mapping(cls, value: object) -> "ProjectExecutionSubmission":
+        if not isinstance(value, Mapping) or value.get("schema") != PROJECT_EXECUTION_SUBMISSION_SCHEMA:
+            _fail("execution_schema_invalid", "project execution result schema differs")
+        required = {
+            "schema", "project_id", "plan_version", "task_id", "execution_binding_id",
+            "correlation_id", "command_id", "repo_alias", "head_before", "head_after",
+            "execution_status", "validation_status", "promotion_status", "result_summary",
+            "evidence_refs", "criteria",
+        }
+        missing = sorted(required - set(value))
+        if missing:
+            _fail("execution_field_required", f"project execution result is missing: {', '.join(missing)}")
+        allowed = {
+            "schema", "project_id", "plan_version", "task_id", "execution_binding_id",
+            "correlation_id", "command_id", "repo_alias", "head_before", "head_after",
+            "execution_status", "validation_status", "promotion_status", "result_summary",
+            "evidence_refs", "criteria", "canonical_refs", "failure_code",
+        }
+        unknown = sorted(set(value) - allowed)
+        if unknown:
+            _fail("execution_field_unknown", f"project execution result contains unsupported fields: {', '.join(unknown)}")
+        refs = value.get("evidence_refs", [])
+        if not isinstance(refs, list) or len(refs) > 128:
+            _fail("execution_shape_invalid", "evidence_refs must be a bounded list")
+        criteria = value.get("criteria", [])
+        if not isinstance(criteria, list) or len(criteria) > 128 or any(not isinstance(item, Mapping) for item in criteria):
+            _fail("execution_shape_invalid", "criteria must be a bounded list of objects")
+        normalized_criteria: list[Mapping[str, Any]] = []
+        for item in criteria:
+            extra = sorted(set(item) - {"criterion", "type", "status", "evidence_ref"})
+            if extra:
+                _fail("execution_field_unknown", f"criteria contains unsupported fields: {', '.join(extra)}")
+            if "criterion" not in item:
+                _fail("execution_field_invalid", "criteria[].criterion is required")
+            normalized: dict[str, Any] = {
+                "criterion": _text(item.get("criterion"), "criteria[].criterion", max_length=2_000),
+            }
+            for field in ("type", "status"):
+                if field in item:
+                    normalized[field] = _text(item.get(field), f"criteria[].{field}", max_length=32)
+            if "evidence_ref" in item:
+                evidence_ref = item.get("evidence_ref")
+                normalized["evidence_ref"] = None if evidence_ref is None else _text(evidence_ref, "criteria[].evidence_ref", max_length=512)
+            normalized_criteria.append(normalized)
+        raw_refs = value.get("canonical_refs")
+        canonical_refs: dict[str, Any] | None = None
+        if raw_refs is not None:
+            if not isinstance(raw_refs, Mapping):
+                _fail("execution_shape_invalid", "canonical_refs must be an object")
+            allowed_refs = {"task_id", "work_id", "candidate_id", "candidate_view_id", "candidate_tree_digest", "base_commit_oid", "validation_id", "evidence_id", "evaluation_id", "publication_id"}
+            extra_refs = sorted(set(raw_refs) - allowed_refs)
+            if extra_refs:
+                _fail("execution_field_unknown", f"canonical_refs contains unsupported fields: {', '.join(extra_refs)}")
+            canonical_refs = {}
+            for key, raw_ref in raw_refs.items():
+                canonical_refs[key] = None if raw_ref is None else _text(raw_ref, f"canonical_refs.{key}", max_length=128)
+        failure = value.get("failure_code")
+        if failure is not None:
+            failure = _text(failure, "failure_code", max_length=128)
+        repo_alias = _text(value.get("repo_alias"), "repo_alias", max_length=64)
+        if _REPO_ALIAS_RE.fullmatch(repo_alias) is None:
+            _fail("repo_alias_invalid", "repo_alias has an unsafe format")
+        return cls(
+            project_id=_identifier(value.get("project_id"), "project_id"),
+            plan_version=_text(value.get("plan_version"), "plan_version", max_length=32),
+            task_id=_identifier(value.get("task_id"), "task_id"),
+            execution_binding_id=_identifier(value.get("execution_binding_id"), "execution_binding_id"),
+            correlation_id=_identifier(value.get("correlation_id"), "correlation_id"),
+            command_id=_identifier(value.get("command_id"), "command_id"),
+            repo_alias=repo_alias,
+            head_before=_head(value.get("head_before"), "head_before", allow_unknown=True) or "unknown",
+            head_after=_head(value.get("head_after"), "head_after", allow_unknown=True),
+            execution_status=_status(value.get("execution_status"), "execution_status"),
+            validation_status=_status(value.get("validation_status"), "validation_status"),
+            promotion_status=_status(value.get("promotion_status"), "promotion_status"),
+            result_summary=_text(value.get("result_summary", ""), "result_summary", max_length=4_000, required=False),
+            evidence_refs=tuple(_text(item, "evidence_refs[]", max_length=512) for item in refs),
+            criteria=tuple(normalized_criteria),
+            canonical_refs=canonical_refs,
+            failure_code=failure,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        value: dict[str, Any] = {
+            "schema": self.schema,
+            "project_id": self.project_id,
+            "plan_version": self.plan_version,
+            "task_id": self.task_id,
+            "execution_binding_id": self.execution_binding_id,
+            "correlation_id": self.correlation_id,
+            "command_id": self.command_id,
+            "repo_alias": self.repo_alias,
+            "head_before": self.head_before,
+            "head_after": self.head_after,
+            "execution_status": self.execution_status,
+            "validation_status": self.validation_status,
+            "promotion_status": self.promotion_status,
+            "result_summary": self.result_summary,
+            "evidence_refs": list(self.evidence_refs),
+            "criteria": [dict(item) for item in self.criteria],
+        }
+        if self.canonical_refs is not None:
+            value["canonical_refs"] = dict(self.canonical_refs)
+        if self.failure_code is not None:
+            value["failure_code"] = self.failure_code
+        return value
+
+
+def _result_identity(binding: "ProjectExecutionBinding", result: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "execution_binding_id": binding.execution_binding_id,
+        "command_id": binding.command_id,
+        "correlation_id": binding.correlation_id,
+        "project_id": binding.project_id,
+        "task_id": binding.task_id,
+        "plan_version": binding.plan_version,
+        "repo_alias": binding.repo_alias,
+        "result_project_id": result.get("project_id"),
+        "result_task_id": result.get("task_id"),
+        "result_plan_version": result.get("plan_version"),
+        "head_before": result.get("head_before"),
+        "head_after": result.get("head_after"),
+        "execution_status": result.get("execution_status"),
+        "validation_status": result.get("validation_status"),
+        "promotion_status": result.get("promotion_status"),
+        "summary": result.get("result_summary", ""),
+        "evidence_refs": list(result.get("evidence_refs", [])),
+        "criteria": result.get("criteria", []),
+        "canonical_refs": result.get("canonical_refs", {}),
+    }
+
+
+def execution_result_digest(binding: "ProjectExecutionBinding", result: Mapping[str, Any]) -> str:
+    return semantic_digest(_result_identity(binding, result))
+
+
 def _execution_document(state: ProjectMemoryState) -> dict[str, Any]:
     raw = state.execution if isinstance(state.execution, Mapping) else {}
     if not raw:
-        return {"schema": PROJECT_EXECUTION_SCHEMA, "bindings": [], "attempts": [], "acceptance_results": [], "task_statuses": {}, "gate_statuses": {}, "open_question_statuses": {}, "milestones_completed": [], "milestone_runs": {}}
+        return {"schema": PROJECT_EXECUTION_SCHEMA, "bindings": [], "attempts": [], "acceptance_results": [], "checkpoints": {}, "task_statuses": {}, "gate_statuses": {}, "open_question_statuses": {}, "milestones_completed": [], "milestone_runs": {}}
     if raw.get("schema", PROJECT_EXECUTION_SCHEMA) != PROJECT_EXECUTION_SCHEMA:
         _fail("execution_schema_invalid", "project execution state schema differs")
     result = dict(raw)
     result.setdefault("bindings", [])
     result.setdefault("attempts", [])
     result.setdefault("acceptance_results", [])
+    result.setdefault("checkpoints", {})
     result.setdefault("task_statuses", {})
     result.setdefault("milestones_completed", [])
     result.setdefault("milestone_runs", {})
@@ -83,6 +279,8 @@ def _execution_document(state: ProjectMemoryState) -> dict[str, Any]:
         _fail("execution_shape_invalid", "execution.task_statuses is invalid")
     if not isinstance(result["milestone_runs"], Mapping) or len(result["milestone_runs"]) > 128:
         _fail("execution_shape_invalid", "execution.milestone_runs is invalid")
+    if not isinstance(result["checkpoints"], Mapping) or len(result["checkpoints"]) > 512:
+        _fail("execution_shape_invalid", "execution.checkpoints is invalid")
     for key in ("gate_statuses", "open_question_statuses"):
         if not isinstance(result[key], Mapping) or len(result[key]) > 512:
             _fail("execution_shape_invalid", f"execution.{key} is invalid")
@@ -103,9 +301,13 @@ class ProjectExecutionBinding:
     created_at: str
     status: str = "ACTIVE"
     superseded: bool = False
+    conversation_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"schema": PROJECT_EXECUTION_SCHEMA, "execution_binding_id": self.execution_binding_id, "project_id": self.project_id, "plan_version": self.plan_version, "task_id": self.task_id, "launch_id": self.launch_id, "correlation_id": self.correlation_id, "command_id": self.command_id, "repo_alias": self.repo_alias, "expected_repo_head_before": self.expected_repo_head_before, "created_at": self.created_at, "status": self.status, "superseded": self.superseded}
+        value = {"schema": PROJECT_EXECUTION_SCHEMA, "execution_binding_id": self.execution_binding_id, "project_id": self.project_id, "plan_version": self.plan_version, "task_id": self.task_id, "launch_id": self.launch_id, "correlation_id": self.correlation_id, "command_id": self.command_id, "repo_alias": self.repo_alias, "expected_repo_head_before": self.expected_repo_head_before, "created_at": self.created_at, "status": self.status, "superseded": self.superseded}
+        if self.conversation_id is not None:
+            value["conversation_id"] = self.conversation_id
+        return value
 
 
 @dataclass(frozen=True)
@@ -148,7 +350,8 @@ class ProjectExecutionAttempt:
 
 
 def _binding_from_dict(value: Mapping[str, Any]) -> ProjectExecutionBinding:
-    return ProjectExecutionBinding(_identifier(value.get("execution_binding_id"), "execution_binding_id"), _identifier(value.get("project_id"), "project_id"), _text(value.get("plan_version"), "plan_version", max_length=32), _identifier(value.get("task_id"), "task_id"), _identifier(value.get("launch_id"), "launch_id"), _identifier(value.get("correlation_id"), "correlation_id"), _identifier(value.get("command_id"), "command_id"), _text(value.get("repo_alias"), "repo_alias", max_length=64), _text(value.get("expected_repo_head_before"), "expected_repo_head_before", max_length=128), _text(value.get("created_at"), "created_at", max_length=64), _text(value.get("status", "ACTIVE"), "status", max_length=32), bool(value.get("superseded", False)))
+    conversation_id = value.get("conversation_id")
+    return ProjectExecutionBinding(_identifier(value.get("execution_binding_id"), "execution_binding_id"), _identifier(value.get("project_id"), "project_id"), _text(value.get("plan_version"), "plan_version", max_length=32), _identifier(value.get("task_id"), "task_id"), _identifier(value.get("launch_id"), "launch_id"), _identifier(value.get("correlation_id"), "correlation_id"), _identifier(value.get("command_id"), "command_id"), _text(value.get("repo_alias"), "repo_alias", max_length=64), _text(value.get("expected_repo_head_before"), "expected_repo_head_before", max_length=128), _text(value.get("created_at"), "created_at", max_length=64), _text(value.get("status", "ACTIVE"), "status", max_length=32), bool(value.get("superseded", False)), _conversation(conversation_id) if conversation_id is not None else None)
 
 
 def _attempt_from_dict(value: Mapping[str, Any]) -> ProjectExecutionAttempt:
@@ -246,6 +449,125 @@ class ProjectExecutionCoordinator:
 
     def start(self, project_id: str, **kwargs: Any) -> ProjectExecutionBinding:
         return self.persist_binding(self.new_binding(project_id, **kwargs))
+
+    def binding(self, project_id: str, execution_binding_id: str) -> ProjectExecutionBinding:
+        """Read one canonical binding without creating or selecting another task."""
+        _identifier(project_id, "project_id")
+        binding_id = _identifier(execution_binding_id, "execution_binding_id")
+        _project, _plan, memory = self._project(project_id)
+        execution = _execution_document(memory.read_state())
+        raw = next((item for item in execution["bindings"] if item.get("execution_binding_id") == binding_id), None)
+        if raw is None:
+            _fail("execution_binding_not_found", "execution binding does not exist")
+        binding = _binding_from_dict(raw)
+        if binding.project_id != project_id:
+            _fail("execution_binding_stale", "execution binding belongs to another project")
+        return binding
+
+    def bind_conversation(self, project_id: str, execution_binding_id: str, conversation_id: str) -> ProjectExecutionBinding:
+        """Bind a claimed Browser conversation exactly once to the launch binding."""
+        conversation = _conversation(conversation_id)
+        binding_id = _identifier(execution_binding_id, "execution_binding_id")
+        project, plan, memory = self._project(project_id)
+
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, ProjectExecutionBinding]:
+            execution = _execution_document(state)
+            raw = next((item for item in execution["bindings"] if item.get("execution_binding_id") == binding_id), None)
+            if raw is None:
+                _fail("execution_binding_not_found", "execution binding does not exist")
+            current = _binding_from_dict(raw)
+            if current.project_id != project.project_id or current.plan_version != plan.plan_version or current.superseded or current.status != "ACTIVE":
+                _fail("execution_binding_stale", "execution binding is not active")
+            if current.conversation_id not in (None, conversation):
+                _fail("execution_conversation_mismatch", "execution binding is owned by another conversation")
+            if current.conversation_id == conversation:
+                return state, current
+            updated_binding = replace(current, conversation_id=conversation)
+            bindings = [updated_binding.to_dict() if item.get("execution_binding_id") == binding_id else item for item in execution["bindings"]]
+            execution["bindings"] = bindings
+            updated = replace(state, execution=execution)
+            updated = memory._append_event(updated, "EXECUTION_CONVERSATION_BOUND", f"Powiązano rozmowę z zadaniem {current.task_id}", task_id=current.task_id, plan_version=current.plan_version, correlation_id=current.correlation_id)
+            return updated, updated_binding
+
+        return memory.execution_transaction(transition)
+
+    def record_checkpoint(self, project_id: str, execution_binding_id: str, *, status: str, progress_summary: str = "", external_reference: str | None = None, last_progress_at: str | None = None) -> dict[str, Any]:
+        binding = self.binding(project_id, execution_binding_id)
+        normalized_status = _status(status, "checkpoint_status")
+        if normalized_status not in {"ACTIVE", "WAITING_EXTERNAL", "RESUMABLE"}:
+            _fail("checkpoint_status_invalid", "checkpoint status is unsupported")
+        if external_reference is not None:
+            external_reference = _text(external_reference, "external_reference", max_length=512)
+        checkpoint = {
+            "schema": PROJECT_EXECUTION_CHECKPOINT_SCHEMA,
+            "execution_binding_id": binding.execution_binding_id,
+            "project_id": binding.project_id,
+            "task_id": binding.task_id,
+            "plan_version": binding.plan_version,
+            "status": normalized_status,
+            "progress_summary": _text(progress_summary, "progress_summary", max_length=4_000, required=False),
+            "external_reference": external_reference,
+            "last_progress_at": _text(last_progress_at or _utc_now(), "last_progress_at", max_length=64),
+        }
+        _parse_checkpoint_time(checkpoint["last_progress_at"])
+        _project, plan, memory = self._project(project_id)
+
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, dict[str, Any]]:
+            execution = _execution_document(state)
+            current = _binding_from_dict(next(item for item in execution["bindings"] if item.get("execution_binding_id") == binding.execution_binding_id))
+            if current.status != "ACTIVE" or current.superseded:
+                _fail("execution_binding_stale", "checkpoint binding is not active")
+            checkpoints = dict(execution.get("checkpoints", {})); checkpoints[binding.execution_binding_id] = checkpoint; execution["checkpoints"] = checkpoints
+            updated = replace(state, execution=execution)
+            updated = memory._append_event(updated, "EXECUTION_CHECKPOINT", f"Checkpoint {normalized_status} dla {binding.task_id}", task_id=binding.task_id, plan_version=plan.plan_version, correlation_id=binding.correlation_id)
+            return updated, checkpoint
+
+        return memory.execution_transaction(transition)
+
+    def watchdog(self, project_id: str, *, now: datetime | None = None, inactivity_seconds: float = 300.0) -> dict[str, Any]:
+        """Return an inactivity projection; it never marks a task failed/completed."""
+        _project, _plan, memory = self._project(project_id)
+        state = memory.read_state(); execution = _execution_document(state)
+        binding_id = execution.get("current_binding_id")
+        if not binding_id:
+            return {"state": "IDLE", "resume_available": False, "execution_binding_id": None}
+        binding = self.binding(project_id, str(binding_id))
+        checkpoint = execution.get("checkpoints", {}).get(binding.execution_binding_id, {})
+        checkpoint_status = str(checkpoint.get("status") or "ACTIVE")
+        last_text = checkpoint.get("last_progress_at") or binding.created_at
+        last_at = _parse_checkpoint_time(last_text)
+        observed = now or datetime.now(timezone.utc)
+        age = max(0.0, (observed.astimezone(timezone.utc) - last_at).total_seconds())
+        if checkpoint_status == "WAITING_EXTERNAL":
+            state_name = "WAITING_EXTERNAL"
+        elif age >= inactivity_seconds:
+            state_name = "STALLED"
+        else:
+            state_name = "ACTIVE"
+        return {
+            "state": state_name,
+            "resume_available": state_name == "STALLED" or checkpoint_status == "RESUMABLE",
+            "execution_binding_id": binding.execution_binding_id,
+            "task_id": binding.task_id,
+            "last_progress_at": last_text,
+            "inactivity_seconds": age,
+            "external_reference": checkpoint.get("external_reference"),
+            "progress_summary": checkpoint.get("progress_summary", ""),
+        }
+
+    def resume_binding(self, project_id: str, execution_binding_id: str) -> ProjectExecutionBinding:
+        binding = self.binding(project_id, execution_binding_id)
+        if binding.status != "ACTIVE" or binding.superseded:
+            _fail("execution_binding_stale", "same-binding resume is no longer safe")
+        return binding
+
+    def existing_result(self, project_id: str, result: Mapping[str, Any]) -> ProjectExecutionAttempt | None:
+        """Find an exact replay before mutation; used only to label receipts."""
+        binding = self.binding(project_id, _identifier(result.get("execution_binding_id"), "execution_binding_id"))
+        digest = execution_result_digest(binding, result)
+        execution = _execution_document(self._project(project_id)[2].read_state())
+        existing = next((item for item in execution["attempts"] if item.get("execution_binding_id") == binding.execution_binding_id and item.get("result_digest") == digest), None)
+        return _attempt_from_dict(existing) if existing is not None else None
 
     def begin_milestone_auto(self, project_id: str, *, milestone_id: str | None = None, milestone_run_id: str | None = None) -> dict[str, Any]:
         """Start or resume one canonical milestone run without executing work."""
@@ -386,9 +708,7 @@ class ProjectExecutionCoordinator:
             if raw_binding is None:
                 _fail("execution_binding_not_found", "execution binding does not exist")
             binding = _binding_from_dict(raw_binding)
-            base_identity = {"execution_binding_id": binding_id, "command_id": binding.command_id, "correlation_id": binding.correlation_id, "project_id": binding.project_id, "task_id": binding.task_id, "plan_version": binding.plan_version, "repo_alias": binding.repo_alias, "result_project_id": result.get("project_id"), "result_task_id": result.get("task_id"), "result_plan_version": result.get("plan_version"), "head_before": result.get("head_before"), "head_after": result.get("head_after"), "execution_status": result.get("execution_status"), "validation_status": result.get("validation_status"), "promotion_status": result.get("promotion_status"), "summary": result.get("result_summary", ""), "evidence_refs": list(result.get("evidence_refs", [])), "criteria": result.get("criteria", [])}
-            base_identity["canonical_refs"] = result.get("canonical_refs", {})
-            result_digest = semantic_digest(base_identity)
+            result_digest = execution_result_digest(binding, result)
             existing = next((item for item in execution["attempts"] if item.get("execution_binding_id") == binding_id and item.get("result_digest") == result_digest), None)
             if existing is not None:
                 replay = _attempt_from_dict(existing)
@@ -588,7 +908,7 @@ class ProjectExecutionCoordinator:
         project, plan, memory = self._project(project_id); state = memory.read_state(); execution = _execution_document(state)
         active_run = execution.get("active_milestone_run") if isinstance(execution.get("active_milestone_run"), Mapping) else None
         auto_progress = milestone_auto_progress(plan, state, str(active_run.get("milestone_id"))) if active_run else None
-        return {"schema": PROJECT_EXECUTION_SCHEMA, "project_id": project_id, "plan_version": plan.plan_version, "task_statuses": dict(execution.get("task_statuses", {})), "gate_statuses": dict(execution.get("gate_statuses", {})), "open_question_statuses": dict(execution.get("open_question_statuses", {})), "bindings": list(execution["bindings"]), "attempts": list(execution["attempts"]), "acceptance_results": list(execution["acceptance_results"]), "current_task_id": execution.get("current_task_id"), "available_tasks": [task.task_id for task in (available_project_tasks(plan, state, str(active_run.get("milestone_id"))) if active_run else available_project_tasks(plan, state))], "milestone_auto": {**(auto_progress or {}), "milestone_run_id": active_run.get("milestone_run_id")} if active_run and auto_progress else None, "stale_result": bool(execution.get("stale_result", False))}
+        return {"schema": PROJECT_EXECUTION_SCHEMA, "project_id": project_id, "plan_version": plan.plan_version, "task_statuses": dict(execution.get("task_statuses", {})), "gate_statuses": dict(execution.get("gate_statuses", {})), "open_question_statuses": dict(execution.get("open_question_statuses", {})), "bindings": list(execution["bindings"]), "attempts": list(execution["attempts"]), "acceptance_results": list(execution["acceptance_results"]), "checkpoints": dict(execution.get("checkpoints", {})), "current_binding_id": execution.get("current_binding_id"), "current_task_id": execution.get("current_task_id"), "available_tasks": [task.task_id for task in (available_project_tasks(plan, state, str(active_run.get("milestone_id"))) if active_run else available_project_tasks(plan, state))], "milestone_auto": {**(auto_progress or {}), "milestone_run_id": active_run.get("milestone_run_id")} if active_run and auto_progress else None, "watchdog": self.watchdog(project_id), "stale_result": bool(execution.get("stale_result", False))}
 
 
-__all__ = ["PROJECT_EXECUTION_SCHEMA", "ProjectExecutionAttempt", "ProjectExecutionBinding", "ProjectExecutionCoordinator", "ProjectExecutionError", "TaskAcceptanceResult"]
+__all__ = ["PROJECT_EXECUTION_SCHEMA", "PROJECT_EXECUTION_SUBMISSION_SCHEMA", "PROJECT_EXECUTION_CHECKPOINT_SCHEMA", "ProjectExecutionAttempt", "ProjectExecutionBinding", "ProjectExecutionSubmission", "ProjectExecutionCoordinator", "ProjectExecutionError", "TaskAcceptanceResult", "execution_result_digest"]

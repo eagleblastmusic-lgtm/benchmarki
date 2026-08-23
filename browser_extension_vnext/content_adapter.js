@@ -1,8 +1,10 @@
 "use strict";
 
 const SUBMISSION_SCHEMA = "bdb-vnext-submission-v1";
+const PROJECT_EXECUTION_SCHEMA = "bdb-project-execution-submission-v1";
 const MAX_SUBMISSION_TEXT = 256 * 1024;
 const decorated = new WeakSet();
+const executionDecorated = new WeakSet();
 
 function parseSubmission(block) {
   const text = typeof block.textContent === "string" ? block.textContent.trim() : "";
@@ -42,6 +44,27 @@ function requestFromSubmission(value) {
     }
   }
   return request;
+}
+
+function parseProjectExecutionResult(block) {
+  const text = typeof block.textContent === "string" ? block.textContent.trim() : "";
+  if (!text || text.length > MAX_SUBMISSION_TEXT || !text.includes(PROJECT_EXECUTION_SCHEMA)) return null;
+  try {
+    const value = JSON.parse(text);
+    if (!value || typeof value !== "object" || Array.isArray(value) || value.schema !== PROJECT_EXECUTION_SCHEMA) return null;
+    const required = [
+      "project_id", "plan_version", "task_id", "execution_binding_id", "correlation_id", "command_id",
+      "repo_alias", "head_before", "head_after", "execution_status", "validation_status",
+      "promotion_status", "result_summary", "evidence_refs", "criteria"
+    ];
+    if (required.some((field) => !(field in value))) return null;
+    if (typeof value.project_id !== "string" || typeof value.task_id !== "string" || typeof value.execution_binding_id !== "string") return null;
+    if (!Array.isArray(value.evidence_refs) || !Array.isArray(value.criteria)) return null;
+    return value;
+  } catch (_error) {
+    // YAML and prose are intentionally not accepted as a canonical result.
+    return null;
+  }
 }
 
 function assistantOwner(block) {
@@ -101,6 +124,59 @@ function decorate(block, submission) {
     }
   });
 
+  panel.append(button, output);
+  host.insertAdjacentElement("afterend", panel);
+}
+
+async function projectExecutionBindingForConversation(conversationId) {
+  if (!conversationId) return null;
+  const bindings = await projectReadBindings();
+  return Object.values(bindings).find((value) => value && value.conversation_id === conversationId && typeof value.project_id === "string" && typeof value.execution_binding_id === "string" && typeof value.launch_id === "string") || null;
+}
+
+function decorateProjectExecution(block, result) {
+  if (executionDecorated.has(block) || !assistantOwner(block)) return;
+  executionDecorated.add(block);
+  const host = block.closest("pre") || block.parentElement;
+  if (!(host instanceof HTMLElement)) return;
+  const panel = document.createElement("div");
+  panel.className = "bdb-vnext-project-execution-panel";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "bdb-vnext-project-execution-submit";
+  button.textContent = "BDB vNext: Submit result";
+  button.setAttribute("aria-label", "Submit this project execution result to canonical BDB Project Memory");
+  const output = document.createElement("div");
+  output.className = "bdb-vnext-project-execution-output";
+  output.setAttribute("role", "status");
+  output.setAttribute("aria-live", "polite");
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    setResult(output, "Submitting project result through canonical vNext transport…");
+    try {
+      const conversationId = projectConversationId();
+      const binding = await projectExecutionBindingForConversation(conversationId);
+      if (!binding) throw new Error("project_execution_binding_not_found");
+      const response = await chrome.runtime.sendMessage({
+        type: "bdb-vnext-project-execution-submit",
+        result,
+        conversation_id: conversationId,
+        launch_id: binding.launch_id
+      });
+      if (response && response.ok === true && response.receipt) {
+        const receipt = response.receipt;
+        const next = receipt.current_task_id ? ` · Next: ${receipt.current_task_id}` : "";
+        setResult(output, `${receipt.replayed ? "Replayed" : "Accepted"}: ${receipt.task_id}${next}`, "success");
+        button.textContent = "BDB vNext: Result accepted";
+        return;
+      }
+      throw new Error(response && response.error ? response.error : "project execution result rejected");
+    } catch (error) {
+      setResult(output, error instanceof Error ? error.message : String(error), "error");
+      button.textContent = "BDB vNext: Retry result";
+      button.disabled = false;
+    }
+  });
   panel.append(button, output);
   host.insertAdjacentElement("afterend", panel);
 }
@@ -308,11 +384,12 @@ async function projectPeek() {
   return projectValidLaunch(result.response.launch) ? result.response.launch : null;
 }
 
-async function projectClaim(launch, claimId) {
+async function projectClaim(launch, claimId, conversationId) {
   const result = await chrome.runtime.sendMessage({
     type: "bdb-vnext-project-launch-claim",
     launch_id: launch.launch_id,
-    claim_id: claimId
+    claim_id: claimId,
+    ...(conversationId ? { conversation_id: conversationId } : {})
   });
   if (!result || result.ok !== true || !result.response || result.response.status !== "claimed") return null;
   return projectValidLaunch(result.response.launch) ? result.response.launch : null;
@@ -345,7 +422,7 @@ async function projectHandleLaunch(launch, { selectedByUser = false } = {}) {
     }
   }
   const claimId = existing ? existing.claim_id : projectClaimId(launch.launch_id);
-  const claimed = await projectClaim(launch, claimId);
+  const claimed = await projectClaim(launch, claimId, conversationId);
   if (!claimed) return false;
   const sameSelection = conversationId
     ? projectConversationId() === conversationId
@@ -421,6 +498,11 @@ function scan(root = document) {
   }
   for (const block of root.querySelectorAll("pre code")) {
     if (!(block instanceof HTMLElement) || decorated.has(block)) {
+      continue;
+    }
+    const projectResult = parseProjectExecutionResult(block);
+    if (projectResult) {
+      decorateProjectExecution(block, projectResult);
       continue;
     }
     const submission = parseSubmission(block);

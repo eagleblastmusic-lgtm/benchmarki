@@ -42,3 +42,25 @@
 .bdb-vnext-project-launch-status[data-state="warning"] {
   font-weight: 600;
 }
+
+.bdb-vnext-project-execution-panel {
+  display: flex;
+  gap: 0.65rem;
+  align-items: center;
+  margin: 0.5rem 0 0.9rem;
+  font: inherit;
+}
+
+.bdb-vnext-project-execution-submit {
+  border: 1px solid currentColor;
+  border-radius: 0.5rem;
+  padding: 0.4rem 0.7rem;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.bdb-vnext-project-execution-output {
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-verification-race-v1",
+  "title": "BDB Verification Race v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "source", "commit_sha", "state", "stage_seconds", "cache_mode"],
+  "properties": {
+    "schema": { "const": "bdb-verification-race-v1" },
+    "source": { "enum": ["LOCAL", "GITHUB_ACTIONS"] },
+    "commit_sha": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "lock_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "state": { "enum": ["PASS", "FAIL", "QUEUED", "RUNNING", "UNAVAILABLE"] },
+    "stage_seconds": { "type": "object", "additionalProperties": { "type": "number", "minimum": 0, "maximum": 86400 } },
+    "total_seconds": { "type": "number", "minimum": 0, "maximum": 86400 },
+    "cache_mode": { "enum": ["COLD", "WARM", "UNKNOWN"] },
+    "external_run_id": { "type": "string", "maxLength": 128 }
+  }
+}

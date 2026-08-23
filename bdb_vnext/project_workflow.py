@@ -196,10 +196,24 @@ def _build_execution_prompt(project: ProjectRecord, heading: str, *, plan: Proje
         "Acceptance criteria: " + ("; ".join(current_task.acceptance_criteria) if current_task and current_task.acceptance_criteria else "brak jawnych kryteriów"),
         f"Repo HEAD przed wykonaniem: {git_head or 'unknown'}",
         f"Execution binding: {binding.execution_binding_id if binding else 'prepared by BDB before execution'}",
+        f"Task ID (copy exactly): {binding.task_id if binding else (current_task.task_id if current_task else 'prepared by BDB before execution')}",
+        f"Correlation ID (copy exactly): {binding.correlation_id if binding else 'prepared by BDB before execution'}",
+        f"Command ID (copy exactly): {binding.command_id if binding else 'prepared by BDB before execution'}",
         f"Gotowe zadania do wyboru: {', '.join(available_task_ids) if available_task_ids else 'brak lub jednoznaczne zadanie'}",
         "Najpierw pobierz aktualny bounded context przez BDB.",
         "Nie wykonuj ponownie ukończonych zadań.",
         "Sprawdź zgodność HEAD/plan/current task, a następnie pracuj nad aktualnym zadaniem.",
+        "Walidację wykonuj najpierw lokalnie: uruchom tylko szybkie, wystarczające testy/typecheck/build/cargo check zgodne z repozytorium.",
+        "GitHub Actions pozostaw jako końcową niezależną walidację albo fallback, gdy lokalny toolchain nie istnieje; nie twórz workflow/PR tylko dla pojedynczego testu.",
+        "Przed powtórzeniem kosztownej kontroli oceń, czy ostatnia zmiana mogła unieważnić poprzedni PASS.",
+        "Nie ma globalnego limitu czasu taska, liczby iteracji ani milestone AUTO; timeouty dotyczą wyłącznie pojedynczych operacji technicznych.",
+        "Jeśli czekasz na aktywne zewnętrzne CI/build, opisz WAITING_EXTERNAL i odnośnik zamiast wykonywać bezproduktywny polling.",
+        "Nie wykonuj więcej niż trzech kolejnych status polls bez zmiany; stosuj backoff i przejdź do WAITING_EXTERNAL, jeśli zewnętrzna operacja nadal trwa.",
+        "Po zatrzymaniu lub braku postępu kontynuuj ten sam project_id, plan_version, task_id, execution_binding_id i milestone_run_id; nie twórz nowego zadania.",
+        "Na końcu zwróć dokładnie jeden blok JSON (Nie YAML i bez dodatkowych BDB_SUBMISSION bloków) zgodny ze schematem bdb-project-execution-submission-v1.",
+        "Skopiuj project_id, plan_version, task_id, execution_binding_id, correlation_id, command_id, repo_alias i head_before dokładnie z tego promptu/bindingu; nie wymyślaj ich.",
+        "Wynik JSON musi zawierać: schema, project_id, plan_version, task_id, execution_binding_id, correlation_id, command_id, repo_alias, head_before, head_after, execution_status, validation_status, promotion_status, result_summary, evidence_refs i criteria; failure_code oraz canonical_refs dodaj tylko gdy istnieją.",
+        "Nie umieszczaj w tym wyniku komentarzy ani markdown poza jednym fenced code blockiem json. Nie wysyłaj formularza za pomocą BDB.",
     ]
     if milestone_run and milestone_run.get("status") == "running":
         lines.extend([
@@ -409,6 +423,83 @@ class ProjectWorkflow:
 
     def queue_continue_prompt(self, project_id: str) -> ProjectLaunch:
         return self._queue_execution_prompt(project_id, "continue")
+
+    def submit_project_execution_result(self, result: Mapping[str, Any], *, conversation_id: str, launch_id: str) -> dict[str, Any]:
+        """Record one Browser project result and, for AUTO, queue the next task."""
+        from .project_execution import ProjectExecutionSubmission
+
+        submission = ProjectExecutionSubmission.from_mapping(result)
+        project = self.catalog.get(submission.project_id)
+        if project is None:
+            raise ProjectWorkflowError("project_not_found", "project is not in the canonical catalog")
+        binding = self.execution.binding(submission.project_id, submission.execution_binding_id)
+        if binding.launch_id != launch_id:
+            raise ProjectWorkflowError("execution_launch_mismatch", "result launch does not match the canonical binding")
+        if binding.conversation_id is not None and binding.conversation_id != conversation_id:
+            raise ProjectWorkflowError("execution_conversation_mismatch", "result conversation does not match the canonical binding")
+        replay_attempt = self.execution.existing_result(submission.project_id, submission.to_dict())
+        if replay_attempt is not None:
+            snapshot = self.execution.snapshot(submission.project_id)
+            milestone = snapshot.get("milestone_auto") or {}
+            pending = self.queue.peek()
+            next_launch = pending if pending is not None and pending.project_id == submission.project_id else None
+            return {
+                "schema": "bdb-project-execution-receipt-v1",
+                "accepted": replay_attempt.result_status == "PASS",
+                "replayed": True,
+                "project_id": submission.project_id,
+                "task_id": replay_attempt.task_id,
+                "execution_binding_id": replay_attempt.execution_binding_id,
+                "attempt_id": replay_attempt.attempt_id,
+                "task_status": snapshot.get("task_statuses", {}).get(replay_attempt.task_id),
+                "current_task_id": snapshot.get("current_task_id"),
+                "milestone_run_id": milestone.get("milestone_run_id"),
+                "milestone_status": milestone.get("status"),
+                "milestone_progress": {"completed_tasks": milestone.get("completed_tasks", 0), "total_tasks": milestone.get("total_tasks", 0)},
+                "result_status": replay_attempt.result_status,
+                "next_launch": next_launch.to_dict() if next_launch is not None else None,
+            }
+        current_snapshot = self.execution.snapshot(submission.project_id)
+        if current_snapshot.get("current_binding_id") != binding.execution_binding_id:
+            raise ProjectWorkflowError("execution_binding_stale", "result binding is not the current canonical binding")
+        if binding.conversation_id is None:
+            # Legacy launch records predate canonical conversation binding. The
+            # first exact result establishes this binding once; subsequent
+            # results must match it. Browser UI exposes this only for the
+            # conversation that owns the local launch projection.
+            binding = self.execution.bind_conversation(submission.project_id, binding.execution_binding_id, conversation_id)
+        replay = False
+        attempt = self.execution.record_result(submission.project_id, submission.to_dict())
+        snapshot = self.execution.snapshot(submission.project_id)
+        next_launch: ProjectLaunch | None = None
+        auto = snapshot.get("milestone_auto")
+        if attempt.result_status == "PASS" and auto and auto.get("status") == "RUNNABLE" and snapshot.get("current_task_id"):
+            try:
+                next_launch = self.queue_continue_prompt(submission.project_id)
+            except ProjectWorkflowError as exc:
+                if exc.code != "queue_pending":
+                    raise
+                pending = self.queue.peek()
+                if pending is None or pending.project_id != submission.project_id or pending.task_id != snapshot.get("current_task_id"):
+                    raise
+                next_launch = pending
+        milestone = snapshot.get("milestone_auto") or {}
+        return {
+            "schema": "bdb-project-execution-receipt-v1",
+            "accepted": attempt.result_status == "PASS",
+            "replayed": replay,
+            "project_id": submission.project_id,
+            "task_id": attempt.task_id,
+            "execution_binding_id": attempt.execution_binding_id,
+            "attempt_id": attempt.attempt_id,
+            "task_status": snapshot.get("task_statuses", {}).get(attempt.task_id),
+            "current_task_id": snapshot.get("current_task_id"),
+            "milestone_run_id": milestone.get("milestone_run_id"),
+            "milestone_status": milestone.get("status"),
+            "milestone_progress": {"completed_tasks": milestone.get("completed_tasks", 0), "total_tasks": milestone.get("total_tasks", 0)},
+            "result_status": attempt.result_status,
+            "next_launch": next_launch.to_dict() if next_launch is not None else None,
+        }
 
     def current_repo_head(self, project: ProjectRecord) -> str:
         result = self.runner.run(("git", "rev-parse", "HEAD"), cwd=Path(project.local_repo_path), timeout_seconds=30)

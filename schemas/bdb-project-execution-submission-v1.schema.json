@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-project-execution-submission-v1",
+  "title": "BDB Project Execution Submission v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "project_id",
+    "plan_version",
+    "task_id",
+    "execution_binding_id",
+    "correlation_id",
+    "command_id",
+    "repo_alias",
+    "head_before",
+    "head_after",
+    "execution_status",
+    "validation_status",
+    "promotion_status",
+    "result_summary",
+    "evidence_refs",
+    "criteria"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-project-execution-submission-v1" },
+    "project_id": { "$ref": "#/$defs/id" },
+    "plan_version": { "type": "string", "minLength": 1, "maxLength": 32 },
+    "task_id": { "$ref": "#/$defs/id" },
+    "execution_binding_id": { "$ref": "#/$defs/id" },
+    "correlation_id": { "$ref": "#/$defs/id" },
+    "command_id": { "$ref": "#/$defs/id" },
+    "repo_alias": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$" },
+    "head_before": { "anyOf": [{ "$ref": "#/$defs/git" }, { "const": "unknown" }] },
+    "head_after": { "anyOf": [{ "$ref": "#/$defs/git" }, { "const": "unknown" }, { "type": "null" }] },
+    "execution_status": { "type": "string", "minLength": 1, "maxLength": 32 },
+    "validation_status": { "type": "string", "minLength": 1, "maxLength": 32 },
+    "promotion_status": { "type": "string", "minLength": 1, "maxLength": 32 },
+    "result_summary": { "type": "string", "maxLength": 4000 },
+    "evidence_refs": { "type": "array", "maxItems": 128, "items": { "type": "string", "minLength": 1, "maxLength": 512 } },
+    "criteria": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["criterion"],
+        "properties": {
+          "criterion": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "type": { "type": "string", "maxLength": 32 },
+          "status": { "type": "string", "maxLength": 32 },
+          "evidence_ref": { "type": ["string", "null"], "maxLength": 512 }
+        }
+      }
+    },
+    "canonical_refs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "task_id": { "$ref": "#/$defs/ref" },
+        "work_id": { "$ref": "#/$defs/ref" },
+        "candidate_id": { "$ref": "#/$defs/ref" },
+        "candidate_view_id": { "$ref": "#/$defs/ref" },
+        "candidate_tree_digest": { "$ref": "#/$defs/ref" },
+        "base_commit_oid": { "$ref": "#/$defs/ref" },
+        "validation_id": { "$ref": "#/$defs/ref" },
+        "evidence_id": { "$ref": "#/$defs/ref" },
+        "evaluation_id": { "$ref": "#/$defs/ref" },
+        "publication_id": { "$ref": "#/$defs/ref" }
+      }
+    },
+    "failure_code": { "type": "string", "minLength": 1, "maxLength": 128 }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+    "git": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "ref": { "type": ["string", "null"], "maxLength": 128 }
+  }
+}

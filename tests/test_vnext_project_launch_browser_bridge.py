@@ -101,6 +101,7 @@ def test_vnext_project_launch_browser_path_is_bounded_and_submission_path_remain
     assert 'native("project_launch_peek")' in worker
     assert 'native("project_launch_claim"' in worker
     assert 'native("project_launch_ack"' in worker
+    assert "message.conversation_id" in worker
     assert 'value.auto_send === false' in adapter
     assert "document.hasFocus()" in adapter
     assert "document.visibilityState === \"visible\"" in adapter
@@ -108,6 +109,73 @@ def test_vnext_project_launch_browser_path_is_bounded_and_submission_path_remain
     assert "insertText" in adapter
     assert ".click(" not in adapter
     assert "bdb-vnext-submission-v1" in adapter
+
+
+def test_vnext_project_execution_result_is_json_only_and_has_separate_submit_surface(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the Browser content contract")
+    harness = tmp_path / "project-execution-content.cjs"
+    harness.write_text(
+        textwrap.dedent(
+            r'''
+            "use strict";
+            const assert = require("node:assert/strict");
+            const fs = require("node:fs");
+            const vm = require("node:vm");
+            class Element {
+              constructor(kind = "div", text = "") { this.kind = kind; this.textContent = text; this.children = []; this.dataset = {}; this.style = {}; this.parentElement = null; this.listeners = {}; }
+              get innerText() { return this.textContent; }
+              set innerText(value) { this.textContent = value; }
+              getBoundingClientRect() { return { width: 600, height: 30 }; }
+              querySelector() { return null; }
+              querySelectorAll() { return []; }
+              closest(selector) { if (selector === "pre") return host; if (selector.includes("assistant")) return assistant; return null; }
+              addEventListener(type, fn) { this.listeners[type] = fn; }
+              append(...items) { this.children.push(...items); }
+              insertAdjacentElement(_where, item) { inserted.push(item); }
+              setAttribute() {}
+              focus() {}
+              dispatchEvent() {}
+            }
+            const mode = process.argv[3];
+            const valid = JSON.stringify({ schema: "bdb-project-execution-submission-v1", project_id: "project-1", plan_version: "1", task_id: "P0-01", execution_binding_id: "binding-1", correlation_id: "corr-1", command_id: "command-1", repo_alias: "premium-calculator", head_before: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", head_after: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", execution_status: "PASS", validation_status: "PASS", promotion_status: "NOT_RUN", result_summary: "done", evidence_refs: [], criteria: [] });
+            const generic = JSON.stringify({ schema: "bdb-vnext-submission-v1", submission_key: "submission-1", intent_revision: {}, intent: {}, conversation_binding: {}, consumer_binding: {} });
+            const text = mode === "valid" ? valid : mode === "generic" ? generic : "BDB_SUBMISSION:\nschema: bdb-project-execution-submission-v1\nstatus: COMPLETED";
+            const assistant = new Element("assistant");
+            const host = new Element("pre");
+            const block = new Element("code", text);
+            const inserted = [];
+            const context = {
+              console, HTMLElement: Element, HTMLTextAreaElement: class extends Element {}, HTMLInputElement: class extends Element {},
+              InputEvent: class {}, Event: class {}, TextEncoder, Set, Map, crypto: { randomUUID: () => "11111111-1111-4111-8111-111111111111" },
+              window: { getComputedStyle: () => ({ visibility: "visible", display: "block" }) },
+              location: { protocol: "https:", hostname: "chatgpt.com", pathname: "/c/abcdef12-3456-4789-abcd-abcdef123456" },
+              document: { visibilityState: "visible", hasFocus: () => true, documentElement: {}, querySelector: () => null, querySelectorAll: (selector) => selector === "pre code" ? [block] : [], createElement: (kind) => new Element(kind), execCommand: () => false },
+              MutationObserver: class { observe() {} }, setInterval: () => ({ unref() {} }),
+              chrome: { storage: { local: { async get() { return {}; }, async set() {} } }, runtime: { onMessage: { addListener() {} }, async sendMessage(message) { if (message.type === "bdb-vnext-project-launch-peek") return { ok: true, response: { status: "empty" } }; return { ok: false, error: "not invoked" }; } } }
+            };
+            context.globalThis = context;
+            vm.createContext(context);
+            vm.runInContext(fs.readFileSync(process.argv[2], "utf8"), context, { filename: process.argv[2] });
+            setTimeout(() => {
+              if (mode === "valid") assert.equal(inserted[0]?.children[0]?.textContent, "BDB vNext: Submit result");
+              else if (mode === "generic") assert.equal(inserted[0]?.children[0]?.textContent, "BDB vNext: Submit");
+              else assert.equal(inserted.length, 0, "YAML must never create a project result panel");
+            }, 25);
+            '''
+        ),
+        encoding="utf-8",
+    )
+    for mode in ("valid", "generic", "yaml"):
+        completed = subprocess.run([node, str(harness), str(ROOT / "browser_extension_vnext" / "content_adapter.js"), mode], capture_output=True, text=True, check=False, timeout=10)
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+    adapter = (ROOT / "browser_extension_vnext" / "content_adapter.js").read_text(encoding="utf-8")
+    worker = (ROOT / "browser_extension_vnext" / "transport_worker.js").read_text(encoding="utf-8")
+    assert '"bdb-project-execution-submission-v1"' in adapter
+    assert 'type: "bdb-vnext-project-execution-submit"' in adapter
+    assert 'native("project_execution_submit"' in worker
+    assert "JSON.parse(text)" in adapter
 
 
 def test_vnext_project_find_composer_uses_ordered_selector_priority_and_fails_closed(tmp_path: Path) -> None:
@@ -403,12 +471,13 @@ def test_vnext_popup_inserts_pending_prompt_into_user_selected_conversation(tmp_
               assert.equal(result.code, "inserted");
               assert.equal(result.launch_id, launchId);
               assert.equal(composer.textContent, launch.prompt, "the selected conversation composer receives the pending prompt");
-              assert.deepEqual(messages.map((item) => item.type), [
-                "bdb-vnext-project-launch-peek",
-                "bdb-vnext-project-launch-claim",
-                "bdb-vnext-project-launch-ack"
-              ]);
-              assert.equal(messages.some((item) => item.type === "bdb-vnext-submit"), false);
+                assert.deepEqual(messages.map((item) => item.type), [
+                  "bdb-vnext-project-launch-peek",
+                  "bdb-vnext-project-launch-claim",
+                  "bdb-vnext-project-launch-ack"
+                ]);
+                assert.equal(messages[1].conversation_id, "abcdef12-3456-4789-abcd-abcdef123456");
+                assert.equal(messages.some((item) => item.type === "bdb-vnext-submit"), false);
             }, 25);
             '''
         ),

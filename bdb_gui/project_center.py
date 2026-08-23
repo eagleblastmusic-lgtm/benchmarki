@@ -303,18 +303,22 @@ class ProjectCenterWindow(QMainWindow):
             attempts = snapshot.get("attempts", [])
             last = attempts[-1] if attempts else None
             current = snapshot.get("current_task_id") or project.current_task or "brak"
+            watchdog = snapshot.get("watchdog") or {}
             milestone_auto = snapshot.get("milestone_auto") or None
             milestone_line = ""
             if milestone_auto:
                 milestone_line = f"AUTO milestone {milestone_auto.get('milestone_id')}: {milestone_auto.get('completed_tasks', 0)}/{milestone_auto.get('total_tasks', 0)} · {milestone_auto.get('status')}\n"
+            watchdog_line = ""
+            if watchdog.get("state") in {"WAITING_EXTERNAL", "STALLED"}:
+                watchdog_line = f"Watchdog: {watchdog.get('state')}" + (" · Resume available\n" if watchdog.get("resume_available") else "\n")
             if last and last.get("result_status") == "REVIEW_REQUIRED":
-                text = f"{milestone_line}Wykonanie: {current} — Gotowe do przeglądu\nAcceptance: REVIEW_REQUIRED\nAttempt: {last.get('attempt_id')}"
+                text = f"{milestone_line}{watchdog_line}Wykonanie: {current} — Gotowe do przeglądu\nAcceptance: REVIEW_REQUIRED\nAttempt: {last.get('attempt_id')}"
             elif last and last.get("result_status") == "FAIL":
-                text = f"{milestone_line}Wykonanie: {current} — Wymaga poprawki\n{last.get('failure_code') or 'validation failed'}"
+                text = f"{milestone_line}{watchdog_line}Wykonanie: {current} — Wymaga poprawki\n{last.get('failure_code') or 'validation failed'}"
             elif statuses and all(value in {"completed", "skipped"} for value in statuses.values()) and project.total_tasks:
-                text = f"{milestone_line}Wykonanie: zakończone\nAcceptance: PASS"
+                text = f"{milestone_line}{watchdog_line}Wykonanie: zakończone\nAcceptance: PASS"
             else:
-                text = f"{milestone_line}Wykonanie: {current} — {statuses.get(current, 'pending')}"
+                text = f"{milestone_line}{watchdog_line}Wykonanie: {current} — {statuses.get(current, 'pending')}"
             self._execution_status.setText(text)
         except Exception as exc:
             self._execution_status.setText(f"Wykonanie: stan niedostępny ({getattr(exc, 'code', 'unavailable')})")

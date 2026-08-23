@@ -20,7 +20,8 @@ const TYPES = new Set([
   "bdb-vnext-resume-outbox",
   "bdb-vnext-project-launch-peek",
   "bdb-vnext-project-launch-claim",
-  "bdb-vnext-project-launch-ack"
+  "bdb-vnext-project-launch-ack",
+  "bdb-vnext-project-execution-submit"
 ]);
 let storageChain = Promise.resolve();
 
@@ -312,10 +313,11 @@ async function projectLaunchPeek() {
   return { ok: response.status === "project_launch" || response.status === "empty", response };
 }
 
-async function projectLaunchClaim(launchId, claimId) {
+async function projectLaunchClaim(launchId, claimId, conversationId) {
   const response = await sendNative(native("project_launch_claim", {
     launch_id: boundedId(launchId, "launch_id"),
-    claim_id: boundedId(claimId, "claim_id")
+    claim_id: boundedId(claimId, "claim_id"),
+    ...(conversationId ? { conversation_id: boundedId(conversationId, "conversation_id") } : {})
   }));
   return { ok: response.status === "claimed", response };
 }
@@ -326,6 +328,21 @@ async function projectLaunchAck(launchId, claimId) {
     claim_id: boundedId(claimId, "claim_id")
   }));
   return { ok: response.status === "acknowledged", response };
+}
+
+async function projectExecutionSubmit(result, conversationId, launchId) {
+  if (!result || typeof result !== "object" || Array.isArray(result) || result.schema !== "bdb-project-execution-submission-v1") {
+    throw new Error("project execution result schema is invalid");
+  }
+  if (typeof conversationId !== "string" || !conversationId || typeof launchId !== "string" || !launchId) {
+    throw new Error("project execution binding identity is required");
+  }
+  const response = await sendNative(native("project_execution_submit", {
+    result,
+    conversation_id: boundedId(conversationId, "conversation_id"),
+    launch_id: boundedId(launchId, "launch_id")
+  }));
+  return { ok: response.status === "project_execution", receipt: response.receipt || null };
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -339,8 +356,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     : message.type === "bdb-vnext-lookup" ? lookup(message.submission_key, message.request_digest)
     : message.type === "bdb-vnext-resume-outbox" ? resumeOutbox()
     : message.type === "bdb-vnext-project-launch-peek" ? projectLaunchPeek()
-    : message.type === "bdb-vnext-project-launch-claim" ? projectLaunchClaim(message.launch_id, message.claim_id)
-    : projectLaunchAck(message.launch_id, message.claim_id);
+    : message.type === "bdb-vnext-project-launch-claim" ? projectLaunchClaim(message.launch_id, message.claim_id, message.conversation_id)
+    : message.type === "bdb-vnext-project-launch-ack" ? projectLaunchAck(message.launch_id, message.claim_id)
+    : projectExecutionSubmit(message.result, message.conversation_id, message.launch_id);
   operation.then(
     (result) => sendResponse(result),
     (error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) })

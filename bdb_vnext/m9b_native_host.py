@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import struct
 import sys
 from dataclasses import dataclass
@@ -36,6 +37,9 @@ from bdb_vnext.m11c_windows_clients import M11cClientError, record_browser_launc
 from bdb_vnext.m3a_submission import M3aError, ShadowSubmissionRequest
 from bdb_vnext.m3c_admission import CanonicalVNextAdmissionAuthority, M3cError
 from bdb_vnext.m9b_activation import M9bActivationError, read_activation, require_active
+from bdb_vnext.project_catalog import ProjectCatalog
+from bdb_vnext.project_execution import ProjectExecutionCoordinator, ProjectExecutionError, ProjectExecutionSubmission
+from bdb_vnext.project_workflow import ProjectWorkflow, ProjectWorkflowError
 from bdb_vnext.project_launch import (
     ProjectLaunchQueueAdapter,
     ProjectLaunchQueueError,
@@ -55,6 +59,7 @@ M9B_NATIVE_ACTIONS = frozenset({
     "project_launch_peek",
     "project_launch_claim",
     "project_launch_ack",
+    "project_execution_submit",
 })
 
 
@@ -222,6 +227,18 @@ def _project_launch_response(config: VNextNativeConfig, request_id: str, *, stat
     return response
 
 
+def _project_execution_response(config: VNextNativeConfig, request_id: str, receipt: Mapping[str, Any]) -> dict[str, Any]:
+    response = _base_response(config, request_id)
+    response.update({"status": "project_execution", "receipt": dict(receipt), "legacy_fallback": False})
+    return response
+
+
+def _conversation_id(value: object) -> str:
+    if not isinstance(value, str) or len(value) < 8 or len(value) > 128 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}", value):
+        _fail("execution_conversation_invalid", "conversation_id is invalid")
+    return value
+
+
 def _activation_projection(config: VNextNativeConfig) -> dict[str, Any]:
     try:
         client = read_activation(config.runtime_root)
@@ -307,6 +324,18 @@ def handle_message(
             response["client_verification_sha256"] = verification["verification_sha256"]
         return response
 
+    if action == "project_execution_submit":
+        conversation_id = _conversation_id(message.get("conversation_id"))
+        launch_id = _bounded_text(message.get("launch_id"), field="launch_id", maximum=64)
+        raw_result = message.get("result")
+        try:
+            submission = ProjectExecutionSubmission.from_mapping(raw_result)
+            workflow = ProjectWorkflow(config.runtime_root, catalog=ProjectCatalog(config.runtime_root))
+            receipt = workflow.submit_project_execution_result(submission.to_dict(), conversation_id=conversation_id, launch_id=launch_id)
+            return _project_execution_response(config, request_id, receipt)
+        except (ProjectExecutionError, ProjectWorkflowError) as exc:
+            raise M9bNativeError(getattr(exc, "code", "project_execution_failed"), str(exc)) from exc
+
     # Project launch is a bounded transport handoff from the canonical GUI to
     # one eligible Browser conversation. It is deliberately independent of
     # production admission/activation: it never writes Task/Work state and it
@@ -325,6 +354,15 @@ def handle_message(
             launch_id = _bounded_text(message.get("launch_id"), field="launch_id", maximum=64)
             claim_id = _bounded_text(message.get("claim_id"), field="claim_id", maximum=64)
             if action == "project_launch_claim":
+                conversation_id = message.get("conversation_id")
+                if conversation_id is not None:
+                    conversation_id = _conversation_id(conversation_id)
+                    preview = queue.peek()
+                    if preview is not None and preview.launch_id == launch_id and preview.project_id and preview.execution_binding_id:
+                        try:
+                            ProjectExecutionCoordinator(config.runtime_root, catalog=ProjectCatalog(config.runtime_root)).bind_conversation(preview.project_id, preview.execution_binding_id, conversation_id)
+                        except ProjectExecutionError as exc:
+                            raise M9bNativeError(exc.code, str(exc)) from exc
                 launch = queue.claim(launch_id=launch_id, claim_id=claim_id, lease_seconds=30)
                 return _project_launch_response(
                     config,
