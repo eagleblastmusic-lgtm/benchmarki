@@ -492,11 +492,22 @@ if (typeof chrome === "object" && chrome.runtime && chrome.runtime.onMessage) {
   });
 }
 
-function scan(root = document) {
-  if (!root || typeof root.querySelectorAll !== "function") {
-    return;
+function codeBlocks(root) {
+  if (!root) return [];
+  const blocks = [];
+  if (typeof root.matches === "function" && root.matches("pre code")) {
+    blocks.push(root);
   }
-  for (const block of root.querySelectorAll("pre code")) {
+  if (typeof root.querySelectorAll === "function") {
+    for (const block of root.querySelectorAll("pre code")) {
+      if (!blocks.includes(block)) blocks.push(block);
+    }
+  }
+  return blocks;
+}
+
+function scan(root = document) {
+  for (const block of codeBlocks(root)) {
     if (!(block instanceof HTMLElement) || decorated.has(block)) {
       continue;
     }
@@ -512,18 +523,44 @@ function scan(root = document) {
   }
 }
 
+const STREAM_SCAN_DEBOUNCE_MS = 50;
+const pendingMutationRoots = new Set();
+let pendingMutationScan = null;
+
+function mutationScanRoot(node) {
+  let element = node;
+  if (!element || element.nodeType !== 1) {
+    element = element && (element.parentElement || element.parentNode);
+  }
+  if (!element) return document;
+  if (typeof element.closest === "function") {
+    return element.closest("[data-message-author-role='assistant']") || element;
+  }
+  return element;
+}
+
+function scheduleMutationScan(node) {
+  pendingMutationRoots.add(mutationScanRoot(node));
+  if (pendingMutationScan !== null) return;
+  pendingMutationScan = setTimeout(() => {
+    pendingMutationScan = null;
+    const roots = Array.from(pendingMutationRoots);
+    pendingMutationRoots.clear();
+    for (const root of roots) scan(root);
+  }, STREAM_SCAN_DEBOUNCE_MS);
+}
+
 scan(document);
 const observer = new MutationObserver((records) => {
   for (const record of records) {
-    for (const node of record.addedNodes) {
-      if (node instanceof HTMLElement) {
-        scan(node);
-      }
+    scheduleMutationScan(record.target);
+    for (const node of record.addedNodes || []) {
+      scheduleMutationScan(node);
     }
   }
 });
 if (document.documentElement) {
-  observer.observe(document.documentElement, { childList: true, subtree: true });
+  observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
 }
 
 if (typeof chrome === "object" && chrome.runtime && typeof chrome.runtime.sendMessage === "function") {

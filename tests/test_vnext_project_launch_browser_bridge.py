@@ -178,6 +178,183 @@ def test_vnext_project_execution_result_is_json_only_and_has_separate_submit_sur
     assert "JSON.parse(text)" in adapter
 
 
+def test_vnext_project_execution_result_is_detected_from_streamed_dom_mutations(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the Browser content contract")
+    harness = tmp_path / "project-execution-stream.cjs"
+    harness.write_text(
+        textwrap.dedent(
+            r'''
+            "use strict";
+            const assert = require("node:assert/strict");
+            const fs = require("node:fs");
+            const vm = require("node:vm");
+
+            class TextNode {
+              constructor(data, parent = null) { this.nodeType = 3; this.data = data; this.parentElement = parent; this.parentNode = parent; }
+              get textContent() { return this.data; }
+              set textContent(value) { this.data = String(value); }
+            }
+
+            class Element {
+              constructor(kind = "div", text = "") {
+                this.nodeType = 1;
+                this.kind = kind;
+                this._text = text;
+                this.children = [];
+                this.parentElement = null;
+                this.parentNode = null;
+                this.dataset = {};
+                this.style = {};
+                this.listeners = {};
+              }
+              get textContent() {
+                return this.children.length ? this.children.map((child) => child.textContent || "").join("") : this._text;
+              }
+              set textContent(value) {
+                this.children = [];
+                this._text = String(value);
+              }
+              get innerText() { return this.textContent; }
+              set innerText(value) { this.textContent = value; }
+              append(...items) {
+                for (const item of items) {
+                  this.children.push(item);
+                  item.parentElement = this;
+                  item.parentNode = this;
+                }
+              }
+              appendChild(item) { this.append(item); return item; }
+              querySelectorAll(selector) {
+                const found = [];
+                const visit = (item) => {
+                  for (const child of item.children || []) {
+                    if (selector === "pre code" && child.kind === "code" && item.kind === "pre") found.push(child);
+                    visit(child);
+                  }
+                };
+                visit(this);
+                return found;
+              }
+              querySelector() { return null; }
+              matches(selector) { return selector === "pre code" && this.kind === "code" && this.parentElement?.kind === "pre"; }
+              closest(selector) {
+                let current = this;
+                while (current) {
+                  if (selector === "pre" && current.kind === "pre") return current;
+                  if (selector.includes("assistant") && current.kind === "assistant") return current;
+                  current = current.parentElement;
+                }
+                return null;
+              }
+              getBoundingClientRect() { return { width: 600, height: 30 }; }
+              addEventListener(type, fn) { this.listeners[type] = fn; }
+              insertAdjacentElement(_where, item) { inserted.push(item); }
+              setAttribute() {}
+              focus() {}
+              dispatchEvent() {}
+            }
+
+            const mode = process.argv[3];
+            const project = JSON.stringify({ schema: "bdb-project-execution-submission-v1", project_id: "project-1", plan_version: "1", task_id: "P0-01", execution_binding_id: "binding-1", correlation_id: "corr-1", command_id: "command-1", repo_alias: "premium-calculator", head_before: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", head_after: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", execution_status: "PASS", validation_status: "PASS", promotion_status: "NOT_RUN", result_summary: "done", evidence_refs: [], criteria: [] });
+            const generic = JSON.stringify({ schema: "bdb-vnext-submission-v1", submission_key: "submission-1", intent_revision: {}, intent: {}, conversation_binding: {}, consumer_binding: {} });
+            const invalid = mode === "yaml" ? "BDB_SUBMISSION:\nschema: bdb-project-execution-submission-v1\nstatus: COMPLETED" : "{\"schema\":\"bdb-project-execution-submission-v1\"}";
+            const finalText = mode === "project" || mode === "duplicate" ? project : mode === "generic" ? generic : invalid;
+            const assistant = new Element("assistant");
+            const pre = new Element("pre");
+            const code = new Element("code");
+            const text = new TextNode("");
+            assistant.append(pre);
+            pre.append(code);
+            code.append(text);
+            const documentElement = new Element("html");
+            documentElement.append(assistant);
+            const inserted = [];
+            let observerCallback = null;
+            let observerOptions = null;
+            class FakeMutationObserver {
+              constructor(callback) { observerCallback = callback; }
+              observe(_target, options) { observerOptions = options; }
+            }
+            const context = {
+              console,
+              HTMLElement: Element,
+              HTMLTextAreaElement: class extends Element {},
+              HTMLInputElement: class extends Element {},
+              InputEvent: class {},
+              Event: class {},
+              TextEncoder,
+              Set,
+              Map,
+              crypto: { randomUUID: () => "11111111-1111-4111-8111-111111111111" },
+              window: { getComputedStyle: () => ({ visibility: "visible", display: "block" }) },
+              location: { protocol: "https:", hostname: "chatgpt.com", pathname: "/c/abcdef12-3456-4789-abcd-abcdef123456" },
+              document: {
+                visibilityState: "visible",
+                hasFocus: () => true,
+                documentElement,
+                querySelector: () => null,
+                querySelectorAll: (selector) => selector === "pre code" ? documentElement.querySelectorAll(selector) : [],
+                createElement: (kind) => new Element(kind),
+                execCommand: () => false
+              },
+              MutationObserver: FakeMutationObserver,
+              setTimeout,
+              clearTimeout,
+              setInterval: () => ({ unref() {} }),
+              chrome: {
+                storage: { local: { async get() { return {}; }, async set() {} } },
+                runtime: {
+                  onMessage: { addListener() {} },
+                  async sendMessage(message) {
+                    if (message.type === "bdb-vnext-project-launch-peek") return { ok: true, response: { status: "empty" } };
+                    return { ok: false, error: "not invoked" };
+                  }
+                }
+              }
+            };
+            context.globalThis = context;
+            vm.createContext(context);
+            vm.runInContext(fs.readFileSync(process.argv[2], "utf8"), context, { filename: "content_adapter.js" });
+            assert.equal(observerOptions.characterData, true, "stream observer must include characterData");
+            assert.equal(inserted.length, 0, "partial stream must not create a panel");
+
+            for (const chunk of [finalText.slice(0, 11), finalText.slice(0, 37), finalText]) {
+              text.data = chunk;
+              observerCallback([{ type: "characterData", target: text, addedNodes: [] }]);
+            }
+            observerCallback([{ type: "childList", target: code, addedNodes: [text] }]);
+
+            setTimeout(() => {
+              const expectedButton = mode === "project" || mode === "duplicate" ? "BDB vNext: Submit result" : mode === "generic" ? "BDB vNext: Submit" : null;
+              if (expectedButton) {
+                assert.equal(inserted.length, 1, "a streamed canonical result gets one panel");
+                assert.equal(inserted[0].children[0].textContent, expectedButton);
+              } else {
+                assert.equal(inserted.length, 0, "invalid JSON/YAML must stay undecorated");
+              }
+              if (mode === "duplicate") {
+                text.data = finalText;
+                observerCallback([{ type: "characterData", target: text, addedNodes: [] }]);
+                setTimeout(() => assert.equal(inserted.length, 1, "a decorated block must not receive a duplicate panel"), 60);
+              }
+            }, 80);
+            '''
+        ),
+        encoding="utf-8",
+    )
+    for mode in ("project", "duplicate", "generic", "json", "yaml"):
+        completed = subprocess.run(
+            [node, str(harness), str(ROOT / "browser_extension_vnext" / "content_adapter.js"), mode],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
 def test_vnext_project_find_composer_uses_ordered_selector_priority_and_fails_closed(tmp_path: Path) -> None:
     node = shutil.which("node")
     if node is None:
