@@ -21,8 +21,6 @@ const PROMOTION_WAIT_ATTEMPTS = 300;
 const PROMOTION_WAIT_MILLISECONDS = 100;
 const DEFAULT_AUTO_SETTINGS = Object.freeze({
   autoEnabled: false,
-  autoMaxIterations: 4,
-  autoMaxMinutes: 10,
   autoShadowMode: false
 });
 const AUTO_REPLAY_GUARD_KEY = "bdbAutoReplayGuard";
@@ -36,7 +34,15 @@ const TERMINAL_VALUES = new Set([
   "manual_reconciliation_required",
   "failed",
   "cancelled",
-  "aborted"
+  "aborted",
+  "milestone_completed",
+  "blocked",
+  "gate_required",
+  "open_question_required",
+  "prerequisite_required",
+  "review_required",
+  "stale",
+  "dirty"
 ]);
 const AUTO_RECOVERABLE_READ_OPERATIONS = new Set([
   WORKSPACE_CONTEXT_OPERATION,
@@ -641,15 +647,10 @@ async function submitAction(action, tabId) {
 function normalizeAutoSettings(raw) {
   const enabled = raw.autoEnabled === true;
   const shadowMode = raw.autoShadowMode === true;
-  const iterations = Number.isInteger(raw.autoMaxIterations) ? raw.autoMaxIterations : DEFAULT_AUTO_SETTINGS.autoMaxIterations;
-  const minutes = Number.isInteger(raw.autoMaxMinutes) ? raw.autoMaxMinutes : DEFAULT_AUTO_SETTINGS.autoMaxMinutes;
-  if (iterations < 1 || iterations > 30 || minutes < 1 || minutes > 30) {
-    throw new Error("AUTO limits are outside the allowed range");
-  }
+  // Legacy total-run limit fields are intentionally ignored. They are not
+  // terminal conditions for a milestone run.
   return {
     autoEnabled: enabled,
-    autoMaxIterations: iterations,
-    autoMaxMinutes: minutes,
     autoShadowMode: shadowMode
   };
 }
@@ -682,10 +683,22 @@ function automationMetadata(action) {
   ) {
     throw new Error("AUTO continue_on_failure must be boolean when present");
   }
+  const validateOptionalId = (value, field) => {
+    if (value === undefined || value === null) {
+      return null;
+    }
+    if (typeof value !== "string" || !LOOP_ID_RE.test(value)) {
+      throw new Error(`AUTO ${field} has an unsafe format`);
+    }
+    return value;
+  };
   return {
     loopId: metadata.loop_id,
     iteration: metadata.iteration,
-    continueOnFailure: metadata.continue_on_failure === true
+    continueOnFailure: metadata.continue_on_failure === true,
+    milestoneRunId: validateOptionalId(metadata.milestone_run_id, "milestone_run_id"),
+    milestoneId: validateOptionalId(metadata.milestone_id, "milestone_id"),
+    taskId: validateOptionalId(metadata.task_id, "task_id")
   };
 }
 
@@ -771,6 +784,16 @@ function structuredTerminalValue(response) {
     : null;
 
   if (resultObject) {
+    const milestone = resultObject.milestone && typeof resultObject.milestone === "object"
+      ? resultObject.milestone
+      : null;
+    if (
+      [resultObject.milestone_status, milestone && milestone.status, resultObject.task_guidance && resultObject.task_guidance.milestone_status]
+        .concat(data ? [data.milestone_status, data.milestone && data.milestone.status] : [])
+        .some((value) => ["completed", "milestone_completed"].includes(String(value || "").toLowerCase()))
+    ) {
+      return "milestone_completed";
+    }
     if (resultObject.acceptance && resultObject.acceptance.status === "passed") {
       return "done";
     }
@@ -806,6 +829,71 @@ function structuredTerminalValue(response) {
   }
   if (resultObject && resultObject.status === "failed") {
     return "failed";
+  }
+  return null;
+}
+
+function autoMilestoneProgress(response, metadata) {
+  const result = response && response.result;
+  const resultObject = result && typeof result === "object" && !Array.isArray(result)
+    ? result
+    : null;
+  const guidance = resultObject && resultObject.task_guidance && typeof resultObject.task_guidance === "object"
+    ? resultObject.task_guidance
+    : null;
+  const data = resultObject && resultObject.data && typeof resultObject.data === "object"
+    ? resultObject.data
+    : null;
+  const raw = resultObject && resultObject.milestone && typeof resultObject.milestone === "object"
+    ? resultObject.milestone
+    : (resultObject && resultObject.milestone_progress && typeof resultObject.milestone_progress === "object"
+      ? resultObject.milestone_progress
+      : (resultObject && resultObject.milestone_auto && typeof resultObject.milestone_auto === "object"
+      ? resultObject.milestone_auto
+        : (guidance && guidance.milestone && typeof guidance.milestone === "object"
+          ? guidance.milestone
+          : (data && data.milestone && typeof data.milestone === "object" ? data.milestone : null))));
+  if (!raw) {
+    return null;
+  }
+  const milestoneId = typeof raw.milestone_id === "string" ? raw.milestone_id : metadata.milestoneId;
+  const milestoneRunId = typeof raw.milestone_run_id === "string" ? raw.milestone_run_id : metadata.milestoneRunId;
+  const nextTaskId = typeof raw.next_task_id === "string" ? raw.next_task_id : null;
+  const status = typeof raw.status === "string" ? raw.status.trim().toLowerCase() : null;
+  const completed = Number.isInteger(raw.completed_tasks) ? raw.completed_tasks : null;
+  const total = Number.isInteger(raw.total_tasks) ? raw.total_tasks : null;
+  const runnable = Array.isArray(raw.runnable_task_ids)
+    ? raw.runnable_task_ids.filter((item) => typeof item === "string").slice(0, 128)
+    : [];
+  if (!milestoneId && !milestoneRunId && !nextTaskId && !status && completed === null && total === null) {
+    return null;
+  }
+  if (status && !new Set(["running", "blocked", "completed", "runnable", "milestone_completed", "gate_required", "open_question_required", "prerequisite_required", "review_required", "needs_user", "policy_denied", "stale", "dirty"]).has(status)) {
+    return null;
+  }
+  return {
+    schema: "bdb-milestone-progress-v1",
+    milestone_id: milestoneId || null,
+    milestone_run_id: milestoneRunId || null,
+    next_task_id: nextTaskId,
+    status: status || (nextTaskId ? "running" : null),
+    completed_tasks: completed,
+    total_tasks: total,
+    runnable_task_ids: runnable,
+    blocker: raw.blocker && typeof raw.blocker === "object" ? raw.blocker : null
+  };
+}
+
+function milestoneProgressTerminal(progress) {
+  if (!progress || typeof progress.status !== "string") {
+    return null;
+  }
+  const status = progress.status.toLowerCase();
+  if (status === "completed" || status === "milestone_completed") {
+    return "milestone_completed";
+  }
+  if (TERMINAL_VALUES.has(status)) {
+    return status;
   }
   return null;
 }
@@ -879,12 +967,11 @@ async function considerAuto(action, tabId) {
   const state = storedState || {
     startedAt: now,
     lastIteration: 0,
-    status: "running",
-    iterationCeiling: settings.autoMaxIterations
+    status: "running"
   };
-  if (!Number.isInteger(state.iterationCeiling) || state.iterationCeiling < state.lastIteration) {
-    state.iterationCeiling = Math.max(state.lastIteration, settings.autoMaxIterations);
-  }
+  if (metadata.milestoneRunId) state.milestone_run_id = metadata.milestoneRunId;
+  if (metadata.milestoneId) state.milestone_id = metadata.milestoneId;
+  if (metadata.taskId) state.task_id = metadata.taskId;
   if (
     state.lastResponse &&
     typeof state.lastResponse === "object" &&
@@ -923,20 +1010,6 @@ async function considerAuto(action, tabId) {
   if (state.status !== "running") {
     return { executed: false, reason: "loop_not_running", state };
   }
-  if (metadata.iteration > state.iterationCeiling) {
-    return {
-      executed: false,
-      reason: "iteration_limit",
-      expectedIteration: state.lastIteration + 1,
-      allowedThrough: state.iterationCeiling,
-      state
-    };
-  }
-  if (now - state.startedAt > settings.autoMaxMinutes * 60 * 1000) {
-    state.status = "time_limit";
-    await chrome.storage.session.set({ [key]: state });
-    return { executed: false, reason: "time_limit", state };
-  }
   if (metadata.iteration !== state.lastIteration + 1) {
     return { executed: false, reason: "non_sequential_iteration", state };
   }
@@ -953,9 +1026,10 @@ async function considerAuto(action, tabId) {
     response.error &&
     response.error.code === "internal_error"
   );
-  const terminal = recoverableFailure || recoverableReadFailure || recoverableNativeError
+  const reportedTerminal = recoverableFailure || recoverableReadFailure || recoverableNativeError
     ? null
     : structuredTerminalValue(response);
+  const milestoneProgress = autoMilestoneProgress(response, metadata);
   const completed = response.status === "completed";
   const canContinue = completed || recoverableReadFailure || recoverableNativeError;
   state.lastIteration = metadata.iteration;
@@ -964,10 +1038,30 @@ async function considerAuto(action, tabId) {
   state.lastResponseIteration = metadata.iteration;
   state.lastResponseDelivered = false;
   state.updatedAt = Date.now();
-  state.status = terminal || (canContinue ? "running" : "needs_user");
+  // A completed task may report `done` while its canonical milestone cursor
+  // points to the next runnable task. That is a task boundary, not a
+  // milestone terminal state; only the explicit milestone status stops AUTO.
+  const advancesTask = Boolean(
+    milestoneProgress &&
+    ["running", "runnable"].includes(milestoneProgress.status) &&
+    typeof milestoneProgress.next_task_id === "string" &&
+    milestoneProgress.next_task_id.length > 0
+  );
+  const progressTerminal = milestoneProgressTerminal(milestoneProgress);
+  const terminal = advancesTask && reportedTerminal === "done"
+    ? null
+    : (progressTerminal || reportedTerminal);
+  const milestoneTerminal = terminal === "milestone_completed";
+  state.status = milestoneTerminal
+    ? "milestone_completed"
+    : (advancesTask ? "running" : (terminal || (canContinue ? "running" : "needs_user")));
+  if (milestoneProgress) {
+    state.milestone_progress = milestoneProgress;
+    if (milestoneProgress.next_task_id) state.next_task_id = milestoneProgress.next_task_id;
+  }
   await chrome.storage.session.set({ [key]: state });
 
-  const shouldContinue = canContinue && !terminal && metadata.iteration < state.iterationCeiling;
+  const shouldContinue = canContinue && !terminal && !milestoneTerminal;
   return {
     executed: true,
     response,
@@ -976,6 +1070,8 @@ async function considerAuto(action, tabId) {
     recoverableFailure,
     recoverableReadFailure,
     recoverableNativeError,
+    milestoneProgress,
+    taskCompleted: Boolean(reportedTerminal === "done" || advancesTask || milestoneTerminal),
     shouldContinue,
     stopReason: terminal || (canContinue ? null : "result_not_completed"),
     state

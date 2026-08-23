@@ -100,7 +100,7 @@ async function bdbAutoRecordMutationReconciliation(action, tabId, metadata, erro
       startedAt: now,
       lastIteration: 0,
       status: "running",
-      iterationCeiling: metadata.iteration
+      lastUncertainIteration: metadata.iteration
     };
 
   state.lastIteration = metadata.iteration;
@@ -110,8 +110,10 @@ async function bdbAutoRecordMutationReconciliation(action, tabId, metadata, erro
   state.lastResponseDelivered = false;
   state.status = "manual_reconciliation_required";
   state.updatedAt = now;
-  state.iterationCeiling = Math.max(
-    Number.isInteger(state.iterationCeiling) ? state.iterationCeiling : 0,
+  // Diagnostic marker only: it records the last uncertain mutation and is
+  // never consulted as an AUTO continuation limit.
+  state.lastUncertainIteration = Math.max(
+    Number.isInteger(state.lastUncertainIteration) ? state.lastUncertainIteration : 0,
     metadata.iteration
   );
   await chrome.storage.session.set({ [key]: state });

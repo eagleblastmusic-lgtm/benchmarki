@@ -7,7 +7,7 @@ This Manifest V3 extension implements bounded ASSISTED and explicit opt-in AUTO 
 - It recognizes only explicit JSON code blocks using `bdb-action-v1`.
 - Before Native Host submission, mutating actions receive client preflight for safe repository paths, the exact local `allowed_paths`, canonical Base64 and every declared `content_sha256`.
 - ASSISTED remains manual: `BDB: Wykonaj` sends one action to `com.bartosz.dev_bridge` and the extension never clicks Send for an ordinary ASSISTED action.
-- AUTO runs only after the operator explicitly enables it and remains bounded by configured iteration and time limits.
+- AUTO runs only after the operator explicitly enables it; total iterations and milestone-run duration are unbounded, while each Native operation retains its own timeout and safety guards.
 - AUTO continuation is sent only after the current result is completed, required promotion is observed, and the exact composer submission is confirmed.
 - AUTO result transport targets 12 KiB, permits at most 16 KiB on the single-replacement contenteditable fast path, and retains a 4 KiB ceiling for the legacy insertion fallback. `inspect_bundle` adapts its profile while preserving query counts, paths and bounded excerpts.
 - A hard-coded content build handshake detects a ChatGPT tab that survived an extension update and asks for an explicit tab reload.
@@ -16,8 +16,8 @@ This Manifest V3 extension implements bounded ASSISTED and explicit opt-in AUTO 
 - Exact read actions are cached only while the trusted local Git `HEAD` still matches. Exact mutating actions are deduplicated for five minutes against the same post-promotion commit.
 - Optional `bdb-acceptance-v1` assertions verify result status, changed paths, promotion, tests and bounded post-action searches before recommending completion.
 - Visual tasks may set `manual_visual_confirmation_required`; AUTO then stops with `needs_confirmation` and asks for feedback in ordinary chat text. A negative user assessment can resume only the same verified visual task with explicit `continue_after_user_feedback: true`; other `needs_user` states stay blocked.
-- Explicit resume grants the same task a fresh bounded iteration window in the active ChatGPT tab and immediately retries the already visible expected action.
-- A replacement ChatGPT panel waits through a full bounded Native operation and automatically claims its durable checkpoint. Explicit resume recovers any pending result before granting a new iteration budget.
+- Explicit resume continues the same canonical task/milestone cursor in the active ChatGPT tab and immediately retries the already visible expected action.
+- A replacement ChatGPT panel waits through the bounded Native operation and automatically claims its durable checkpoint. Explicit resume recovers any pending result without allocating a task-level iteration budget.
 - File delete/move/rename operations never run in AUTO; they fall back to the explicit ASSISTED button.
 - Shadow mode records the decision, risk and estimated complexity without executing the action.
 - The popup exposes health, task stop/resume, cache control, an explicit end-to-end AUTO self-test and a one-file sanitized diagnostics ZIP.

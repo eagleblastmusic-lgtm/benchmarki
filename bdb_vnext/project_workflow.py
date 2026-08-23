@@ -163,11 +163,17 @@ def _build_execution_prompt(project: ProjectRecord, heading: str, *, plan: Proje
     current_plan = plan
     current_task = None
     available_task_ids: tuple[str, ...] = ()
+    execution = state.execution if state is not None and isinstance(state.execution, Mapping) else {}
+    milestone_run = execution.get("active_milestone_run") if isinstance(execution.get("active_milestone_run"), Mapping) else None
     if current_plan is not None:
         current_task_id = state.execution.get("current_task_id") if state is not None and isinstance(state.execution, Mapping) else None
         current_task = next((item for item in current_plan.tasks if item.task_id == current_task_id), None) if current_task_id else None
         if current_task is None:
-            available = available_project_tasks(current_plan, state or ProjectMemoryState(project.project_id))
+            available = available_project_tasks(
+                current_plan,
+                state or ProjectMemoryState(project.project_id),
+                str(milestone_run.get("milestone_id")) if milestone_run and milestone_run.get("status") in {"running", "review", "blocked"} else None,
+            )
             available_task_ids = tuple(item.task_id for item in available)
             if len(available) == 1:
                 current_task = available[0]
@@ -195,6 +201,13 @@ def _build_execution_prompt(project: ProjectRecord, heading: str, *, plan: Proje
         "Nie wykonuj ponownie ukończonych zadań.",
         "Sprawdź zgodność HEAD/plan/current task, a następnie pracuj nad aktualnym zadaniem.",
     ]
+    if milestone_run and milestone_run.get("status") == "running":
+        lines.extend([
+            "Tryb: MILESTONE AUTO — wykonuj wyłącznie bieżący milestone, sekwencyjnie i bez równoległości.",
+            f"Milestone run ID: {milestone_run.get('milestone_run_id')}",
+            f"Milestone ID: {milestone_run.get('milestone_id')}",
+            "Po machine acceptance przejdź do następnego runnable tasku tego samego milestone'u; po jego ukończeniu zwróć MILESTONE_COMPLETED i zatrzymaj się. Nie uruchamiaj następnego milestone'u.",
+        ])
     if state is not None:
         active_decisions = [item.title + ": " + item.decision for item in state.decisions if item.status == "active"]
         attention = [item.type + ": " + item.title for item in state.attention if item.status == "open"]

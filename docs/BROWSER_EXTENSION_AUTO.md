@@ -21,7 +21,7 @@ An action executes automatically only when both conditions are true:
 
 Without both conditions, the normal `BDB: Wykonaj` button remains.
 
-## Limits and state
+## Milestone-scoped state
 
 The background worker stores per-tab/per-loop state in `chrome.storage.session`:
 
@@ -30,23 +30,23 @@ The background worker stores per-tab/per-loop state in `chrome.storage.session`:
 - last command ID;
 - running or terminal status.
 
-User-configured limits are bounded to 1–8 iterations and 1–30 minutes. Iterations must arrive exactly in sequence. Duplicate, skipped, expired or already terminal loops do not execute.
+AUTO has no total iteration ceiling and no total milestone-run duration ceiling. Iterations must arrive exactly in sequence. Duplicate, skipped or already terminal loops do not execute. Legacy total-run limit fields are ignored and are never used as limits.
 
 A separate durable replay guard is stored in `chrome.storage.local` before Native Host submission. It prevents the same `<loop_id>:<iteration>` from executing again after a page reload, service-worker restart or browser restart. The guard retains at most 512 recent entries. A replay collision, storage failure or uncertain interrupted attempt falls back to ASSISTED. The transport may resend the same durably receipted `request_id` once to recover its original result, but AUTO never creates a second independent effect automatically.
 
-Version 0.4.0 also stores a bounded durable task ledger and up to sixteen compact result checkpoints. If Chrome or the service worker stops after Native completion but before ChatGPT consumes the result, the same action panel recovers the exact checkpoint and delivers it without submitting another Native effect. The popup can explicitly stop or resume the latest task. Since 0.4.5, a replacement panel waits through the bounded Native operation and automatically claims the checkpoint. Explicit resume first recovers an undelivered result in the active ChatGPT tab; only when no result is pending does it grant a fresh configured iteration budget. Resume never enables global AUTO.
+Version 0.4.0 also stores a bounded durable task ledger and up to sixteen compact result checkpoints. If Chrome or the service worker stops after Native completion but before ChatGPT consumes the result, the same action panel recovers the exact checkpoint and delivers it without submitting another Native effect. The popup can explicitly stop or resume the latest task. Since 0.4.5, a replacement panel waits through the bounded Native operation and automatically claims the checkpoint. Explicit resume first recovers an undelivered result in the active ChatGPT tab; Project Memory/Execution remains the authority for the current task and milestone. Resume never enables global AUTO.
 
 For visual changes, `bdb-acceptance-v1` may set `manual_visual_confirmation_required: true`. After all automated checks pass, the controller returns `needs_confirmation` and stops AUTO with `needs_user`; it does not infer that the rendered UI is correct from compilation or source searches alone. The resulting guidance is `await_user_visual_feedback`, which means that ChatGPT asks in normal prose and must not create a `manual_visual_confirmation` BDB operation.
 
-If the user reports that the visual result is wrong, the next sequential action in the same loop may set `automation.continue_after_user_feedback: true`. Version 0.4.7 accepts that flag only when the preceding delivered checkpoint has `acceptance.status: needs_confirmation`. It reopens the same task with a fresh bounded iteration window. The flag cannot resume policy failures, undelivered results, unrelated `needs_user` states or a different loop.
+If the user reports that the visual result is wrong, the next sequential action in the same loop may set `automation.continue_after_user_feedback: true`. Version 0.4.7 accepts that flag only when the preceding delivered checkpoint has `acceptance.status: needs_confirmation`. It reopens the same task without a total-run limit. The flag cannot resume policy failures, undelivered results, unrelated `needs_user` states or a different loop.
 
 One user task uses one `loop_id` (up to 128 safe characters) and monotonically increasing iterations. A fresh `loop_id` is reserved for a new user task, not every BDB action. Short identifiers under 48 characters are recommended for readable result markers.
 
 The 0.4.0 action compiler normalizes unsafe model-generated identifiers before the replay/state machinery sees them and returns the effective ID in `decision.compiler`. Missing iterations are filled from the durable task ledger. This prevents formatting mistakes from silently forcing ASSISTED while retaining a traceable original task identity.
 
-## Task sizing
+## Milestone orchestration
 
-Two or three iterations are a target for a typical bounded repair, not a hard task limit. Larger work is divided into explicit phases such as analysis, implementation and integration verification. One phase remains bounded by the user's 1–8 iteration and 1–30 minute limits; a later phase uses a fresh task loop only after the earlier phase has ended safely.
+AUTO may keep iterating until the current task reaches machine acceptance. When the canonical response reports a completed task and a runnable next task in the same milestone, the browser continues with that task one at a time. Selection/order is supplied by Project Memory/Execution; the Browser does not invent or parallelize work. When all tasks in the active milestone are completed/skipped, the response is terminal `milestone_completed` and the next milestone requires an explicit user start. Gate, open-question, prerequisite, manual review, policy, stale, reconciliation and cancellation stops remain authoritative.
 
 `inspect_bundle` should consolidate repository state, up to eight searches and relevant reads. A single `multi_file_patch` should then apply one coherent atomic change and its fixed test profile. Independent searches inside one inspection run concurrently against the same immutable Git commit and reuse an in-process cache keyed by `HEAD`.
 
@@ -74,7 +74,7 @@ Recursive bounded result inspection stops AUTO for:
 - `CANCELLED`;
 - `ABORTED`.
 
-A time/iteration violation, replay guard rejection, missing composer, non-empty draft, missing exact send button or a non-recoverable extension/native error also stops automatic continuation. Before iteration 1, AUTO checks the Native Host arm state. A disarmed host returns `native_host_disarmed` without consuming the iteration or creating a replay claim, so arming and retrying the same action is safe. A bounded `internal_error` remains a running AUTO planning loop: the exact receipted request is retried first, and the returned diagnostic can then drive a focused inspection without requiring a manual click.
+Replay guard rejection, missing composer, non-empty draft, missing exact send button or a non-recoverable extension/native error also stops automatic continuation. Individual Native requests, commands/tests, payloads and result transfers remain bounded by their technical timeouts and size limits. Before iteration 1, AUTO checks the Native Host arm state. A disarmed host returns `native_host_disarmed` without consuming the iteration or creating a replay claim, so arming and retrying the same action is safe. A bounded `internal_error` remains a running AUTO planning loop: the exact receipted request is retried first, and the returned diagnostic can then drive a focused inspection without requiring a manual click.
 
 Before `replace_exact_and_test`, the browser preflight searches the exact old text across the allowed repository scope. If it exists in more than one location, no mutation is submitted. AUTO returns `scope_incomplete` with candidate paths and continues the same loop so the next action can use one reviewed `multi_file_patch` for all relevant runtime sources.
 

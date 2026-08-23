@@ -206,7 +206,7 @@ def test_auto_replay_claim_recovers_after_failure_and_deduplicates_in_flight(
               nativeMode = "success";
               const recovered = await context.considerAuto(action(recoveryLoop, 6), 101);
               assert.equal(recovered.executed, true, JSON.stringify(recovered));
-              assert.equal(recovered.shouldContinue, false, JSON.stringify(recovered));
+              assert.equal(recovered.shouldContinue, true, JSON.stringify(recovered));
               assert.equal(sessionStore[recoveryStateKey].lastIteration, 6);
               assert.equal(
                 localStore.bdbAutoReplayGuard[recoveryReplayKey].status,

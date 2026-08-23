@@ -3,7 +3,7 @@
 // ChatGPT can render the next AUTO action while the previous decision is still
 // publishing its canonical loop state. A duplicate live panel can also observe
 // the same iteration while its durable replay lease is still processing. Retry
-// only those exact transient gaps; all replay, iteration, time and opt-in gates
+// only those exact transient gaps; all replay, sequence and opt-in gates
 // remain owned by the background worker.
 const BDB_AUTO_DECISION_RETRY_ATTEMPTS = 24;
 const BDB_AUTO_DECISION_RETRY_MS = 250;
@@ -189,11 +189,8 @@ function bdbAutoStopLabel(reason, auto = null) {
   if (reason === "invalid_visual_feedback_resume") {
     return "nieprawidłowe wznowienie po ocenie";
   }
-  if (reason === "iteration_limit") {
-    return "limit AUTO — wznów zadanie albo uruchom ręcznie";
-  }
-  if (reason === "time_limit") {
-    return "minął czas AUTO — wznów zadanie albo uruchom ręcznie";
+  if (reason === "milestone_completed") {
+    return "milestone ukończony — dalszy etap wymaga uruchomienia przez użytkownika";
   }
   return reason || "ASSISTED";
 }

@@ -5,7 +5,9 @@
 // undelivered AUTO result after a browser/service-worker restart, deduplicates
 // exact actions against the same Git HEAD, and evaluates optional acceptance
 // criteria after execution. It never enables AUTO and never bypasses policy,
-// replay, iteration, time, promotion or high-risk gates.
+// replay, promotion or high-risk gates. Milestone progression remains a
+// projection of canonical Project Memory/Execution responses; this controller
+// only records the durable transport cursor and never selects work itself.
 const BDB_TASK_CONTROLLER_SCHEMA = "bdb-task-controller-v1";
 const BDB_TASK_LEDGER_KEY = "bdbTaskLedgerV1";
 const BDB_TASK_DIAGNOSTICS_KEY = "bdbAutoDiagnosticsV1";
@@ -227,7 +229,7 @@ async function bdbTaskLedger() {
   const raw = stored[BDB_TASK_LEDGER_KEY];
   return raw && typeof raw === "object" && !Array.isArray(raw)
     ? bdbTaskClone(raw)
-    : { schema: BDB_TASK_CONTROLLER_SCHEMA, tasks: {} };
+    : { schema: BDB_TASK_CONTROLLER_SCHEMA, tasks: {}, milestone_runs: {} };
 }
 
 async function bdbTaskUpsert(loopId, patch) {
@@ -282,6 +284,42 @@ async function bdbTaskUpsert(loopId, patch) {
       .sort((left, right) => (left[1].updated_at || 0) - (right[1].updated_at || 0))
       .slice(-BDB_TASK_MAX_LEDGER);
     ledger.tasks = Object.fromEntries(retained);
+    await chrome.storage.local.set({ [BDB_TASK_LEDGER_KEY]: ledger });
+    return next;
+  });
+}
+
+async function bdbTaskMilestoneRunUpsert(milestoneRunId, patch) {
+  if (!BDB_TASK_LOOP_ID_RE.test(milestoneRunId || "")) {
+    return null;
+  }
+  return bdbTaskWithStorageLock(async () => {
+    const ledger = await bdbTaskLedger();
+    const now = Date.now();
+    const current = ledger.milestone_runs && ledger.milestone_runs[milestoneRunId]
+      ? ledger.milestone_runs[milestoneRunId]
+      : {
+        milestone_run_id: milestoneRunId,
+        status: "running",
+        completed_task_ids: [],
+        created_at: now
+      };
+    const requested = bdbTaskClone(patch) || {};
+    const next = { ...current, ...requested, updated_at: now };
+    if (Array.isArray(next.completed_task_ids)) {
+      next.completed_task_ids = [...new Set([
+        ...(Array.isArray(current.completed_task_ids) ? current.completed_task_ids : []),
+        ...next.completed_task_ids
+      ].filter((item) => typeof item === "string"))].slice(-256);
+    }
+    ledger.milestone_runs = ledger.milestone_runs && typeof ledger.milestone_runs === "object"
+      ? { ...ledger.milestone_runs, [milestoneRunId]: next }
+      : { [milestoneRunId]: next };
+    ledger.milestone_runs = Object.fromEntries(
+      Object.entries(ledger.milestone_runs)
+        .sort((left, right) => (left[1].updated_at || 0) - (right[1].updated_at || 0))
+        .slice(-BDB_TASK_MAX_LEDGER)
+    );
     await chrome.storage.local.set({ [BDB_TASK_LEDGER_KEY]: ledger });
     return next;
   });
@@ -1172,7 +1210,6 @@ async function bdbTaskResumeAfterVisualFeedback(action, tabId) {
   }
   const now = Date.now();
   const previousResponse = sessionProof ? current.lastResponse : durable.response;
-  const iterationCeiling = previousIteration + settings.autoMaxIterations;
   await chrome.storage.session.set({
     [key]: {
       ...current,
@@ -1182,7 +1219,6 @@ async function bdbTaskResumeAfterVisualFeedback(action, tabId) {
       lastResponseIteration: previousIteration,
       lastResponseDelivered: true,
       status: "running",
-      iterationCeiling,
       resumedAfterVisualFeedback: true,
       updatedAt: now
     }
@@ -1209,7 +1245,7 @@ async function bdbTaskResumeAfterVisualFeedback(action, tabId) {
     resumed: true,
     reason: null,
     previousIteration,
-    iterationCeiling
+    unlimited: true
   };
 }
 
@@ -1282,6 +1318,19 @@ considerAuto = async function considerAutoWithTaskController(action, tabId) {
   const iteration = metadata && metadata.iteration;
   const operation = effective && effective.operation;
   const traceId = effective && effective.trace_id;
+  const milestoneRunId = metadata && typeof metadata.milestone_run_id === "string"
+    ? metadata.milestone_run_id
+    : null;
+  const milestoneId = metadata && typeof metadata.milestone_id === "string"
+    ? metadata.milestone_id
+    : (effective && effective.task && typeof effective.task.milestone_id === "string"
+      ? effective.task.milestone_id
+      : null);
+  const taskId = metadata && typeof metadata.task_id === "string"
+    ? metadata.task_id
+    : (effective && effective.task && typeof effective.task.id === "string"
+      ? effective.task.id
+      : null);
 
   const feedbackResume = await bdbTaskResumeAfterVisualFeedback(effective, tabId);
   if (feedbackResume.requested && !feedbackResume.resumed) {
@@ -1448,6 +1497,25 @@ considerAuto = async function considerAutoWithTaskController(action, tabId) {
       };
       await bdbTaskUpsert(loopId, taskPatch);
     }
+    if (milestoneRunId && !repeatedBenignStop) {
+      const progress = decision && decision.milestoneProgress;
+      const completedTaskIds = decision && decision.taskCompleted === true && taskId
+        ? [taskId]
+        : [];
+      await bdbTaskMilestoneRunUpsert(milestoneRunId, {
+        milestone_id: milestoneId,
+        current_task_id: progress && progress.next_task_id
+          ? progress.next_task_id
+          : taskId,
+        status: progress && progress.status
+          ? progress.status
+          : (decision && decision.stopReason === "milestone_completed" ? "completed" : "running"),
+        completed_task_ids: completedTaskIds,
+        progress: progress || null,
+        last_loop_id: loopId,
+        last_iteration: Number.isInteger(iteration) ? iteration : null
+      });
+    }
     if (!repeatedBenignStop) {
       await bdbTaskRecordDiagnostic({
         event: replayed ? "auto_result_replayed" : (decision && decision.executed ? "auto_executed" : "auto_stopped"),
@@ -1557,7 +1625,10 @@ async function bdbTaskSnapshot() {
   return {
     schema: "bdb-task-snapshot-v1",
     tasks,
-    total: tasks.length
+    total: tasks.length,
+    milestone_runs: ledger.milestone_runs && typeof ledger.milestone_runs === "object"
+      ? Object.values(ledger.milestone_runs).slice(-BDB_TASK_MAX_LEDGER)
+      : []
   };
 }
 
@@ -1734,15 +1805,12 @@ async function bdbResumeTask(loopId, tabId) {
     ...observedIterations,
     0
   );
-  const settings = await getAutoSettings();
-  const iterationCeiling = lastIteration + settings.autoMaxIterations;
   await chrome.storage.session.set({
     [key]: {
       ...current,
       startedAt: Date.now(),
       lastIteration,
       status: "running",
-      iterationCeiling,
       restoredFromTaskLedger: true,
       updatedAt: Date.now()
     }
@@ -1758,7 +1826,7 @@ async function bdbResumeTask(loopId, tabId) {
     loop_id: loopId,
     status: "running",
     expected_iteration: lastIteration + 1,
-    allowed_through_iteration: iterationCeiling,
+    unlimited: true,
     instruction: "Reload the ChatGPT tab if its action panel is not visible."
   };
 }

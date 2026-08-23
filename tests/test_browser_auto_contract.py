@@ -11,18 +11,19 @@ def read(name: str) -> str:
     return (EXTENSION / name).read_text(encoding="utf-8")
 
 
-def test_auto_is_disabled_by_default_and_has_bounded_limits() -> None:
+def test_auto_is_disabled_by_default_and_is_milestone_scoped() -> None:
     background = read("background.js")
     assert "autoEnabled: false" in background
-    assert "autoMaxIterations: 4" in background
-    assert "autoMaxMinutes: 10" in background
-    assert "iterations < 1 || iterations > 30" in background
-    assert "minutes < 1 || minutes > 30" in background
+    assert "autoMaxIterations" not in background
+    assert "autoMaxMinutes" not in background
+    assert "autoMilestoneProgress" in background
+    assert '"milestone_completed"' in background
+    assert "now - state.startedAt" not in background
     assert "chrome.storage.session" in background
     assert "non_sequential_iteration" in background
 
 
-def test_auto_requires_action_metadata_and_hard_stops() -> None:
+def test_auto_requires_action_metadata_and_preserves_manual_stops() -> None:
     background = read("background.js")
     assert 'metadata.mode !== "auto"' in background
     assert "loop_id" in background
@@ -34,6 +35,7 @@ def test_auto_requires_action_metadata_and_hard_stops() -> None:
         "failed",
         "cancelled",
         "aborted",
+        "milestone_completed",
     ):
         assert terminal in background
 
@@ -65,6 +67,7 @@ def test_popup_exposes_explicit_auto_opt_in() -> None:
     popup = read("popup.html")
     script = read("popup.js")
     assert 'id="auto-enabled"' in popup
-    assert 'id="auto-iterations"' in popup
-    assert 'id="auto-minutes"' in popup
+    assert 'id="auto-iterations"' not in popup
+    assert 'id="auto-minutes"' not in popup
+    assert "milestone_runs" in script
     assert "BDB_SET_AUTO_SETTINGS" in script

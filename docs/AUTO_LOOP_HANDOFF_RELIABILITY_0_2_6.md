@@ -30,7 +30,7 @@ the content script performs a bounded retry:
 - no replay-guard changes;
 - no retry for terminal, disabled, stale, or already-processed decisions.
 
-The background worker remains the sole owner of AUTO opt-in, time and iteration limits, canonical loop state, and `<loop_id>:<iteration>` replay claims.
+The background worker remains the sole owner of AUTO opt-in, canonical loop state, and `<loop_id>:<iteration>` replay claims. Total milestone-run iteration and duration are not limits; only individual operation timeouts and safety guards remain bounded.
 
 ## Confirmed multi-strategy send
 

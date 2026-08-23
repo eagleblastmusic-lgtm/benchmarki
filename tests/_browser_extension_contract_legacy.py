@@ -113,20 +113,20 @@ def test_auto_continues_only_after_verified_rollback_profile_failure() -> None:
     assert 'data.operation === "multi_file_patch"' in background
     assert "data.rollback_performed === true" in background
     assert 'data.checkpoint_state === "rolled_back"' in background
-    assert "recoverableFailure || recoverableNativeError" in background
+    assert "recoverableFailure || recoverableReadFailure || recoverableNativeError" in background
     assert 'response.error.code === "internal_error"' in background
     assert "recoverableFailure," in background
 
 
-def test_auto_remains_bounded_and_explicitly_opt_in() -> None:
+def test_auto_is_milestone_scoped_and_explicitly_opt_in() -> None:
     background = read("background.js")
     content = read("content.js")
     assert "autoEnabled: false" in background
-    assert "autoMaxIterations: 4" in background
-    assert "autoMaxMinutes: 10" in background
-    assert "metadata.iteration > state.iterationCeiling" in background
-    assert "state.iterationCeiling" in background
-    assert "now - state.startedAt > settings.autoMaxMinutes" in background
+    assert "autoMaxIterations" not in background
+    assert "autoMaxMinutes" not in background
+    assert "autoMilestoneProgress" in background
+    assert '"milestone_completed"' in background
+    assert "now - state.startedAt" not in background
     assert 'automation.mode !== "auto"' in content
     assert "BDB_CONSIDER_AUTO" in content
     assert "BDB_AUTO_RESULT" in content

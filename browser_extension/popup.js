@@ -5,8 +5,6 @@ const aliasInput = document.getElementById("alias");
 const output = document.getElementById("output");
 const autoEnabled = document.getElementById("auto-enabled");
 const autoShadow = document.getElementById("auto-shadow");
-const autoIterations = document.getElementById("auto-iterations");
-const autoMinutes = document.getElementById("auto-minutes");
 const autoState = document.getElementById("auto-state");
 const versionLabel = document.getElementById("version");
 const taskState = document.getElementById("task-state");
@@ -64,11 +62,17 @@ async function loadTasks() {
     const tasks = result && result.ok === true && Array.isArray(result.response.tasks)
       ? result.response.tasks
       : [];
+    const milestoneRuns = result && result.ok === true && Array.isArray(result.response.milestone_runs)
+      ? result.response.milestone_runs
+      : [];
+    const milestone = milestoneRuns.length > 0 ? milestoneRuns[milestoneRuns.length - 1] : null;
     if (tasks.length === 0) {
       latestTaskLoopId = null;
       latestTaskConversationId = null;
       latestTaskConversationTabId = null;
-      taskState.textContent = "Brak trwałych zadań.";
+      taskState.textContent = milestone
+        ? `AUTO milestone: ${milestone.milestone_id || "—"}\nStatus: ${milestone.status || "running"}\nPostęp: ${(milestone.progress && milestone.progress.completed_tasks) ?? 0}/${(milestone.progress && milestone.progress.total_tasks) ?? "?"}`
+        : "Brak trwałych zadań.";
       resumeTaskButton.disabled = true;
       cancelTaskButton.disabled = true;
       return;
@@ -80,6 +84,11 @@ async function loadTasks() {
       ? task.conversation_tab_id
       : null;
     taskState.textContent = [
+      ...(milestone ? [
+        `AUTO milestone: ${milestone.milestone_id || "—"}`,
+        `Milestone status: ${milestone.status || "running"}`,
+        `Milestone progress: ${(milestone.progress && milestone.progress.completed_tasks) ?? 0}/${(milestone.progress && milestone.progress.total_tasks) ?? "?"}`
+      ] : []),
       `Zadanie: ${task.title || task.loop_id}`,
       `Faza: ${task.phase || "nieznana"}`,
       `Status: ${task.status || "nieznany"}`,
@@ -108,8 +117,6 @@ async function loadSettings() {
   if (result && result.ok === true) {
     autoEnabled.checked = result.response.autoEnabled === true;
     autoShadow.checked = result.response.autoShadowMode === true;
-    autoIterations.value = String(result.response.autoMaxIterations);
-    autoMinutes.value = String(result.response.autoMaxMinutes);
   }
   await loadAutoState();
   await loadTasks();
@@ -144,9 +151,7 @@ document.getElementById("context").addEventListener("click", async () => {
 document.getElementById("save-auto").addEventListener("click", async () => {
   const settings = {
     autoEnabled: autoEnabled.checked,
-    autoShadowMode: autoShadow.checked,
-    autoMaxIterations: Number(autoIterations.value),
-    autoMaxMinutes: Number(autoMinutes.value)
+    autoShadowMode: autoShadow.checked
   };
   await run({ type: "BDB_SET_AUTO_SETTINGS", settings });
 });

@@ -81,7 +81,7 @@ A successful click is therefore no longer confused with a successfully submitted
 
 ## Safety boundaries
 
-- AUTO remains opt-in and bounded by iteration and time limits.
+- AUTO remains opt-in. Total iteration count and milestone-run duration are not limits; individual Native operations retain their bounded timeout and safety contracts.
 - The replay guard remains keyed by `<loop_id>:<iteration>`.
 - No arbitrary shell capability is added.
 - No allowlist or path scope is expanded.

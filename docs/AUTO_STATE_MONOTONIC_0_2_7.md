@@ -29,7 +29,7 @@ The synchronization layer is now monotonic:
 - the canonical key is re-read immediately before a legacy migration write;
 - `background.js` remains the sole writer that advances normal AUTO execution state.
 
-Replay claims, AUTO opt-in, time/iteration limits, Native Messaging, rollback and promotion behavior are unchanged.
+Replay claims, AUTO opt-in, Native Messaging, rollback and promotion behavior are unchanged. AUTO now follows the canonical current-milestone cursor without a task-level time or iteration ceiling.
 
 ## Windows helper-process visibility
 

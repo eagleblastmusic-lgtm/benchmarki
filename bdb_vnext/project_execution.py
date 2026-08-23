@@ -17,7 +17,7 @@ from typing import Any, Iterable, Mapping
 from bdb_shared.evidence import semantic_digest
 
 from .project_catalog import ProjectCatalog, ProjectPlan, ProjectRecord, ProjectTask
-from .project_memory import ProjectMemoryState, ProjectMemoryStore, available_project_tasks, task_prerequisite_blockers
+from .project_memory import ProjectMemoryState, ProjectMemoryStore, available_project_tasks, milestone_auto_progress, task_prerequisite_blockers
 
 
 PROJECT_EXECUTION_SCHEMA = "bdb-project-execution-v1"
@@ -66,7 +66,7 @@ def _status(value: object, field: str) -> str:
 def _execution_document(state: ProjectMemoryState) -> dict[str, Any]:
     raw = state.execution if isinstance(state.execution, Mapping) else {}
     if not raw:
-        return {"schema": PROJECT_EXECUTION_SCHEMA, "bindings": [], "attempts": [], "acceptance_results": [], "task_statuses": {}, "gate_statuses": {}, "open_question_statuses": {}, "milestones_completed": []}
+        return {"schema": PROJECT_EXECUTION_SCHEMA, "bindings": [], "attempts": [], "acceptance_results": [], "task_statuses": {}, "gate_statuses": {}, "open_question_statuses": {}, "milestones_completed": [], "milestone_runs": {}}
     if raw.get("schema", PROJECT_EXECUTION_SCHEMA) != PROJECT_EXECUTION_SCHEMA:
         _fail("execution_schema_invalid", "project execution state schema differs")
     result = dict(raw)
@@ -75,11 +75,14 @@ def _execution_document(state: ProjectMemoryState) -> dict[str, Any]:
     result.setdefault("acceptance_results", [])
     result.setdefault("task_statuses", {})
     result.setdefault("milestones_completed", [])
+    result.setdefault("milestone_runs", {})
     for key in ("bindings", "attempts", "acceptance_results"):
         if not isinstance(result[key], list) or len(result[key]) > 512 or any(not isinstance(item, Mapping) for item in result[key]):
             _fail("execution_shape_invalid", f"execution.{key} is invalid")
     if not isinstance(result["task_statuses"], Mapping) or len(result["task_statuses"]) > 2_048:
         _fail("execution_shape_invalid", "execution.task_statuses is invalid")
+    if not isinstance(result["milestone_runs"], Mapping) or len(result["milestone_runs"]) > 128:
+        _fail("execution_shape_invalid", "execution.milestone_runs is invalid")
     for key in ("gate_statuses", "open_question_statuses"):
         if not isinstance(result[key], Mapping) or len(result[key]) > 512:
             _fail("execution_shape_invalid", f"execution.{key} is invalid")
@@ -234,6 +237,102 @@ class ProjectExecutionCoordinator:
     def start(self, project_id: str, **kwargs: Any) -> ProjectExecutionBinding:
         return self.persist_binding(self.new_binding(project_id, **kwargs))
 
+    def begin_milestone_auto(self, project_id: str, *, milestone_id: str | None = None, milestone_run_id: str | None = None) -> dict[str, Any]:
+        """Start or resume one canonical milestone run without executing work."""
+        project, plan, memory = self._project(project_id)
+        initial_state = memory.read_state()
+        progress = milestone_auto_progress(plan, initial_state, milestone_id)
+        if progress.get("status") not in {"RUNNABLE", "MILESTONE_COMPLETED"}:
+            _fail(str(progress.get("status") or "MILESTONE_REQUIRED"), "milestone AUTO cannot start", details=progress)
+        selected = str(progress.get("milestone_id"))
+        initial_execution = _execution_document(initial_state)
+        initial_active = initial_execution.get("active_milestone_run") if isinstance(initial_execution.get("active_milestone_run"), Mapping) else None
+        inherited_run_id = initial_active.get("milestone_run_id") if initial_active and initial_active.get("milestone_id") == selected else None
+        run_id = _identifier(milestone_run_id or inherited_run_id or f"milestone-run-{uuid.uuid4().hex}", "milestone_run_id")
+        now = _utc_now()
+
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, None]:
+            execution = _execution_document(state)
+            runs = dict(execution.get("milestone_runs", {}))
+            active = execution.get("active_milestone_run") if isinstance(execution.get("active_milestone_run"), Mapping) else None
+            if active and active.get("status") in {"running", "review", "blocked"} and active.get("milestone_id") != selected:
+                _fail("milestone_run_active", "another milestone AUTO run is already active")
+            existing = runs.get(run_id)
+            if existing is not None and (existing.get("milestone_id") != selected or existing.get("project_id") != project_id):
+                _fail("milestone_run_conflict", "milestone run identity is already bound to another milestone")
+            run = {
+                **(dict(existing) if isinstance(existing, Mapping) else {}),
+                "schema": "bdb-milestone-run-v1",
+                "milestone_run_id": run_id,
+                "project_id": project_id,
+                "plan_version": plan.plan_version,
+                "milestone_id": selected,
+                "status": "completed" if progress.get("status") == "MILESTONE_COMPLETED" else "running",
+                "started_at": (existing or {}).get("started_at", now),
+                "updated_at": now,
+                "current_task_id": progress.get("next_task_id"),
+            }
+            runs[run_id] = run
+            execution["milestone_runs"] = runs
+            execution["active_milestone_run"] = run
+            execution["current_task_id"] = progress.get("next_task_id")
+            if existing is None:
+                execution["current_binding_id"] = None
+            updated = replace(state, execution=execution)
+            if existing is None:
+                updated = memory._append_event(updated, "MILESTONE_AUTO_STARTED", f"Uruchomiono AUTO dla milestone {selected}", milestone_id=selected, plan_version=plan.plan_version)
+            return updated, None
+
+        memory.execution_transaction(transition)
+        return self.milestone_auto_snapshot(project_id, run_id=run_id)
+
+    def stop_milestone_auto(self, project_id: str, *, run_id: str, reason: str = "stopped_by_user") -> dict[str, Any]:
+        project, plan, memory = self._project(project_id)
+        run_id = _identifier(run_id, "milestone_run_id")
+
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, None]:
+            execution = _execution_document(state)
+            runs = dict(execution.get("milestone_runs", {}))
+            run = runs.get(run_id)
+            if not isinstance(run, Mapping):
+                _fail("milestone_run_not_found", "milestone run does not exist")
+            updated_run = {**dict(run), "status": "stopped", "stop_reason": _text(reason, "stop_reason", max_length=256), "updated_at": _utc_now()}
+            runs[run_id] = updated_run
+            execution["milestone_runs"] = runs
+            if isinstance(execution.get("active_milestone_run"), Mapping) and execution["active_milestone_run"].get("milestone_run_id") == run_id:
+                execution["active_milestone_run"] = updated_run
+            updated = replace(state, execution=execution)
+            return memory._append_event(updated, "MILESTONE_AUTO_STOPPED", f"Zatrzymano AUTO milestone {updated_run.get('milestone_id')}: {reason}", milestone_id=updated_run.get("milestone_id"), plan_version=plan.plan_version), None
+
+        memory.execution_transaction(transition)
+        return self.milestone_auto_snapshot(project_id, run_id=run_id)
+
+    def milestone_auto_snapshot(self, project_id: str, *, run_id: str | None = None) -> dict[str, Any]:
+        project, plan, memory = self._project(project_id)
+        state = memory.read_state()
+        execution = _execution_document(state)
+        active = execution.get("active_milestone_run") if isinstance(execution.get("active_milestone_run"), Mapping) else None
+        selected_run = run_id or (active.get("milestone_run_id") if active else None)
+        run = execution.get("milestone_runs", {}).get(selected_run) if selected_run else active
+        milestone_id = run.get("milestone_id") if isinstance(run, Mapping) else None
+        progress = milestone_auto_progress(plan, state, milestone_id)
+        if isinstance(run, Mapping) and run.get("status") in {"stopped", "completed"}:
+            progress = {**progress, "status": "MILESTONE_COMPLETED" if run.get("status") == "completed" else "STOPPED"}
+        return {
+            "schema": "bdb-milestone-auto-v1",
+            "project_id": project_id,
+            "plan_version": plan.plan_version,
+            "milestone_run_id": selected_run,
+            "milestone_id": progress.get("milestone_id"),
+            "status": progress.get("status"),
+            "current_task_id": progress.get("next_task_id"),
+            "completed_tasks": progress.get("completed_tasks", 0),
+            "total_tasks": progress.get("total_tasks", 0),
+            "runnable_task_ids": list(progress.get("runnable_task_ids", [])),
+            "blocker": progress.get("blocker"),
+            "task_statuses": dict(execution.get("task_statuses", {})),
+        }
+
     @staticmethod
     def _criterion_type(criterion: str) -> str:
         lowered = criterion.strip().lower()
@@ -331,8 +430,43 @@ class ProjectExecutionCoordinator:
                 updated = replace(state, execution=execution); updated = memory._append_event(updated, "TASK_BLOCKED", f"Zadanie {task.task_id} zablokowane: {result.get('failure_code') or 'validation_failed'}", task_id=task.task_id, plan_version=plan.plan_version, correlation_id=binding.correlation_id)
             else:
                 updated = replace(state, execution=execution); updated = memory._append_event(updated, "EXECUTION_COMPLETED", f"Próba zadania {task.task_id} zakończona: {overall}", task_id=task.task_id, plan_version=plan.plan_version, correlation_id=binding.correlation_id)
-            available = available_project_tasks(plan, updated)
-            execution = dict(updated.execution); execution["current_task_id"] = available[0].task_id if len(available) == 1 else None; execution["current_binding_id"] = None
+            active_run = execution.get("active_milestone_run") if isinstance(execution.get("active_milestone_run"), Mapping) else None
+            if active_run and active_run.get("status") in {"running", "review", "blocked"}:
+                progress = milestone_auto_progress(plan, updated, str(active_run.get("milestone_id")))
+                execution = dict(updated.execution)
+                execution["current_binding_id"] = None
+                runs = dict(execution.get("milestone_runs", {}))
+                run_id = active_run.get("milestone_run_id")
+                run = dict(runs.get(run_id, active_run))
+                progress_status = str(progress.get("status") or "RUNNABLE")
+                if new_status == "completed":
+                    run_status = "completed" if progress_status == "MILESTONE_COMPLETED" else "running"
+                    next_task_id = progress.get("next_task_id")
+                elif new_status in {"review", "blocked"}:
+                    run_status = "review" if new_status == "review" else "blocked"
+                    next_task_id = task.task_id
+                else:
+                    progress_status = "RUNNABLE"
+                    run_status = "running"
+                    next_task_id = task.task_id
+                run.update({
+                    "updated_at": _utc_now(),
+                    "current_task_id": next_task_id,
+                    "completed_tasks": progress.get("completed_tasks", 0),
+                    "total_tasks": progress.get("total_tasks", 0),
+                    "status": run_status,
+                    "progress_status": progress_status,
+                    "blocker": progress.get("blocker"),
+                })
+                runs[run_id] = run
+                execution["milestone_runs"] = runs
+                execution["active_milestone_run"] = run
+                execution["current_task_id"] = next_task_id
+                if progress.get("status") == "MILESTONE_COMPLETED":
+                    updated = memory._append_event(updated, "MILESTONE_AUTO_COMPLETED", f"AUTO ukończył milestone {active_run.get('milestone_id')}", milestone_id=active_run.get("milestone_id"), plan_version=plan.plan_version, correlation_id=binding.correlation_id)
+            else:
+                available = available_project_tasks(plan, updated)
+                execution = dict(updated.execution); execution["current_task_id"] = available[0].task_id if len(available) == 1 else None; execution["current_binding_id"] = None
             completed_milestones = set(execution.get("milestones_completed", []))
             for milestone in plan.milestones:
                 required = [item for item in plan.tasks if item.milestone_id == milestone.milestone_id]
@@ -381,7 +515,16 @@ class ProjectExecutionCoordinator:
                 _fail("deterministic_acceptance_failed", "manual approval cannot override deterministic failure")
             statuses[task_id] = "completed"; execution["task_statuses"] = statuses
             candidate_state = replace(state, execution=execution)
-            available = available_project_tasks(plan, candidate_state); execution["current_task_id"] = available[0].task_id if len(available) == 1 else None
+            active_run = execution.get("active_milestone_run") if isinstance(execution.get("active_milestone_run"), Mapping) else None
+            if active_run and active_run.get("status") in {"running", "review", "blocked"}:
+                progress = milestone_auto_progress(plan, candidate_state, str(active_run.get("milestone_id")))
+                execution["current_task_id"] = progress.get("next_task_id")
+                run_id = active_run.get("milestone_run_id")
+                runs = dict(execution.get("milestone_runs", {})); run = dict(runs.get(run_id, active_run))
+                run.update({"current_task_id": progress.get("next_task_id"), "completed_tasks": progress.get("completed_tasks", 0), "total_tasks": progress.get("total_tasks", 0), "status": "completed" if progress.get("status") == "MILESTONE_COMPLETED" else "running", "progress_status": progress.get("status"), "updated_at": _utc_now()})
+                runs[run_id] = run; execution["milestone_runs"] = runs; execution["active_milestone_run"] = run
+            else:
+                available = available_project_tasks(plan, candidate_state); execution["current_task_id"] = available[0].task_id if len(available) == 1 else None
             updated = replace(candidate_state, execution=execution); updated = memory._append_event(updated, "TASK_REVIEW_ACCEPTED", f"Zatwierdzono ręczny przegląd zadania {task_id}: {_text(reason, 'review_reason', max_length=2_000)}", task_id=task_id, plan_version=plan.plan_version); return updated, None
         memory.execution_transaction(transition); self.reconcile(project_id)
 
@@ -391,6 +534,9 @@ class ProjectExecutionCoordinator:
             execution = _execution_document(state); statuses = dict(execution.get("task_statuses", {}));
             if statuses.get(task_id) != "review": _fail("task_review_required", "task is not awaiting manual review")
             statuses[task_id] = "active"; execution["task_statuses"] = statuses; execution["current_task_id"] = task_id; execution["current_binding_id"] = None
+            active_run = execution.get("active_milestone_run") if isinstance(execution.get("active_milestone_run"), Mapping) else None
+            if active_run:
+                run_id = active_run.get("milestone_run_id"); runs = dict(execution.get("milestone_runs", {})); run = dict(runs.get(run_id, active_run)); run.update({"status": "running", "current_task_id": task_id, "updated_at": _utc_now()}); runs[run_id] = run; execution["milestone_runs"] = runs; execution["active_milestone_run"] = run
             updated = replace(state, execution=execution); updated = memory._append_event(updated, "TASK_REVIEW_CHANGES_REQUESTED", f"Wymagane poprawki dla {task_id}: {_text(reason, 'review_reason', max_length=2_000)}", task_id=task_id, plan_version=plan.plan_version); return updated, None
         memory.execution_transaction(transition); self.reconcile(project_id)
 
@@ -402,10 +548,15 @@ class ProjectExecutionCoordinator:
         project, plan, memory = self._project(project_id)
         state = memory.read_state(); execution = _execution_document(state); statuses = dict(execution.get("task_statuses", {}))
         completed = sum(statuses.get(task.task_id, task.status) in {"completed", "skipped"} for task in plan.tasks)
-        available = available_project_tasks(plan, state)
+        active_run = execution.get("active_milestone_run") if isinstance(execution.get("active_milestone_run"), Mapping) else None
+        auto_active = active_run and active_run.get("status") in {"running", "review", "blocked"}
+        auto_progress = milestone_auto_progress(plan, state, str(active_run.get("milestone_id"))) if auto_active else None
+        available = available_project_tasks(plan, state, str(active_run.get("milestone_id"))) if auto_active else available_project_tasks(plan, state)
         if "current_task_id" in execution:
             current_id = execution.get("current_task_id")
-            if current_id is None and len(available) == 1:
+            if auto_active:
+                current_id = auto_progress.get("next_task_id") if auto_progress else current_id
+            elif current_id is None and not (active_run and active_run.get("status") in {"completed", "stopped"}) and len(available) == 1:
                 current_id = available[0].task_id
         else:
             current_id = plan.current_task_id if completed < len(plan.tasks) else None
@@ -425,7 +576,9 @@ class ProjectExecutionCoordinator:
 
     def snapshot(self, project_id: str) -> dict[str, Any]:
         project, plan, memory = self._project(project_id); state = memory.read_state(); execution = _execution_document(state)
-        return {"schema": PROJECT_EXECUTION_SCHEMA, "project_id": project_id, "plan_version": plan.plan_version, "task_statuses": dict(execution.get("task_statuses", {})), "gate_statuses": dict(execution.get("gate_statuses", {})), "open_question_statuses": dict(execution.get("open_question_statuses", {})), "bindings": list(execution["bindings"]), "attempts": list(execution["attempts"]), "acceptance_results": list(execution["acceptance_results"]), "current_task_id": execution.get("current_task_id"), "available_tasks": [task.task_id for task in available_project_tasks(plan, state)], "stale_result": bool(execution.get("stale_result", False))}
+        active_run = execution.get("active_milestone_run") if isinstance(execution.get("active_milestone_run"), Mapping) else None
+        auto_progress = milestone_auto_progress(plan, state, str(active_run.get("milestone_id"))) if active_run else None
+        return {"schema": PROJECT_EXECUTION_SCHEMA, "project_id": project_id, "plan_version": plan.plan_version, "task_statuses": dict(execution.get("task_statuses", {})), "gate_statuses": dict(execution.get("gate_statuses", {})), "open_question_statuses": dict(execution.get("open_question_statuses", {})), "bindings": list(execution["bindings"]), "attempts": list(execution["attempts"]), "acceptance_results": list(execution["acceptance_results"]), "current_task_id": execution.get("current_task_id"), "available_tasks": [task.task_id for task in (available_project_tasks(plan, state, str(active_run.get("milestone_id"))) if active_run else available_project_tasks(plan, state))], "milestone_auto": {**(auto_progress or {}), "milestone_run_id": active_run.get("milestone_run_id")} if active_run and auto_progress else None, "stale_result": bool(execution.get("stale_result", False))}
 
 
 __all__ = ["PROJECT_EXECUTION_SCHEMA", "ProjectExecutionAttempt", "ProjectExecutionBinding", "ProjectExecutionCoordinator", "ProjectExecutionError", "TaskAcceptanceResult"]

@@ -6,4 +6,4 @@ A sequential AUTO iteration receives a processing claim with a 180-second lease.
 
 The runtime acceptance covers recovery after a Native Messaging exception, successful retry of the same final iteration, one in-flight execution across duplicate panels, post-completion deduplication, and completion of the configured final iteration without requesting another continuation.
 
-Replay protection remains global for each loop and iteration. Opt-in, iteration limits, time limits, terminal states, promotion checks, and Native Host policy remain unchanged.
+Replay protection remains global for each loop and iteration. Opt-in, terminal states, promotion checks, and Native Host policy remain unchanged; milestone AUTO has no total iteration or duration ceiling.

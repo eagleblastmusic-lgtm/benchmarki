@@ -236,7 +236,6 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
                 startedAt: Date.now() - 2000,
                 lastIteration: 1,
                 status: "running",
-                iterationCeiling: 8,
                 lastResponse: deliveredResponse,
                 lastResponseIteration: 1,
                 lastResponseDelivered: true,
@@ -378,9 +377,8 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
               const resumed = await context.bdbResumeTask("accepted-auto-loop", 7);
               assert.equal(resumed.status, "running");
               assert.equal(resumed.expected_iteration, 2);
-              assert.equal(resumed.allowed_through_iteration, 9);
+              assert.equal(resumed.unlimited, true);
               assert.equal(sessionStore["bdbAuto:7:accepted-auto-loop"].lastIteration, 1);
-              assert.equal(sessionStore["bdbAuto:7:accepted-auto-loop"].iterationCeiling, 9);
 
               await context.bdbTaskUpsert("bound-resume-loop", {
                 status: "stopped",
@@ -499,7 +497,6 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
               assert.equal(feedbackDecision.compiler.iteration, 2);
               assert.equal(feedbackDecision.state.status, "running");
               assert.equal(sessionStore["bdbAuto:7:visual-loop"].resumedAfterVisualFeedback, true);
-              assert.equal(sessionStore["bdbAuto:7:visual-loop"].iterationCeiling, 9);
               const feedbackLedger = await context.bdbTaskLedger();
               assert.equal(feedbackLedger.tasks["visual-loop"].awaiting_visual_feedback, false);
               assert.equal(feedbackLedger.tasks["visual-loop"].status, "running");

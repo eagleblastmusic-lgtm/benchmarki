@@ -47,7 +47,7 @@ _EVENT_TYPES = frozenset({
     "DECISION_ADDED", "DECISION_SUPERSEDED", "INBOX_ITEM_ADDED", "INBOX_ITEM_RESOLVED", "RISK_ADDED", "RISK_RESOLVED",
     "TECH_DEBT_ADDED", "TECH_DEBT_RESOLVED", "ATTENTION_ADDED", "ATTENTION_RESOLVED", "CHECKPOINT_CREATED", "HANDOFF_CREATED",
     "EXECUTION_BOUND", "EXECUTION_STARTED", "EXECUTION_COMPLETED", "TASK_REVIEW", "TASK_REVIEW_ACCEPTED", "TASK_REVIEW_CHANGES_REQUESTED",
-    "TASK_COMPLETED", "TASK_BLOCKED", "EXECUTION_STALE_RESULT", "EXECUTION_REPLAYED", "MILESTONE_COMPLETED", "PROJECT_REVIEW_REQUESTED",
+    "TASK_COMPLETED", "TASK_BLOCKED", "EXECUTION_STALE_RESULT", "EXECUTION_REPLAYED", "MILESTONE_COMPLETED", "MILESTONE_AUTO_STARTED", "MILESTONE_AUTO_STOPPED", "MILESTONE_AUTO_COMPLETED", "PROJECT_REVIEW_REQUESTED",
     "GATE_PASSED", "GATE_REOPENED", "OPEN_QUESTION_RESOLVED", "OPEN_QUESTION_REOPENED",
 })
 HANDOFF_MODES = (
@@ -843,17 +843,85 @@ def _execution_task_statuses(state: ProjectMemoryState, plan: ProjectPlan | None
     return {task.task_id: str(raw.get(task.task_id, task.status)) for task in plan.tasks}
 
 
-def available_project_tasks(plan: ProjectPlan | None, state: ProjectMemoryState) -> tuple[ProjectTask, ...]:
+def available_project_tasks(plan: ProjectPlan | None, state: ProjectMemoryState, milestone_id: str | None = None) -> tuple[ProjectTask, ...]:
     if plan is None:
         return ()
     statuses = _execution_task_statuses(state, plan)
     result = []
     for task in plan.tasks:
+        if milestone_id is not None and task.milestone_id != milestone_id:
+            continue
         if statuses.get(task.task_id, task.status) not in {"pending", "active"}:
             continue
         if not task_prerequisite_blockers(plan, state, task):
             result.append(task)
     return tuple(result)
+
+
+def milestone_auto_progress(plan: ProjectPlan | None, state: ProjectMemoryState, milestone_id: str | None = None) -> dict[str, object]:
+    """Return the canonical, deterministic one-at-a-time AUTO milestone cursor.
+
+    This is read-only. Project Memory/Execution owns task status and
+    prerequisites; Browser AUTO may transport the returned cursor but may not
+    choose a task or advance a status by itself.
+    """
+    if plan is None:
+        return {"schema": "bdb-milestone-progress-v1", "status": "PROJECT_PLAN_REQUIRED", "milestone_id": None, "runnable_task_ids": []}
+    statuses = _execution_task_statuses(state, plan)
+    execution = state.execution if isinstance(state.execution, Mapping) else {}
+    active = execution.get("active_milestone_run") if isinstance(execution.get("active_milestone_run"), Mapping) else {}
+    selected = milestone_id or active.get("milestone_id")
+    if selected is None:
+        current_id = execution.get("current_task_id")
+        current = next((item for item in plan.tasks if item.task_id == current_id), None)
+        selected = current.milestone_id if current is not None else (plan.current_milestone.milestone_id if plan.current_milestone else None)
+    milestone = next((item for item in plan.milestones if item.milestone_id == selected), None)
+    if milestone is None:
+        return {"schema": "bdb-milestone-progress-v1", "status": "MILESTONE_REQUIRED", "milestone_id": selected, "runnable_task_ids": []}
+    tasks = tuple(item for item in plan.tasks if item.milestone_id == milestone.milestone_id)
+    completed = tuple(item for item in tasks if statuses.get(item.task_id, item.status) in {"completed", "skipped"})
+    incomplete = tuple(item for item in tasks if item not in completed)
+    runnable = available_project_tasks(plan, state, milestone.milestone_id)
+    base = {
+        "schema": "bdb-milestone-progress-v1",
+        "milestone_id": milestone.milestone_id,
+        "completed_tasks": len(completed),
+        "total_tasks": len(tasks),
+        "completed_task_ids": [item.task_id for item in completed],
+        "runnable_task_ids": [item.task_id for item in runnable],
+    }
+    if not incomplete:
+        return {**base, "status": "MILESTONE_COMPLETED", "next_task_id": None, "blocker": None}
+    review = next((item for item in incomplete if statuses.get(item.task_id, item.status) == "review"), None)
+    if review is not None:
+        return {**base, "status": "REVIEW_REQUIRED", "next_task_id": review.task_id, "blocker": {"id": review.task_id, "kind": "review", "status": "review"}}
+    if runnable:
+        return {**base, "status": "RUNNABLE", "next_task_id": runnable[0].task_id, "blocker": None}
+    blocked = next((item for item in incomplete if statuses.get(item.task_id, item.status) == "blocked"), None)
+    if blocked is not None:
+        return {**base, "status": "BLOCKED", "next_task_id": blocked.task_id, "blocker": {"id": blocked.task_id, "kind": "task", "status": "blocked"}}
+    blockers: list[dict[str, str]] = []
+    for task in incomplete:
+        blockers.extend(dict(item) for item in task_prerequisite_blockers(plan, state, task))
+    first = blockers[0] if blockers else {"id": milestone.milestone_id, "kind": "prerequisite", "status": "blocked"}
+    code = {"gate": "GATE_REQUIRED", "open_question": "OPEN_QUESTION_REQUIRED", "task": "PREREQUISITE_REQUIRED"}.get(first.get("kind"), "PREREQUISITE_REQUIRED")
+    return {**base, "status": code, "next_task_id": None, "blocker": first}
+
+
+def resolve_auto_next_action(plan: ProjectPlan | None, state: ProjectMemoryState, milestone_id: str | None = None) -> NextAction:
+    progress = milestone_auto_progress(plan, state, milestone_id)
+    status = progress.get("status")
+    if status == "RUNNABLE":
+        task_id = progress.get("next_task_id")
+        task = next((item for item in (plan.tasks if plan else ()) if item.task_id == task_id), None)
+        return NextAction("CONTINUE_TASK", f"Kontynuuj AUTO: {task_id}", task.description if task else "Uruchom następne zadanie milestone'u.", 6)
+    if status == "MILESTONE_COMPLETED":
+        return NextAction("MILESTONE_COMPLETED", f"Ukończono milestone: {progress.get('milestone_id')}", "Dalszy milestone wymaga jawnego uruchomienia przez użytkownika.", 7)
+    if status in {"GATE_REQUIRED", "OPEN_QUESTION_REQUIRED", "PREREQUISITE_REQUIRED", "REVIEW_REQUIRED", "BLOCKED"}:
+        blocker = progress.get("blocker") or {}
+        detail = "Wymagane działanie użytkownika przed dalszym AUTO." if status in {"REVIEW_REQUIRED", "BLOCKED"} else "Brak runnable tasku w bieżącym milestone; wymagane działanie użytkownika."
+        return NextAction(str(status), f"{status}: {blocker.get('id', 'brak')}", detail, 3)
+    return NextAction(str(status or "MILESTONE_REQUIRED"), "Milestone AUTO niedostępny", "Nie można ustalić canonical milestone'u.", 3)
 
 
 def changes_since(state: ProjectMemoryState, *, after_event_id: str | None = None, limit: int = 20) -> tuple[ProjectEvent, ...]:
@@ -910,5 +978,5 @@ def build_handoff_prompt(project: ProjectRecord, plan: ProjectPlan | None, state
 
 
 __all__ = [
-    "HANDOFF_MODES", "GATE_STATUS_VALUES", "OPEN_QUESTION_STATUS_VALUES", "AttentionItem", "Checkpoint", "DebtRecord", "DecisionRecord", "InboxItem", "NextAction", "PlanDiff", "PlanDiffItem", "PlanUpdatePreview", "ProjectEvent", "ProjectMemoryError", "ProjectMemoryState", "ProjectMemoryStore", "RiskRecord", "available_project_tasks", "bounded_history_summary", "build_handoff_prompt", "changes_since", "memory_root", "plan_version_number", "project_health", "project_status_sentence", "resolve_next_action", "semantic_plan_diff", "task_prerequisite_blockers",
+    "HANDOFF_MODES", "GATE_STATUS_VALUES", "OPEN_QUESTION_STATUS_VALUES", "AttentionItem", "Checkpoint", "DebtRecord", "DecisionRecord", "InboxItem", "NextAction", "PlanDiff", "PlanDiffItem", "PlanUpdatePreview", "ProjectEvent", "ProjectMemoryError", "ProjectMemoryState", "ProjectMemoryStore", "RiskRecord", "available_project_tasks", "milestone_auto_progress", "resolve_auto_next_action", "bounded_history_summary", "build_handoff_prompt", "changes_since", "memory_root", "plan_version_number", "project_health", "project_status_sentence", "resolve_next_action", "semantic_plan_diff", "task_prerequisite_blockers",
 ]

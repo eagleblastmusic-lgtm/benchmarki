@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 
 from bdb_vnext.control_center_query import ControlCenterQueryError, ControlCenterSnapshot, read_control_center_snapshot
 from bdb_vnext.project_catalog import ProjectBrief, ProjectCatalog, ProjectCatalogError, ProjectRecord
+from bdb_vnext.project_execution import ProjectExecutionError
 from bdb_vnext.project_workflow import ProjectWorkflow, ProjectWorkflowError
 from bdb_vnext.project_memory import HANDOFF_MODES, ProjectMemoryError, bounded_history_summary, project_health, project_status_sentence, resolve_next_action
 
@@ -229,8 +230,8 @@ class ProjectCenterWindow(QMainWindow):
         for name, object_name in (("Plan", "ProjectPlanView"), ("Historia", "ProjectHistoryView"), ("Decyzje / Inbox", "ProjectDecisionsInboxView"), ("Ryzyka / dług / checkpointy", "ProjectRisksDebtCheckpointsView")):
             view = QTextEdit(); view.setReadOnly(True); view.setObjectName(object_name); self._memory_tabs.addTab(view, name)
         layout.addWidget(self._memory_tabs, 1)
-        actions = QHBoxLayout(); self._import_plan_button = QPushButton("Wczytaj plan"); self._import_plan_button.setObjectName("ImportPlanButton"); self._import_plan_button.clicked.connect(self._import_plan); self._plan_prompt_button = QPushButton("Wstaw prompt planu"); self._plan_prompt_button.setObjectName("PlanPromptButton"); self._plan_prompt_button.clicked.connect(lambda: self._queue_prompt("plan")); self._work_prompt_button = QPushButton("Przygotuj dla Work"); self._work_prompt_button.setObjectName("WorkPromptButton"); self._work_prompt_button.clicked.connect(self._prepare_for_work); self._start_button = QPushButton("Rozpocznij w ChatGPT"); self._start_button.setObjectName("StartProjectButton"); self._start_button.clicked.connect(lambda: self._queue_prompt("start")); self._continue_button = QPushButton("Kontynuuj w ChatGPT"); self._continue_button.setObjectName("ContinueProjectButton"); self._continue_button.clicked.connect(lambda: self._queue_prompt("continue")); self._handoff_mode = QComboBox(); self._handoff_mode.setObjectName("ProjectHandoffMode"); self._handoff_mode.addItems(HANDOFF_MODES); self._handoff_button = QPushButton("Nowa rozmowa / Handoff"); self._handoff_button.setObjectName("ProjectHandoffButton"); self._handoff_button.clicked.connect(self._queue_handoff); self._approve_review_button = QPushButton("Zatwierdź review"); self._approve_review_button.setObjectName("ApproveProjectReviewButton"); self._approve_review_button.clicked.connect(self._approve_review); self._changes_review_button = QPushButton("Wymaga poprawki"); self._changes_review_button.setObjectName("RequestProjectChangesButton"); self._changes_review_button.clicked.connect(self._request_changes); self._project_review_button = QPushButton("Przegląd projektu"); self._project_review_button.setObjectName("ProjectReviewButton"); self._project_review_button.clicked.connect(self._request_project_review)
-        for button in (self._import_plan_button, self._plan_prompt_button, self._work_prompt_button, self._start_button, self._continue_button, self._handoff_mode, self._handoff_button, self._approve_review_button, self._changes_review_button, self._project_review_button): actions.addWidget(button)
+        actions = QHBoxLayout(); self._import_plan_button = QPushButton("Wczytaj plan"); self._import_plan_button.setObjectName("ImportPlanButton"); self._import_plan_button.clicked.connect(self._import_plan); self._plan_prompt_button = QPushButton("Wstaw prompt planu"); self._plan_prompt_button.setObjectName("PlanPromptButton"); self._plan_prompt_button.clicked.connect(lambda: self._queue_prompt("plan")); self._work_prompt_button = QPushButton("Przygotuj dla Work"); self._work_prompt_button.setObjectName("WorkPromptButton"); self._work_prompt_button.clicked.connect(self._prepare_for_work); self._start_button = QPushButton("Rozpocznij w ChatGPT"); self._start_button.setObjectName("StartProjectButton"); self._start_button.clicked.connect(lambda: self._queue_prompt("start")); self._continue_button = QPushButton("Kontynuuj w ChatGPT"); self._continue_button.setObjectName("ContinueProjectButton"); self._continue_button.clicked.connect(lambda: self._queue_prompt("continue")); self._auto_milestone_button = QPushButton("AUTO: bieżący milestone"); self._auto_milestone_button.setObjectName("AutoMilestoneButton"); self._auto_milestone_button.clicked.connect(self._start_milestone_auto); self._stop_milestone_button = QPushButton("STOP AUTO"); self._stop_milestone_button.setObjectName("StopMilestoneButton"); self._stop_milestone_button.clicked.connect(self._stop_milestone_auto); self._handoff_mode = QComboBox(); self._handoff_mode.setObjectName("ProjectHandoffMode"); self._handoff_mode.addItems(HANDOFF_MODES); self._handoff_button = QPushButton("Nowa rozmowa / Handoff"); self._handoff_button.setObjectName("ProjectHandoffButton"); self._handoff_button.clicked.connect(self._queue_handoff); self._approve_review_button = QPushButton("Zatwierdź review"); self._approve_review_button.setObjectName("ApproveProjectReviewButton"); self._approve_review_button.clicked.connect(self._approve_review); self._changes_review_button = QPushButton("Wymaga poprawki"); self._changes_review_button.setObjectName("RequestProjectChangesButton"); self._changes_review_button.clicked.connect(self._request_changes); self._project_review_button = QPushButton("Przegląd projektu"); self._project_review_button.setObjectName("ProjectReviewButton"); self._project_review_button.clicked.connect(self._request_project_review)
+        for button in (self._import_plan_button, self._plan_prompt_button, self._work_prompt_button, self._start_button, self._continue_button, self._auto_milestone_button, self._stop_milestone_button, self._handoff_mode, self._handoff_button, self._approve_review_button, self._changes_review_button, self._project_review_button): actions.addWidget(button)
         actions.addStretch(1); layout.addLayout(actions); self._set_project_action_state(); return page
 
     def _make_advanced_page(self) -> QWidget:
@@ -289,6 +290,8 @@ class ProjectCenterWindow(QMainWindow):
             except Exception:
                 review = False
         self._approve_review_button.setEnabled(review); self._changes_review_button.setEnabled(review); self._project_review_button.setEnabled(has_project)
+        self._auto_milestone_button.setEnabled(has_plan)
+        self._stop_milestone_button.setEnabled(has_plan)
 
     def _render_execution(self, project: ProjectRecord | None) -> None:
         if project is None:
@@ -300,14 +303,18 @@ class ProjectCenterWindow(QMainWindow):
             attempts = snapshot.get("attempts", [])
             last = attempts[-1] if attempts else None
             current = snapshot.get("current_task_id") or project.current_task or "brak"
+            milestone_auto = snapshot.get("milestone_auto") or None
+            milestone_line = ""
+            if milestone_auto:
+                milestone_line = f"AUTO milestone {milestone_auto.get('milestone_id')}: {milestone_auto.get('completed_tasks', 0)}/{milestone_auto.get('total_tasks', 0)} · {milestone_auto.get('status')}\n"
             if last and last.get("result_status") == "REVIEW_REQUIRED":
-                text = f"Wykonanie: {current} — Gotowe do przeglądu\nAcceptance: REVIEW_REQUIRED\nAttempt: {last.get('attempt_id')}"
+                text = f"{milestone_line}Wykonanie: {current} — Gotowe do przeglądu\nAcceptance: REVIEW_REQUIRED\nAttempt: {last.get('attempt_id')}"
             elif last and last.get("result_status") == "FAIL":
-                text = f"Wykonanie: {current} — Wymaga poprawki\n{last.get('failure_code') or 'validation failed'}"
+                text = f"{milestone_line}Wykonanie: {current} — Wymaga poprawki\n{last.get('failure_code') or 'validation failed'}"
             elif statuses and all(value in {"completed", "skipped"} for value in statuses.values()) and project.total_tasks:
-                text = "Wykonanie: zakończone\nAcceptance: PASS"
+                text = f"{milestone_line}Wykonanie: zakończone\nAcceptance: PASS"
             else:
-                text = f"Wykonanie: {current} — {statuses.get(current, 'pending')}"
+                text = f"{milestone_line}Wykonanie: {current} — {statuses.get(current, 'pending')}"
             self._execution_status.setText(text)
         except Exception as exc:
             self._execution_status.setText(f"Wykonanie: stan niedostępny ({getattr(exc, 'code', 'unavailable')})")
@@ -343,6 +350,38 @@ class ProjectCenterWindow(QMainWindow):
         except Exception as exc:
             self._status.setText(f"BDB: review projektu zatrzymany — {getattr(exc, 'code', 'review_failed')}"); return
         self._status.setText("BDB: przegląd projektu zapisany w Project Memory")
+
+    def _start_milestone_auto(self) -> None:
+        if self._current_project_id is None:
+            return
+        try:
+            snapshot = self._workflow.execution.begin_milestone_auto(self._current_project_id)
+            if snapshot.get("status") == "MILESTONE_COMPLETED":
+                self._status.setText(f"BDB AUTO: {snapshot.get('milestone_id')} już ukończony — następny milestone wymaga użytkownika")
+                return
+            launch = self._workflow.queue_continue_prompt(self._current_project_id)
+            self._status.setText(f"BDB AUTO: {snapshot.get('milestone_id')} · {snapshot.get('current_task_id')} · prompt oczekuje ({launch.launch_id}); Send pozostaje ręczny")
+        except (ProjectWorkflowError, ProjectExecutionError) as exc:
+            self._status.setText(f"BDB AUTO zatrzymany — {getattr(exc, 'code', 'milestone_auto_failed')}")
+            return
+        self._projects = self._catalog.read(); self._render_catalog(self._projects); self._select_project(self._current_project_id)
+
+    def _stop_milestone_auto(self) -> None:
+        if self._current_project_id is None:
+            return
+        try:
+            snapshot = self._workflow.execution.snapshot(self._current_project_id)
+            auto = snapshot.get("milestone_auto") or {}
+            run_id = auto.get("milestone_run_id")
+            if not run_id:
+                self._status.setText("BDB AUTO: brak aktywnego milestone run")
+                return
+            self._workflow.execution.stop_milestone_auto(self._current_project_id, run_id=run_id)
+            self._status.setText("BDB AUTO: zatrzymano przez użytkownika")
+        except (ProjectWorkflowError, ProjectExecutionError) as exc:
+            self._status.setText(f"BDB AUTO stop zatrzymany — {getattr(exc, 'code', 'milestone_auto_stop_failed')}")
+            return
+        self.start_bootstrap(); self._select_project(self._current_project_id)
 
     def _render_memory(self, project: ProjectRecord | None) -> None:
         views = [self._memory_tabs.widget(index) for index in range(self._memory_tabs.count())]
