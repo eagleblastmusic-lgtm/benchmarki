@@ -559,6 +559,186 @@ def test_vnext_submission_panels_mount_outside_code_editor_and_recover_after_rer
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
+def test_vnext_submission_panels_dedupe_by_semantic_identity_across_dom_replacement(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the Browser content contract")
+    harness = tmp_path / "project-execution-semantic-dedupe.cjs"
+    harness.write_text(
+        textwrap.dedent(
+            r'''
+            "use strict";
+            const assert = require("node:assert/strict");
+            const fs = require("node:fs");
+            const vm = require("node:vm");
+
+            class Element {
+              constructor(kind = "div", text = "") {
+                this.nodeType = 1;
+                this.kind = kind;
+                this._text = text;
+                this.children = [];
+                this.parentElement = null;
+                this.parentNode = null;
+                this.dataset = {};
+                this.className = "";
+                this.listeners = {};
+              }
+              get isConnected() { return Boolean(this.parentElement); }
+              get textContent() { return this.children.length ? this.children.map((child) => child.textContent || "").join("") : this._text; }
+              set textContent(value) { this.children = []; this._text = String(value); }
+              append(...items) {
+                for (const item of items) {
+                  this.children.push(item);
+                  item.parentElement = this;
+                  item.parentNode = this;
+                }
+              }
+              appendChild(item) { this.append(item); return item; }
+              removeChild(item) {
+                const index = this.children.indexOf(item);
+                if (index >= 0) this.children.splice(index, 1);
+                item.parentElement = null;
+                item.parentNode = null;
+                return item;
+              }
+              closest(selector) {
+                let current = this;
+                while (current) {
+                  if (selector === "pre" && current.kind === "pre") return current;
+                  if (selector.includes("assistant") && current.kind === "assistant") return current;
+                  current = current.parentElement;
+                }
+                return null;
+              }
+              querySelectorAll(selector) {
+                const found = [];
+                const visit = (item) => {
+                  for (const child of item.children || []) {
+                    if (selector === "pre code" && child.kind === "code" && item.kind === "pre") found.push(child);
+                    visit(child);
+                  }
+                };
+                visit(this);
+                return found;
+              }
+              addEventListener(type, fn) { this.listeners[type] = fn; }
+              getBoundingClientRect() { return { width: 600, height: 30 }; }
+              setAttribute() {}
+            }
+
+            function execution(binding, command = "command-1") {
+              return JSON.stringify({ schema: "bdb-project-execution-submission-v1", project_id: "project-1", plan_version: "1", task_id: "P0-01", execution_binding_id: binding, correlation_id: "corr-1", command_id: command, repo_alias: "premium-calculator", head_before: "a".repeat(40), head_after: "b".repeat(40), execution_status: "PASS", validation_status: "PASS", promotion_status: "NOT_RUN", result_summary: "done", evidence_refs: [], criteria: [] });
+            }
+            function generic(key) {
+              return JSON.stringify({ schema: "bdb-vnext-submission-v1", submission_key: key, intent_revision: {}, intent: {}, conversation_binding: {}, consumer_binding: {} });
+            }
+            function codeNode(text) {
+              const pre = new Element("pre");
+              const code = new Element("code", text);
+              pre.append(code);
+              return { pre, code };
+            }
+
+            const projectAssistant = new Element("assistant");
+            const genericAssistant = new Element("assistant");
+            const projectRoot = new Element("html");
+            const projectFirst = codeNode(execution("binding-1"));
+            const genericFirst = codeNode(generic("submission-1"));
+            projectAssistant.append(projectFirst.pre);
+            genericAssistant.append(genericFirst.pre);
+            projectRoot.append(projectAssistant, genericAssistant);
+            let sweepCallback = null;
+            const context = {
+              console,
+              HTMLElement: Element,
+              HTMLTextAreaElement: class extends Element {},
+              HTMLInputElement: class extends Element {},
+              InputEvent: class {},
+              Event: class {},
+              TextEncoder,
+              Set,
+              Map,
+              window: { getComputedStyle: () => ({ visibility: "visible", display: "block" }) },
+              document: {
+                visibilityState: "visible",
+                documentElement: projectRoot,
+                querySelector: () => null,
+                querySelectorAll: (selector) => selector === "pre code" ? projectRoot.querySelectorAll(selector) : [],
+                createElement: (kind) => new Element(kind),
+              },
+              MutationObserver: class { observe() {} },
+              setInterval: (callback, interval) => { if (interval === 750) sweepCallback = callback; return { unref() {} }; },
+            };
+            context.globalThis = context;
+            vm.createContext(context);
+            vm.runInContext(fs.readFileSync(process.argv[2], "utf8"), context, { filename: "content_adapter.js" });
+
+            const projectPanels = () => projectAssistant.children.filter((item) => item.className === "bdb-vnext-project-execution-panel");
+            const genericPanels = () => genericAssistant.children.filter((item) => item.className === "bdb-vnext-panel");
+            assert.equal(projectPanels().length, 1);
+            assert.equal(genericPanels().length, 1);
+            sweepCallback();
+            sweepCallback();
+            assert.equal(projectPanels().length, 1, "same block and repeated sweeps dedupe");
+
+            projectAssistant.removeChild(projectFirst.pre);
+            const projectReplacement = codeNode(execution("binding-1"));
+            projectAssistant.append(projectReplacement.pre);
+            sweepCallback();
+            assert.equal(projectPanels().length, 1, "replacement block reuses the semantic panel");
+
+            const equivalentSecond = codeNode(execution("binding-1"));
+            projectAssistant.append(equivalentSecond.pre);
+            sweepCallback();
+            assert.equal(projectPanels().length, 1, "two equivalent code nodes share one panel");
+
+            const duplicate = new Element("div");
+            duplicate.className = projectPanels()[0].className;
+            duplicate.dataset = { ...projectPanels()[0].dataset };
+            projectAssistant.append(duplicate);
+            sweepCallback();
+            assert.equal(projectPanels().length, 1, "duplicate connected panel is removed");
+
+            const connected = projectPanels()[0];
+            projectAssistant.removeChild(connected);
+            sweepCallback();
+            assert.equal(projectPanels().length, 1, "removed panel is recreated");
+
+            const distinct = codeNode(execution("binding-2", "command-2"));
+            projectAssistant.append(distinct.pre);
+            sweepCallback();
+            assert.equal(projectPanels().length, 2, "different execution identities keep separate panels");
+
+            const genericEquivalent = codeNode(generic("submission-1"));
+            genericAssistant.append(genericEquivalent.pre);
+            sweepCallback();
+            assert.equal(genericPanels().length, 1, "generic duplicate submission_key dedupes");
+            const genericDistinct = codeNode(generic("submission-2"));
+            genericAssistant.append(genericDistinct.pre);
+            sweepCallback();
+            assert.equal(genericPanels().length, 2, "different generic submission keys keep separate panels");
+
+            const invalidAssistant = new Element("assistant");
+            const invalid = codeNode("schema: bdb-project-execution-submission-v1\nstatus: PASS");
+            invalidAssistant.append(invalid.pre);
+            projectRoot.append(invalidAssistant);
+            sweepCallback();
+            assert.equal(invalidAssistant.children.filter((item) => item.className).length, 0, "invalid YAML remains undecorated");
+            '''
+        ),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [node, str(harness), str(ROOT / "browser_extension_vnext" / "content_adapter.js")],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
 def test_vnext_project_find_composer_uses_ordered_selector_priority_and_fails_closed(tmp_path: Path) -> None:
     node = shutil.which("node")
     if node is None:

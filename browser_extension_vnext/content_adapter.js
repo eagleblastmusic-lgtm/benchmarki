@@ -6,6 +6,11 @@ const MAX_SUBMISSION_TEXT = 256 * 1024;
 const CONTENT_ADAPTER_RUNTIME_FINGERPRINT = "bdb-vnext-content-adapter-live-sweep-v1";
 const CANONICAL_RESULT_SWEEP_MS = 750;
 const MAX_CANONICAL_SWEEP_BLOCKS = 256;
+const PROJECT_EXECUTION_PANEL_KIND = "project-execution";
+const GENERIC_SUBMISSION_PANEL_KIND = "generic-submission";
+const PROJECT_EXECUTION_IDENTITY_FIELDS = [
+  "schema", "project_id", "plan_version", "task_id", "execution_binding_id", "correlation_id", "command_id"
+];
 const decorated = new WeakSet();
 const executionDecorated = new WeakSet();
 const decoratedPanels = new WeakMap();
@@ -87,11 +92,68 @@ function panelMountOwner(block) {
   return owner instanceof HTMLElement ? owner : null;
 }
 
-function mountPanel(block, panel, panels, decoratedBlocks) {
+function semanticSubmissionKey(kind, value) {
+  if (kind === PROJECT_EXECUTION_PANEL_KIND) {
+    return JSON.stringify(PROJECT_EXECUTION_IDENTITY_FIELDS.map((field) => [field, value[field]]));
+  }
+  return JSON.stringify([value.schema, value.submission_key]);
+}
+
+function setPanelIdentity(panel, kind, key) {
+  panel.dataset.bdbSubmissionKind = kind;
+  panel.dataset.bdbSubmissionKey = key;
+}
+
+function panelMatchesIdentity(panel, panelClass, kind, key) {
+  return Boolean(
+    panel instanceof HTMLElement &&
+    panel.className === panelClass &&
+    panel.dataset &&
+    panel.dataset.bdbSubmissionKind === kind &&
+    panel.dataset.bdbSubmissionKey === key
+  );
+}
+
+function connectedPanelsFor(owner, panelClass, kind, key) {
+  const matches = [];
+  for (const candidate of Array.from(owner.children || [])) {
+    if (panelIsConnected(candidate) && panelMatchesIdentity(candidate, panelClass, kind, key)) {
+      matches.push(candidate);
+    }
+  }
+  return matches;
+}
+
+function removePanel(panel) {
+  if (typeof panel.remove === "function") {
+    panel.remove();
+  } else if (panel.parentElement && typeof panel.parentElement.removeChild === "function") {
+    panel.parentElement.removeChild(panel);
+  }
+}
+
+function reusePanel(block, panelClass, kind, key, panels, decoratedBlocks) {
   const owner = panelMountOwner(block);
   if (!owner) return false;
   const previous = panels.get(block);
-  if (panelIsConnected(previous)) return false;
+  const matches = connectedPanelsFor(owner, panelClass, kind, key);
+  if (matches.length > 0) {
+    const canonical = panelIsConnected(previous) && matches.includes(previous) ? previous : matches[0];
+    for (const duplicate of matches) {
+      if (duplicate !== canonical) removePanel(duplicate);
+    }
+    panels.set(block, canonical);
+    decoratedBlocks.add(block);
+    return true;
+  }
+  return false;
+}
+
+function mountPanel(block, panel, panelClass, kind, key, panels, decoratedBlocks) {
+  if (reusePanel(block, panelClass, kind, key, panels, decoratedBlocks)) return false;
+  const owner = panelMountOwner(block);
+  if (!owner) return false;
+  setPanelIdentity(panel, kind, key);
   if (typeof owner.appendChild === "function") {
     owner.appendChild(panel);
   } else if (typeof owner.append === "function") {
@@ -110,11 +172,14 @@ function setResult(output, message, state = "neutral") {
 }
 
 function decorate(block, submission) {
-  if (panelIsConnected(decoratedPanels.get(block))) {
+  const panelClass = "bdb-vnext-panel";
+  const panelKind = GENERIC_SUBMISSION_PANEL_KIND;
+  const panelKey = semanticSubmissionKey(panelKind, submission);
+  if (reusePanel(block, panelClass, panelKind, panelKey, decoratedPanels, decorated)) {
     return;
   }
   const panel = document.createElement("div");
-  panel.className = "bdb-vnext-panel";
+  panel.className = panelClass;
   const button = document.createElement("button");
   button.type = "button";
   button.className = "bdb-vnext-submit";
@@ -153,7 +218,7 @@ function decorate(block, submission) {
   });
 
   panel.append(button, output);
-  mountPanel(block, panel, decoratedPanels, decorated);
+  mountPanel(block, panel, panelClass, panelKind, panelKey, decoratedPanels, decorated);
 }
 
 async function projectExecutionBindingForConversation(conversationId) {
@@ -163,9 +228,12 @@ async function projectExecutionBindingForConversation(conversationId) {
 }
 
 function decorateProjectExecution(block, result) {
-  if (panelIsConnected(executionPanels.get(block))) return;
+  const panelClass = "bdb-vnext-project-execution-panel";
+  const panelKind = PROJECT_EXECUTION_PANEL_KIND;
+  const panelKey = semanticSubmissionKey(panelKind, result);
+  if (reusePanel(block, panelClass, panelKind, panelKey, executionPanels, executionDecorated)) return;
   const panel = document.createElement("div");
-  panel.className = "bdb-vnext-project-execution-panel";
+  panel.className = panelClass;
   const button = document.createElement("button");
   button.type = "button";
   button.className = "bdb-vnext-project-execution-submit";
@@ -203,7 +271,7 @@ function decorateProjectExecution(block, result) {
     }
   });
   panel.append(button, output);
-  mountPanel(block, panel, executionPanels, executionDecorated);
+  mountPanel(block, panel, panelClass, panelKind, panelKey, executionPanels, executionDecorated);
 }
 
 // Project launch is a transport handoff from the canonical GUI. It never
@@ -545,7 +613,7 @@ function isCanonicalResultCandidate(block) {
 }
 
 function scanBlock(block) {
-  if (!(block instanceof HTMLElement) || panelIsConnected(decoratedPanels.get(block)) || panelIsConnected(executionPanels.get(block))) {
+  if (!(block instanceof HTMLElement)) {
     return;
   }
   if (!isCanonicalResultCandidate(block)) {
