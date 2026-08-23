@@ -21,7 +21,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence, TypeVar
 
 from bdb_shared.evidence import canonical_json_bytes, semantic_digest
 
-from .project_catalog import ProjectPlan, ProjectRecord, ProjectTask, validate_project_plan
+from .project_catalog import ProjectPlan, ProjectRecord, ProjectTask, classify_dependency_targets, validate_project_plan
 
 
 PROJECT_MEMORY_SCHEMA = "bdb-vnext-project-memory-v1"
@@ -40,12 +40,15 @@ MAX_ITEMS = 512
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$")
 _PLAN_VERSION_RE = re.compile(r"^(\d+)(?:\.0+)?$")
 _STATUS_VALUES = frozenset({"pending", "active", "review", "completed", "blocked", "skipped"})
+GATE_STATUS_VALUES = frozenset({"pending", "passed"})
+OPEN_QUESTION_STATUS_VALUES = frozenset({"open", "resolved"})
 _EVENT_TYPES = frozenset({
     "PROJECT_CREATED", "PLAN_IMPORTED", "PLAN_UPDATED", "TASK_STARTED", "TASK_REVIEW", "TASK_COMPLETED", "TASK_BLOCKED",
     "DECISION_ADDED", "DECISION_SUPERSEDED", "INBOX_ITEM_ADDED", "INBOX_ITEM_RESOLVED", "RISK_ADDED", "RISK_RESOLVED",
     "TECH_DEBT_ADDED", "TECH_DEBT_RESOLVED", "ATTENTION_ADDED", "ATTENTION_RESOLVED", "CHECKPOINT_CREATED", "HANDOFF_CREATED",
     "EXECUTION_BOUND", "EXECUTION_STARTED", "EXECUTION_COMPLETED", "TASK_REVIEW", "TASK_REVIEW_ACCEPTED", "TASK_REVIEW_CHANGES_REQUESTED",
     "TASK_COMPLETED", "TASK_BLOCKED", "EXECUTION_STALE_RESULT", "EXECUTION_REPLAYED", "MILESTONE_COMPLETED", "PROJECT_REVIEW_REQUESTED",
+    "GATE_PASSED", "GATE_REOPENED", "OPEN_QUESTION_RESOLVED", "OPEN_QUESTION_REOPENED",
 })
 HANDOFF_MODES = (
     "CONTINUE_IMPLEMENTATION", "NEW_CHAT_PROJECT_HANDOFF", "ARCHITECTURE_REVIEW", "PROJECT_REVIEW", "DEBUGGING",
@@ -140,6 +143,8 @@ class ProjectEvent:
     plan_version: str | None = None
     git_head: str | None = None
     correlation_id: str | None = None
+    prerequisite_id: str | None = None
+    prerequisite_kind: str | None = None
     schema: str = PROJECT_EVENT_SCHEMA
 
     def to_dict(self) -> dict[str, Any]:
@@ -148,6 +153,7 @@ class ProjectEvent:
             "event_type": self.event_type, "timestamp": self.timestamp, "human_summary": self.human_summary,
             "task_id": self.task_id, "milestone_id": self.milestone_id, "plan_version": self.plan_version,
             "git_head": self.git_head, "correlation_id": self.correlation_id,
+            "prerequisite_id": self.prerequisite_id, "prerequisite_kind": self.prerequisite_kind,
         }.items() if value is not None}
 
 
@@ -374,6 +380,76 @@ def _completed_protection(old: ProjectPlan, new: ProjectPlan, *, execution_compl
     return tuple(blocked)
 
 
+def _plan_prerequisite_ids(plan: ProjectPlan) -> tuple[set[str], set[str]]:
+    context = plan.planning_context or {}
+    return ({item["id"] for item in context.get("gates", [])}, {item["id"] for item in context.get("open_questions", [])})
+
+
+def _bounded_runtime_statuses(execution: Mapping[str, Any], key: str, identifiers: set[str], default: str, allowed: frozenset[str]) -> dict[str, str]:
+    raw = execution.get(key, {})
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, Mapping) or len(raw) > MAX_ITEMS:
+        _fail("memory_execution_shape_invalid", f"execution.{key} is invalid")
+    return {identifier: str(raw.get(identifier, default)) if str(raw.get(identifier, default)) in allowed else default for identifier in sorted(identifiers)}
+
+
+def _synchronize_prerequisite_statuses(plan: ProjectPlan, execution: Mapping[str, Any], *, previous_plan: ProjectPlan | None = None) -> dict[str, Any]:
+    """Carry only same-kind prerequisite statuses into the current plan."""
+    result = dict(execution)
+    gate_ids, open_question_ids = _plan_prerequisite_ids(plan)
+    old_gate_ids, old_open_question_ids = _plan_prerequisite_ids(previous_plan) if previous_plan is not None else (set(), set())
+    raw_gates = execution.get("gate_statuses", {})
+    raw_questions = execution.get("open_question_statuses", {})
+    if not isinstance(raw_gates, Mapping) or not isinstance(raw_questions, Mapping):
+        _fail("memory_execution_shape_invalid", "prerequisite status maps are invalid")
+    result["gate_statuses"] = {
+        identifier: str(raw_gates.get(identifier, "pending")) if identifier in old_gate_ids and str(raw_gates.get(identifier, "pending")) in GATE_STATUS_VALUES else "pending"
+        for identifier in sorted(gate_ids)
+    }
+    result["open_question_statuses"] = {
+        identifier: str(raw_questions.get(identifier, "open")) if identifier in old_open_question_ids and str(raw_questions.get(identifier, "open")) in OPEN_QUESTION_STATUS_VALUES else "open"
+        for identifier in sorted(open_question_ids)
+    }
+    return result
+
+
+def _runtime_prerequisite_statuses(plan: ProjectPlan, state: ProjectMemoryState) -> tuple[dict[str, str], dict[str, str]]:
+    execution = state.execution if isinstance(state.execution, Mapping) else {}
+    gate_ids, open_question_ids = _plan_prerequisite_ids(plan)
+    return (
+        _bounded_runtime_statuses(execution, "gate_statuses", gate_ids, "pending", GATE_STATUS_VALUES),
+        _bounded_runtime_statuses(execution, "open_question_statuses", open_question_ids, "open", OPEN_QUESTION_STATUS_VALUES),
+    )
+
+
+def task_prerequisite_blockers(plan: ProjectPlan | None, state: ProjectMemoryState, task: ProjectTask) -> tuple[dict[str, str], ...]:
+    """Return deterministic unsatisfied prerequisite records for one task."""
+    if plan is None:
+        return ()
+    kinds = classify_dependency_targets(plan)
+    task_statuses = _execution_task_statuses(state, plan)
+    gate_statuses, open_question_statuses = _runtime_prerequisite_statuses(plan, state)
+    blockers: list[dict[str, str]] = []
+    for dependency in task.dependencies:
+        kind = kinds.get(dependency)
+        if kind == "task":
+            status = task_statuses.get(dependency, "pending")
+            satisfied = status in {"completed", "skipped"}
+        elif kind == "gate":
+            status = gate_statuses.get(dependency, "pending")
+            satisfied = status == "passed"
+        elif kind == "open_question":
+            status = open_question_statuses.get(dependency, "open")
+            satisfied = status == "resolved"
+        else:
+            status = "unknown"
+            satisfied = False
+        if not satisfied:
+            blockers.append({"id": dependency, "kind": kind or "unknown", "status": status})
+    return tuple(blockers)
+
+
 class ProjectMemoryStore:
     """Canonical metadata writer for one project, with immutable plan files."""
 
@@ -414,7 +490,7 @@ class ProjectMemoryStore:
             if any(not isinstance(item, Mapping) for item in value):
                 _fail("memory_shape_invalid", f"{key} contains a non-object item")
             collections[key] = tuple(dict(item) for item in value)
-        events = tuple(ProjectEvent(**{key: item[key] for key in ("event_id", "project_id", "event_type", "timestamp", "human_summary")}, task_id=item.get("task_id"), milestone_id=item.get("milestone_id"), plan_version=item.get("plan_version"), git_head=item.get("git_head"), correlation_id=item.get("correlation_id")) for item in collections["events"])
+        events = tuple(ProjectEvent(**{key: item[key] for key in ("event_id", "project_id", "event_type", "timestamp", "human_summary")}, task_id=item.get("task_id"), milestone_id=item.get("milestone_id"), plan_version=item.get("plan_version"), git_head=item.get("git_head"), correlation_id=item.get("correlation_id"), prerequisite_id=item.get("prerequisite_id"), prerequisite_kind=item.get("prerequisite_kind")) for item in collections["events"])
         decisions = tuple(DecisionRecord(item["decision_id"], item["project_id"], item["title"], item["decision"], item["reason"], item["status"], item["created_at"], tuple(item.get("related_task_ids", [])), item.get("related_plan_version"), item.get("supersedes_decision_id")) for item in collections["decisions"])
         inbox = tuple(InboxItem(item["inbox_id"], item["project_id"], item["title"], item["description"], item["created_at"], item.get("status", "new")) for item in collections["inbox"])
         risks = tuple(RiskRecord(item["risk_id"], item["project_id"], item["title"], item["description"], item["severity"], item["status"], item["created_at"]) for item in collections["risks"])
@@ -475,14 +551,18 @@ class ProjectMemoryStore:
             self._write_state(updated)
             return result
 
-    def _append_event(self, state: ProjectMemoryState, event_type: str, summary: str, *, task_id: str | None = None, milestone_id: str | None = None, plan_version: str | None = None, git_head: str | None = None, correlation_id: str | None = None) -> ProjectMemoryState:
+    def _append_event(self, state: ProjectMemoryState, event_type: str, summary: str, *, task_id: str | None = None, milestone_id: str | None = None, plan_version: str | None = None, git_head: str | None = None, correlation_id: str | None = None, prerequisite_id: str | None = None, prerequisite_kind: str | None = None) -> ProjectMemoryState:
         if event_type not in _EVENT_TYPES:
             _fail("event_type_invalid", "event_type is unsupported")
         summary = _text(summary, "human_summary", max_length=2_000)
         if len(state.events) >= MAX_EVENTS:
             _fail("event_log_bounded", "project event log reached its bound")
         event_id = f"{self.project_id}:e{len(state.events) + 1:06d}"
-        event = ProjectEvent(event_id, self.project_id, event_type, _now(), summary, task_id, milestone_id, plan_version, git_head, correlation_id)
+        if prerequisite_id is not None:
+            prerequisite_id = _text(prerequisite_id, "prerequisite_id", max_length=96)
+        if prerequisite_kind is not None and prerequisite_kind not in {"gate", "open_question"}:
+            _fail("prerequisite_kind_invalid", "prerequisite kind is unsupported")
+        event = ProjectEvent(event_id, self.project_id, event_type, _now(), summary, task_id, milestone_id, plan_version, git_head, correlation_id, prerequisite_id, prerequisite_kind)
         return replace(state, events=state.events + (event,))
 
     def append_event(self, event_type: str, human_summary: str, **bindings: str | None) -> ProjectEvent:
@@ -559,7 +639,14 @@ class ProjectMemoryStore:
         if plan_version_number(plan.plan_version) != 1: _fail("plan_initial_version_invalid", "the first plan must be v1")
         if self.current_plan() is not None: _fail("plan_already_exists", "project already has a current plan")
         canonical = replace(plan, project_id=self.project_id, plan_version=_version(plan.plan_version), supersedes_version=None, created_at=plan.created_at or _now(), revision_reason=plan.revision_reason or "initial", revision_summary=plan.revision_summary or "Initial project plan")
-        self._write_immutable_plan(canonical); self._activate_pointer(canonical); self.append_event("PLAN_IMPORTED", f"Zaimportowano plan v{canonical.plan_version}", plan_version=canonical.plan_version); return canonical
+        self._write_immutable_plan(canonical); self._activate_pointer(canonical)
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, None]:
+            execution = _synchronize_prerequisite_statuses(canonical, state.execution if isinstance(state.execution, Mapping) else {})
+            updated = replace(state, execution=execution)
+            updated = self._append_event(updated, "PLAN_IMPORTED", f"Zaimportowano plan v{canonical.plan_version}", plan_version=canonical.plan_version)
+            return updated, None
+        self.execution_transaction(transition)
+        return canonical
 
     def current_plan(self) -> ProjectPlan | None:
         if not self.current_pointer.exists(): return None
@@ -606,7 +693,66 @@ class ProjectMemoryStore:
         if current is None: return self.ensure_initial_plan(candidate)
         if check.current_plan_digest != _plan_digest(current): _fail("plan_current_changed", "current plan changed after preview")
         canonical = replace(candidate, project_id=self.project_id, plan_version=_version(candidate.plan_version), supersedes_version=_version(current.plan_version), created_at=candidate.created_at or _now(), revision_reason=candidate.revision_reason or "plan update", revision_summary=candidate.revision_summary or "Updated project plan")
-        self._write_immutable_plan(canonical); self._activate_pointer(canonical); self.append_event("PLAN_UPDATED", f"Zaktualizowano plan v{current.plan_version} → v{canonical.plan_version}: {canonical.revision_reason}", plan_version=canonical.plan_version); return canonical
+        self._write_immutable_plan(canonical); self._activate_pointer(canonical)
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, None]:
+            execution = _synchronize_prerequisite_statuses(canonical, state.execution if isinstance(state.execution, Mapping) else {}, previous_plan=current)
+            updated = replace(state, execution=execution)
+            updated = self._append_event(updated, "PLAN_UPDATED", f"Zaktualizowano plan v{current.plan_version} → v{canonical.plan_version}: {canonical.revision_reason}", plan_version=canonical.plan_version)
+            return updated, None
+        self.execution_transaction(transition)
+        return canonical
+
+    def _set_prerequisite_status(self, identifier: str, *, kind: str, status: str) -> str:
+        plan = self.current_plan()
+        if plan is None:
+            _fail("project_plan_required", "prerequisite status requires an imported plan")
+        identifier = _text(identifier, "prerequisite_id", max_length=96)
+        status = _text(status, "prerequisite_status", max_length=32)
+        gate_ids, open_question_ids = _plan_prerequisite_ids(plan)
+        if kind == "gate":
+            if identifier not in gate_ids:
+                _fail("prerequisite_not_found", f"gate does not exist in the current plan: {identifier}")
+            allowed, map_key, event_type = GATE_STATUS_VALUES, "gate_statuses", "GATE_PASSED" if status == "passed" else "GATE_REOPENED"
+        elif kind == "open_question":
+            if identifier not in open_question_ids:
+                _fail("prerequisite_not_found", f"open question does not exist in the current plan: {identifier}")
+            allowed, map_key, event_type = OPEN_QUESTION_STATUS_VALUES, "open_question_statuses", "OPEN_QUESTION_RESOLVED" if status == "resolved" else "OPEN_QUESTION_REOPENED"
+        else:
+            _fail("prerequisite_kind_invalid", "prerequisite kind is unsupported")
+        if status not in allowed:
+            _fail("prerequisite_status_invalid", "prerequisite status is unsupported")
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, str]:
+            execution = _synchronize_prerequisite_statuses(plan, state.execution if isinstance(state.execution, Mapping) else {}, previous_plan=plan)
+            statuses = dict(execution[map_key])
+            if statuses.get(identifier) == status:
+                return state, status
+            statuses[identifier] = status
+            execution[map_key] = statuses
+            updated = replace(state, execution=execution)
+            updated = self._append_event(updated, event_type, f"{kind} {identifier}: {status}", plan_version=plan.plan_version, prerequisite_id=identifier, prerequisite_kind=kind)
+            return updated, status
+        return self.execution_transaction(transition)
+
+    def set_gate_status(self, gate_id: str, status: str) -> str:
+        return self._set_prerequisite_status(gate_id, kind="gate", status=status)
+
+    def pass_gate(self, gate_id: str) -> str:
+        return self.set_gate_status(gate_id, "passed")
+
+    def reopen_gate(self, gate_id: str) -> str:
+        return self.set_gate_status(gate_id, "pending")
+
+    def mark_gate_passed(self, gate_id: str) -> str:
+        return self.pass_gate(gate_id)
+
+    def set_open_question_status(self, question_id: str, status: str) -> str:
+        return self._set_prerequisite_status(question_id, kind="open_question", status=status)
+
+    def resolve_open_question(self, question_id: str) -> str:
+        return self.set_open_question_status(question_id, "resolved")
+
+    def reopen_open_question(self, question_id: str) -> str:
+        return self.set_open_question_status(question_id, "open")
 
     def _write_immutable_plan(self, plan: ProjectPlan) -> None:
         self.plans.mkdir(parents=True, exist_ok=True); path = self.plans / f"plan-v{_version(plan.plan_version)}.json"; document = plan.to_dict(); digest = _plan_digest(plan)
@@ -646,6 +792,23 @@ def resolve_next_action(project: ProjectRecord, plan: ProjectPlan | None, state:
     if available:
         task = available[0]
         return NextAction("CONTINUE_TASK", f"Kontynuuj: {task.task_id} — {task.title}", task.description, 6)
+    for candidate in plan.tasks:
+        if statuses.get(candidate.task_id, candidate.status) in {"completed", "skipped"}:
+            continue
+        blockers = task_prerequisite_blockers(plan, state, candidate)
+        if not blockers:
+            continue
+        first = blockers[0]
+        rendered = "; ".join(f"{item['id']} ({item['kind']}, {item['status']})" for item in blockers)
+        if first["kind"] == "gate":
+            gate = next((item for item in (plan.planning_context or {}).get("gates", []) if item["id"] == first["id"]), {})
+            label = f"{first['id']} — {gate.get('title', 'wymagany gate')}"
+            return NextAction("GATE_REQUIRED", f"Zalicz gate: {label}", f"Zadanie {candidate.task_id} jest zablokowane przez: {rendered}.", 3)
+        if first["kind"] == "open_question":
+            question = next((item for item in (plan.planning_context or {}).get("open_questions", []) if item["id"] == first["id"]), {})
+            label = f"{first['id']} — {question.get('question', 'otwarte pytanie')}"
+            return NextAction("OPEN_QUESTION_REQUIRED", f"Rozstrzygnij pytanie: {label}", f"Zadanie {candidate.task_id} jest zablokowane przez: {rendered}.", 3)
+        return NextAction("PREREQUISITE_REQUIRED", f"Uzupełnij prerequisites dla {candidate.task_id}", f"Zablokowane: {rendered}.", 3)
     if plan.tasks and all(statuses.get(task.task_id, task.status) in {"completed", "skipped"} for task in plan.tasks):
         return NextAction("PROJECT_REVIEW", "Przejrzyj projekt", "Wszystkie zadania planu są zakończone.", 7)
     return NextAction("CONTINUE_TASK", "Kontynuuj projekt", "Wybierz następne zadanie z planu.", 6)
@@ -656,6 +819,8 @@ def project_health(state: ProjectMemoryState, plan: ProjectPlan | None) -> str:
     execution = state.execution
     if execution.get("stale_result") or any(item.get("status") == "STALE_RESULT" for item in execution.get("attempts", []) if isinstance(item, Mapping)): return "BLOCKED"
     if any(status == "blocked" for status in _execution_task_statuses(state, plan).values()): return "BLOCKED"
+    statuses = _execution_task_statuses(state, plan)
+    if not available_project_tasks(plan, state) and any(task_prerequisite_blockers(plan, state, task) for task in plan.tasks if statuses.get(task.task_id, task.status) not in {"completed", "skipped"}): return "BLOCKED"
     if any(item.status == "open" and item.type in {"decision_required", "review_required", "plan_review_required"} for item in state.attention) or any(item.status == "open" and item.severity == "high" for item in state.risks): return "ATTENTION"
     return "OK"
 
@@ -686,7 +851,7 @@ def available_project_tasks(plan: ProjectPlan | None, state: ProjectMemoryState)
     for task in plan.tasks:
         if statuses.get(task.task_id, task.status) not in {"pending", "active"}:
             continue
-        if all(statuses.get(dep, "pending") in {"completed", "skipped"} for dep in task.dependencies):
+        if not task_prerequisite_blockers(plan, state, task):
             result.append(task)
     return tuple(result)
 
@@ -745,5 +910,5 @@ def build_handoff_prompt(project: ProjectRecord, plan: ProjectPlan | None, state
 
 
 __all__ = [
-    "HANDOFF_MODES", "AttentionItem", "Checkpoint", "DebtRecord", "DecisionRecord", "InboxItem", "NextAction", "PlanDiff", "PlanDiffItem", "PlanUpdatePreview", "ProjectEvent", "ProjectMemoryError", "ProjectMemoryState", "ProjectMemoryStore", "RiskRecord", "available_project_tasks", "bounded_history_summary", "build_handoff_prompt", "changes_since", "memory_root", "plan_version_number", "project_health", "project_status_sentence", "resolve_next_action", "semantic_plan_diff",
+    "HANDOFF_MODES", "GATE_STATUS_VALUES", "OPEN_QUESTION_STATUS_VALUES", "AttentionItem", "Checkpoint", "DebtRecord", "DecisionRecord", "InboxItem", "NextAction", "PlanDiff", "PlanDiffItem", "PlanUpdatePreview", "ProjectEvent", "ProjectMemoryError", "ProjectMemoryState", "ProjectMemoryStore", "RiskRecord", "available_project_tasks", "bounded_history_summary", "build_handoff_prompt", "changes_since", "memory_root", "plan_version_number", "project_health", "project_status_sentence", "resolve_next_action", "semantic_plan_diff", "task_prerequisite_blockers",
 ]

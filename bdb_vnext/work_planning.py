@@ -178,6 +178,7 @@ class WorkPlanningPromptBuilder:
             "Return one complete project-plan.json as valid JSON conforming to bdb-project-plan-v1.",
             "Do not return application code, a patch, Markdown, or a partial plan.",
             "Preserve canonical project identity and every unchanged plan element.",
+            "task.dependencies may reference an existing task, gate, or open question defined in the same canonical plan; do not invent a separate dependency field.",
             "Use exactly the identity and version values from OUTPUT PLAN IDENTITY in the final JSON.",
             "Do not add BDB PROJECT CONTEXT fields to the plan unless the supplied schema explicitly defines the corresponding field.",
             "For CREATE_PROJECT_PLAN, use plan_version = " + expected_version + " and do not generate supersedes_version." if mode == "CREATE_PROJECT_PLAN" else "For UPDATE_PROJECT_PLAN, use plan_version = " + expected_version + " and supersedes_version = " + str(supersedes) + "; supersedes_version must equal the current plan version.",

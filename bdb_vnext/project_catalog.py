@@ -409,6 +409,9 @@ def validate_project_plan(value: object, *, expected_project_id: str | None = No
             _fail("plan_status_invalid", "milestone status is unsupported")
         milestone_ids.add(identifier)
         milestones.append(ProjectMilestone(identifier, _text(raw.get("title"), "milestone.title", max_length=300), _text(raw.get("description"), "milestone.description", max_length=4_000), status))
+    planning_context = _planning_context(value.get("planning_context"))
+    gate_ids = {item["id"] for item in (planning_context or {}).get("gates", [])}
+    open_question_ids = {item["id"] for item in (planning_context or {}).get("open_questions", [])}
     tasks: list[ProjectTask] = []
     task_ids: set[str] = set()
     for raw in tasks_raw:
@@ -424,8 +427,8 @@ def validate_project_plan(value: object, *, expected_project_id: str | None = No
             _fail("plan_status_invalid", "task status is unsupported")
         dependencies = _list_of_text(raw.get("dependencies"), "task.dependencies", max_items=64)
         acceptance = _list_of_text(raw.get("acceptance_criteria"), "task.acceptance_criteria", max_items=64)
-        if any(not _ID_RE.fullmatch(item) for item in dependencies):
-            _fail("plan_dependency_invalid", "task dependency ID is unsafe")
+        if any(not _ID_RE.fullmatch(item) for item in dependencies) or len(set(dependencies)) != len(dependencies):
+            _fail("plan_dependency_invalid", "task dependency IDs must be safe and unique")
         deliverables = _bounded_text_list(raw.get("deliverables"), "task.deliverables", max_items=64, max_length=8_000)
         verification = _bounded_text_list(raw.get("verification"), "task.verification", max_items=64, max_length=8_000)
         tests = _bounded_text_list(raw.get("tests"), "task.tests", max_items=64, max_length=8_000)
@@ -438,9 +441,21 @@ def validate_project_plan(value: object, *, expected_project_id: str | None = No
                 _fail("plan_reference_invalid", f"task.{field_name} contains unsafe or duplicate IDs")
         task_ids.add(identifier)
         tasks.append(ProjectTask(identifier, milestone_id, _text(raw.get("title"), "task.title", max_length=300), _text(raw.get("description"), "task.description", max_length=4_000), status, dependencies, acceptance, tuple(deliverables), tuple(verification), tuple(tests), tuple(decision_ids), tuple(specification_ids), tuple(risk_ids), optional_fields))
-    if any(dep not in task_ids for task in tasks for dep in task.dependencies):
-        _fail("plan_dependency_missing", "task dependency does not exist")
-    graph = {task.task_id: set(task.dependencies) for task in tasks}
+    dependency_kinds: dict[str, set[str]] = {}
+    for task in tasks:
+        for dependency in task.dependencies:
+            kinds = dependency_kinds.setdefault(dependency, set())
+            if dependency in task_ids:
+                kinds.add("task")
+            if dependency in gate_ids:
+                kinds.add("gate")
+            if dependency in open_question_ids:
+                kinds.add("open_question")
+            if not kinds:
+                _fail("plan_dependency_missing", f"task dependency target does not exist: {dependency}")
+            if len(kinds) > 1:
+                _fail("plan_dependency_ambiguous", f"task dependency target has multiple namespaces: {dependency}")
+    graph = {task.task_id: {dependency for dependency in task.dependencies if dependency in task_ids} for task in tasks}
     visiting: set[str] = set()
     visited: set[str] = set()
     def visit(identifier: str) -> None:
@@ -465,7 +480,6 @@ def validate_project_plan(value: object, *, expected_project_id: str | None = No
             _fail("plan_current_task_missing", "current_task_id does not exist")
     elif active:
         current_task_id = active[0]
-    planning_context = _planning_context(value.get("planning_context"))
     if planning_context is not None:
         decision_ids = {item["id"] for item in planning_context.get("decisions", [])}
         specification_ids = {item["id"] for item in planning_context.get("specifications", [])}
@@ -480,6 +494,20 @@ def validate_project_plan(value: object, *, expected_project_id: str | None = No
     elif any(task.decision_ids or task.specification_ids or task.risk_ids for task in tasks):
         _fail("plan_reference_missing", "task rich references require planning_context")
     return ProjectPlan(project_id, project_name, plan_version, tuple(milestones), tuple(tasks), current_task_id, PROJECT_PLAN_SCHEMA, supersedes, created_at, revision_reason, revision_summary, planning_context)
+
+
+def classify_dependency_targets(plan: ProjectPlan) -> dict[str, str]:
+    """Return the canonical namespace for each dependency target in a validated plan."""
+    task_ids = {task.task_id for task in plan.tasks}
+    context = plan.planning_context or {}
+    gate_ids = {item["id"] for item in context.get("gates", [])}
+    open_question_ids = {item["id"] for item in context.get("open_questions", [])}
+    result: dict[str, str] = {}
+    for identifier in sorted(task_ids | gate_ids | open_question_ids):
+        kinds = [kind for kind, identifiers in (("task", task_ids), ("gate", gate_ids), ("open_question", open_question_ids)) if identifier in identifiers]
+        if len(kinds) == 1:
+            result[identifier] = kinds[0]
+    return result
 
 
 @dataclass(frozen=True)
@@ -724,6 +752,7 @@ __all__ = [
     "ProjectRecord",
     "ProjectTask",
     "catalog_path",
+    "classify_dependency_targets",
     "new_project_record",
     "validate_project_plan",
 ]

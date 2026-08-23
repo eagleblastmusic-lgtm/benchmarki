@@ -33,7 +33,7 @@
     "task": {
       "type": "object", "additionalProperties": false, "required": ["id", "milestone_id", "title", "description"],
       "properties": {
-        "id": {"$ref": "#/$defs/id"}, "milestone_id": {"$ref": "#/$defs/id"}, "title": {"type": "string", "minLength": 1, "maxLength": 300}, "description": {"type": "string", "minLength": 1, "maxLength": 4000}, "status": {"$ref": "#/$defs/status"}, "dependencies": {"$ref": "#/$defs/idList64"}, "acceptance_criteria": {"$ref": "#/$defs/textList64"}, "deliverables": {"$ref": "#/$defs/textList64"}, "verification": {"$ref": "#/$defs/textList64"}, "tests": {"$ref": "#/$defs/textList64"}, "decision_ids": {"$ref": "#/$defs/idList64"}, "specification_ids": {"$ref": "#/$defs/idList64"}, "risk_ids": {"$ref": "#/$defs/idList64"}
+        "id": {"$ref": "#/$defs/id"}, "milestone_id": {"$ref": "#/$defs/id"}, "title": {"type": "string", "minLength": 1, "maxLength": 300}, "description": {"type": "string", "minLength": 1, "maxLength": 4000}, "status": {"$ref": "#/$defs/status"}, "dependencies": {"$ref": "#/$defs/idList64", "description": "Semantic dependency IDs may reference a task, planning_context.gates, or planning_context.open_questions in this same plan; BDB validates the exact namespace and target."}, "acceptance_criteria": {"$ref": "#/$defs/textList64"}, "deliverables": {"$ref": "#/$defs/textList64"}, "verification": {"$ref": "#/$defs/textList64"}, "tests": {"$ref": "#/$defs/textList64"}, "decision_ids": {"$ref": "#/$defs/idList64"}, "specification_ids": {"$ref": "#/$defs/idList64"}, "risk_ids": {"$ref": "#/$defs/idList64"}
       }
     },
     "requirements": {

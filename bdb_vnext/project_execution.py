@@ -17,7 +17,7 @@ from typing import Any, Iterable, Mapping
 from bdb_shared.evidence import semantic_digest
 
 from .project_catalog import ProjectCatalog, ProjectPlan, ProjectRecord, ProjectTask
-from .project_memory import ProjectMemoryState, ProjectMemoryStore, available_project_tasks
+from .project_memory import ProjectMemoryState, ProjectMemoryStore, available_project_tasks, task_prerequisite_blockers
 
 
 PROJECT_EXECUTION_SCHEMA = "bdb-project-execution-v1"
@@ -66,7 +66,7 @@ def _status(value: object, field: str) -> str:
 def _execution_document(state: ProjectMemoryState) -> dict[str, Any]:
     raw = state.execution if isinstance(state.execution, Mapping) else {}
     if not raw:
-        return {"schema": PROJECT_EXECUTION_SCHEMA, "bindings": [], "attempts": [], "acceptance_results": [], "task_statuses": {}, "milestones_completed": []}
+        return {"schema": PROJECT_EXECUTION_SCHEMA, "bindings": [], "attempts": [], "acceptance_results": [], "task_statuses": {}, "gate_statuses": {}, "open_question_statuses": {}, "milestones_completed": []}
     if raw.get("schema", PROJECT_EXECUTION_SCHEMA) != PROJECT_EXECUTION_SCHEMA:
         _fail("execution_schema_invalid", "project execution state schema differs")
     result = dict(raw)
@@ -80,6 +80,9 @@ def _execution_document(state: ProjectMemoryState) -> dict[str, Any]:
             _fail("execution_shape_invalid", f"execution.{key} is invalid")
     if not isinstance(result["task_statuses"], Mapping) or len(result["task_statuses"]) > 2_048:
         _fail("execution_shape_invalid", "execution.task_statuses is invalid")
+    for key in ("gate_statuses", "open_question_statuses"):
+        if not isinstance(result[key], Mapping) or len(result[key]) > 512:
+            _fail("execution_shape_invalid", f"execution.{key} is invalid")
     return result
 
 
@@ -177,6 +180,13 @@ class ProjectExecutionCoordinator:
         statuses = execution.get("task_statuses", {})
         if statuses.get(task.task_id, task.status) in {"completed", "skipped"}:
             _fail("task_already_complete", "completed task cannot start a new binding")
+        blockers = task_prerequisite_blockers(plan, state, task)
+        if blockers:
+            _fail(
+                "execution_prerequisites_blocked",
+                "task prerequisites are not satisfied",
+                details={"task_id": task.task_id, "blocking_dependencies": [dict(item) for item in blockers]},
+            )
         current_binding_id = execution.get("current_binding_id")
         if current_binding_id:
             current = next((item for item in execution.get("bindings", []) if item.get("execution_binding_id") == current_binding_id), None)
@@ -198,11 +208,21 @@ class ProjectExecutionCoordinator:
             _fail("execution_binding_stale", "binding no longer matches current project authority")
         def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, ProjectExecutionBinding]:
             execution = _execution_document(state)
+            task = next((item for item in plan.tasks if item.task_id == binding.task_id), None)
+            if task is None:
+                _fail("task_not_found", "execution task does not exist")
             existing = next((item for item in execution["bindings"] if item.get("execution_binding_id") == binding.execution_binding_id), None)
             if existing is not None:
                 if semantic_digest(existing) != semantic_digest(binding.to_dict()):
                     _fail("execution_binding_conflict", "binding identity already contains different bytes")
                 return state, _binding_from_dict(existing)
+            blockers = task_prerequisite_blockers(plan, state, task)
+            if blockers:
+                _fail(
+                    "execution_prerequisites_blocked",
+                    "task prerequisites are not satisfied",
+                    details={"task_id": task.task_id, "blocking_dependencies": [dict(item) for item in blockers]},
+                )
             execution["bindings"].append(binding.to_dict())
             statuses = dict(execution.get("task_statuses", {})); statuses.setdefault(binding.task_id, "active"); execution["task_statuses"] = statuses; execution["current_task_id"] = binding.task_id; execution["current_binding_id"] = binding.execution_binding_id
             updated = replace(state, execution=execution)
@@ -405,7 +425,7 @@ class ProjectExecutionCoordinator:
 
     def snapshot(self, project_id: str) -> dict[str, Any]:
         project, plan, memory = self._project(project_id); state = memory.read_state(); execution = _execution_document(state)
-        return {"schema": PROJECT_EXECUTION_SCHEMA, "project_id": project_id, "plan_version": plan.plan_version, "task_statuses": dict(execution.get("task_statuses", {})), "bindings": list(execution["bindings"]), "attempts": list(execution["attempts"]), "acceptance_results": list(execution["acceptance_results"]), "current_task_id": execution.get("current_task_id"), "available_tasks": [task.task_id for task in available_project_tasks(plan, state)], "stale_result": bool(execution.get("stale_result", False))}
+        return {"schema": PROJECT_EXECUTION_SCHEMA, "project_id": project_id, "plan_version": plan.plan_version, "task_statuses": dict(execution.get("task_statuses", {})), "gate_statuses": dict(execution.get("gate_statuses", {})), "open_question_statuses": dict(execution.get("open_question_statuses", {})), "bindings": list(execution["bindings"]), "attempts": list(execution["attempts"]), "acceptance_results": list(execution["acceptance_results"]), "current_task_id": execution.get("current_task_id"), "available_tasks": [task.task_id for task in available_project_tasks(plan, state)], "stale_result": bool(execution.get("stale_result", False))}
 
 
 __all__ = ["PROJECT_EXECUTION_SCHEMA", "ProjectExecutionAttempt", "ProjectExecutionBinding", "ProjectExecutionCoordinator", "ProjectExecutionError", "TaskAcceptanceResult"]

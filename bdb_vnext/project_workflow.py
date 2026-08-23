@@ -17,7 +17,7 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from .project_catalog import PROJECT_PLAN_MAX_BYTES, ProjectBrief, ProjectCatalog, ProjectCatalogError, ProjectPlan, ProjectRecord, new_project_record, validate_project_plan
 from .project_launch import ProjectLaunch, ProjectLaunchQueueAdapter, ProjectLaunchQueueError
-from .project_memory import HANDOFF_MODES, PlanUpdatePreview, ProjectMemoryState, ProjectMemoryStore, available_project_tasks, build_handoff_prompt
+from .project_memory import HANDOFF_MODES, PlanUpdatePreview, ProjectMemoryError, ProjectMemoryState, ProjectMemoryStore, available_project_tasks, build_handoff_prompt
 from .project_execution import ProjectExecutionBinding, ProjectExecutionCoordinator, ProjectExecutionError
 from .work_planning import WorkPlanningPrompt, WorkPlanningPromptBuilder, WorkPlanningPromptError
 
@@ -303,6 +303,30 @@ class ProjectWorkflow:
 
     def read_memory(self, project_id: str) -> ProjectMemoryState:
         return self.memory(project_id).read_state()
+
+    def set_gate_status(self, project_id: str, gate_id: str, status: str) -> str:
+        try:
+            return self.memory(project_id).set_gate_status(gate_id, status)
+        except ProjectMemoryError as exc:
+            raise ProjectWorkflowError(exc.code, str(exc)) from exc
+
+    def pass_gate(self, project_id: str, gate_id: str) -> str:
+        return self.set_gate_status(project_id, gate_id, "passed")
+
+    def reopen_gate(self, project_id: str, gate_id: str) -> str:
+        return self.set_gate_status(project_id, gate_id, "pending")
+
+    def set_open_question_status(self, project_id: str, question_id: str, status: str) -> str:
+        try:
+            return self.memory(project_id).set_open_question_status(question_id, status)
+        except ProjectMemoryError as exc:
+            raise ProjectWorkflowError(exc.code, str(exc)) from exc
+
+    def resolve_open_question(self, project_id: str, question_id: str) -> str:
+        return self.set_open_question_status(project_id, question_id, "resolved")
+
+    def reopen_open_question(self, project_id: str, question_id: str) -> str:
+        return self.set_open_question_status(project_id, question_id, "open")
 
     def preview_plan_update(self, project_id: str, plan_path: str | Path) -> PlanUpdatePreview:
         project = self.catalog.get(project_id)
