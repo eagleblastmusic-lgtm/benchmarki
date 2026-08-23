@@ -1,7 +1,14 @@
-.bdb-vnext-panel {
+.bdb-vnext-panel,
+.bdb-vnext-project-execution-panel {
   display: flex;
+  flex-basis: 100%;
+  flex-wrap: wrap;
   gap: 0.65rem;
   align-items: center;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   margin: 0.5rem 0 0.9rem;
   font: inherit;
 }
@@ -41,14 +48,6 @@
 
 .bdb-vnext-project-launch-status[data-state="warning"] {
   font-weight: 600;
-}
-
-.bdb-vnext-project-execution-panel {
-  display: flex;
-  gap: 0.65rem;
-  align-items: center;
-  margin: 0.5rem 0 0.9rem;
-  font: inherit;
 }
 
 .bdb-vnext-project-execution-submit {

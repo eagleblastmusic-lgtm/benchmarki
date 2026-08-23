@@ -132,7 +132,7 @@ def test_vnext_project_execution_result_is_json_only_and_has_separate_submit_sur
               querySelectorAll() { return []; }
               closest(selector) { if (selector === "pre") return host; if (selector.includes("assistant")) return assistant; return null; }
               addEventListener(type, fn) { this.listeners[type] = fn; }
-              append(...items) { this.children.push(...items); }
+              append(...items) { this.children.push(...items); for (const item of items) item.parentElement = this; if (this.kind === "assistant") inserted.push(...items); }
               insertAdjacentElement(_where, item) { inserted.push(item); }
               setAttribute() {}
               focus() {}
@@ -218,13 +218,14 @@ def test_vnext_project_execution_result_is_detected_from_streamed_dom_mutations(
               }
               get innerText() { return this.textContent; }
               set innerText(value) { this.textContent = value; }
-              append(...items) {
-                for (const item of items) {
-                  this.children.push(item);
-                  item.parentElement = this;
-                  item.parentNode = this;
-                }
-              }
+                  append(...items) {
+                    for (const item of items) {
+                      this.children.push(item);
+                      item.parentElement = this;
+                      item.parentNode = this;
+                    }
+                    if (this.kind === "assistant") inserted.push(...items.filter((item) => item.className));
+                  }
               appendChild(item) { this.append(item); return item; }
               querySelectorAll(selector) {
                 const found = [];
@@ -262,6 +263,7 @@ def test_vnext_project_execution_result_is_detected_from_streamed_dom_mutations(
             const invalid = mode === "yaml" || mode === "sweep-yaml" ? "BDB_SUBMISSION:\nschema: bdb-project-execution-submission-v1\nstatus: COMPLETED" : "{\"schema\":\"bdb-project-execution-submission-v1\"}";
             const finalText = mode === "project" || mode === "duplicate" || mode === "sweep" || mode === "delayed" || mode === "hidden" ? project : mode === "generic" || mode === "sweep-generic" ? generic : invalid;
             const safetyMode = new Set(["sweep", "delayed", "hidden", "sweep-generic", "sweep-partial", "sweep-yaml"]).has(mode);
+            const inserted = [];
             const assistant = new Element("assistant");
             const pre = new Element("pre");
             const code = new Element("code");
@@ -271,7 +273,6 @@ def test_vnext_project_execution_result_is_detected_from_streamed_dom_mutations(
             code.append(text);
             const documentElement = new Element("html");
             documentElement.append(assistant);
-            const inserted = [];
             let observerCallback = null;
             let observerOptions = null;
             let observerInvoked = false;
@@ -400,6 +401,162 @@ def test_vnext_project_execution_result_is_detected_from_streamed_dom_mutations(
             timeout=10,
         )
         assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_vnext_submission_panels_mount_outside_code_editor_and_recover_after_rerender(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the Browser content contract")
+    harness = tmp_path / "project-execution-mount.cjs"
+    harness.write_text(
+        textwrap.dedent(
+            r'''
+            "use strict";
+            const assert = require("node:assert/strict");
+            const fs = require("node:fs");
+            const vm = require("node:vm");
+
+            class Element {
+              constructor(kind = "div", text = "") {
+                this.nodeType = 1;
+                this.kind = kind;
+                this._text = text;
+                this.children = [];
+                this.parentElement = null;
+                this.parentNode = null;
+                this.dataset = {};
+                this.style = {};
+                this.listeners = {};
+                this.className = "";
+              }
+              get isConnected() { return Boolean(this.parentElement); }
+              get textContent() { return this.children.length ? this.children.map((child) => child.textContent || "").join("") : this._text; }
+              set textContent(value) { this.children = []; this._text = String(value); }
+              get innerText() { return this.textContent; }
+              set innerText(value) { this.textContent = value; }
+              append(...items) {
+                for (const item of items) {
+                  this.children.push(item);
+                  item.parentElement = this;
+                  item.parentNode = this;
+                }
+              }
+              appendChild(item) { this.append(item); return item; }
+              removeChild(item) {
+                const index = this.children.indexOf(item);
+                if (index >= 0) this.children.splice(index, 1);
+                item.parentElement = null;
+                item.parentNode = null;
+                return item;
+              }
+              querySelectorAll(selector) {
+                const found = [];
+                const visit = (item) => {
+                  for (const child of item.children || []) {
+                    if (selector === "pre code" && child.kind === "code" && item.kind === "pre") found.push(child);
+                    visit(child);
+                  }
+                };
+                visit(this);
+                return found;
+              }
+              closest(selector) {
+                let current = this;
+                while (current) {
+                  if (selector === "pre" && current.kind === "pre") return current;
+                  if (selector.includes("assistant") && current.kind === "assistant") return current;
+                  current = current.parentElement;
+                }
+                return null;
+              }
+              getBoundingClientRect() { return { width: 600, height: 30 }; }
+              addEventListener(type, fn) { this.listeners[type] = fn; }
+              setAttribute() {}
+            }
+
+            const project = JSON.stringify({ schema: "bdb-project-execution-submission-v1", project_id: "project-1", plan_version: "1", task_id: "P0-01", execution_binding_id: "binding-1", correlation_id: "corr-1", command_id: "command-1", repo_alias: "premium-calculator", head_before: "a".repeat(40), head_after: "b".repeat(40), execution_status: "PASS", validation_status: "PASS", promotion_status: "NOT_RUN", result_summary: "done", evidence_refs: [], criteria: [] });
+            const generic = JSON.stringify({ schema: "bdb-vnext-submission-v1", submission_key: "submission-1", intent_revision: {}, intent: {}, conversation_binding: {}, consumer_binding: {} });
+
+            function editorTree(kind, text) {
+              const assistant = new Element("assistant");
+              const outer = new Element("outer");
+              const editor = new Element("editor");
+              const scroller = new Element("scroller");
+              const pre = new Element("pre");
+              const code = new Element("code", text);
+              assistant.append(outer);
+              outer.append(editor);
+              editor.append(scroller);
+              scroller.append(pre);
+              pre.append(code);
+              return { assistant, outer, editor, scroller, pre, code };
+            }
+
+            const projectTree = editorTree("project", project);
+            const genericTree = editorTree("generic", generic);
+            const documentElement = new Element("html");
+            documentElement.append(projectTree.assistant, genericTree.assistant);
+            let sweepCallback = null;
+            const context = {
+              console,
+              HTMLElement: Element,
+              HTMLTextAreaElement: class extends Element {},
+              HTMLInputElement: class extends Element {},
+              InputEvent: class {},
+              Event: class {},
+              TextEncoder,
+              Set,
+              Map,
+              window: { getComputedStyle: () => ({ visibility: "visible", display: "block" }) },
+              document: {
+                visibilityState: "visible",
+                documentElement,
+                querySelector: () => null,
+                querySelectorAll: (selector) => selector === "pre code" ? documentElement.querySelectorAll(selector) : [],
+                createElement: (kind) => new Element(kind),
+              },
+              MutationObserver: class { observe() {} },
+              setInterval: (callback, interval) => { if (interval === 750) sweepCallback = callback; return { unref() {} }; },
+            };
+            context.globalThis = context;
+            vm.createContext(context);
+            vm.runInContext(fs.readFileSync(process.argv[2], "utf8"), context, { filename: "content_adapter.js" });
+
+            const projectPanels = () => projectTree.assistant.children.filter((item) => item.className === "bdb-vnext-project-execution-panel");
+            const genericPanels = () => genericTree.assistant.children.filter((item) => item.className === "bdb-vnext-panel");
+            assert.equal(projectPanels().length, 1, "project result gets one panel");
+            assert.equal(genericPanels().length, 1, "generic submission gets one panel");
+            assert.equal(projectPanels()[0].parentElement, projectTree.assistant, "project panel mounts in semantic assistant owner");
+            assert.equal(genericPanels()[0].parentElement, genericTree.assistant, "generic panel mounts in semantic assistant owner");
+            assert.equal(projectTree.scroller.children.includes(projectPanels()[0]), false, "project panel is outside CodeMirror-like scroller");
+            assert.equal(genericTree.scroller.children.includes(genericPanels()[0]), false, "generic panel is outside CodeMirror-like scroller");
+            assert.equal(typeof sweepCallback, "function");
+
+            sweepCallback();
+            sweepCallback();
+            assert.equal(projectPanels().length, 1, "two sweeps do not duplicate project panel");
+            assert.equal(genericPanels().length, 1, "two sweeps do not duplicate generic panel");
+
+            const oldProjectPanel = projectPanels()[0];
+            projectTree.assistant.removeChild(oldProjectPanel);
+            assert.equal(oldProjectPanel.isConnected, false);
+            sweepCallback();
+            assert.equal(projectPanels().length, 1, "removed project panel is restored on next sweep");
+            assert.notEqual(projectPanels()[0], oldProjectPanel, "rerender creates a fresh connected panel");
+            assert.equal(projectPanels()[0].parentElement, projectTree.assistant);
+            assert.equal(projectTree.scroller.children.some((item) => item.className === "bdb-vnext-project-execution-panel"), false);
+            '''
+        ),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [node, str(harness), str(ROOT / "browser_extension_vnext" / "content_adapter.js")],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def test_vnext_project_find_composer_uses_ordered_selector_priority_and_fails_closed(tmp_path: Path) -> None:

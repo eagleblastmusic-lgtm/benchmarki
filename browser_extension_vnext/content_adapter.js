@@ -8,6 +8,8 @@ const CANONICAL_RESULT_SWEEP_MS = 750;
 const MAX_CANONICAL_SWEEP_BLOCKS = 256;
 const decorated = new WeakSet();
 const executionDecorated = new WeakSet();
+const decoratedPanels = new WeakMap();
+const executionPanels = new WeakMap();
 
 function parseSubmission(block) {
   const text = typeof block.textContent === "string" ? block.textContent.trim() : "";
@@ -74,18 +76,41 @@ function assistantOwner(block) {
   return block.closest("[data-message-author-role='assistant']");
 }
 
+function panelIsConnected(panel) {
+  if (!panel) return false;
+  if (typeof panel.isConnected === "boolean") return panel.isConnected;
+  return Boolean(panel.parentElement);
+}
+
+function panelMountOwner(block) {
+  const owner = assistantOwner(block);
+  return owner instanceof HTMLElement ? owner : null;
+}
+
+function mountPanel(block, panel, panels, decoratedBlocks) {
+  const owner = panelMountOwner(block);
+  if (!owner) return false;
+  const previous = panels.get(block);
+  if (panelIsConnected(previous)) return false;
+  if (typeof owner.appendChild === "function") {
+    owner.appendChild(panel);
+  } else if (typeof owner.append === "function") {
+    owner.append(panel);
+  } else {
+    return false;
+  }
+  panels.set(block, panel);
+  decoratedBlocks.add(block);
+  return true;
+}
+
 function setResult(output, message, state = "neutral") {
   output.textContent = message;
   output.dataset.state = state;
 }
 
 function decorate(block, submission) {
-  if (decorated.has(block) || !assistantOwner(block)) {
-    return;
-  }
-  decorated.add(block);
-  const host = block.closest("pre") || block.parentElement;
-  if (!(host instanceof HTMLElement)) {
+  if (panelIsConnected(decoratedPanels.get(block))) {
     return;
   }
   const panel = document.createElement("div");
@@ -128,7 +153,7 @@ function decorate(block, submission) {
   });
 
   panel.append(button, output);
-  host.insertAdjacentElement("afterend", panel);
+  mountPanel(block, panel, decoratedPanels, decorated);
 }
 
 async function projectExecutionBindingForConversation(conversationId) {
@@ -138,10 +163,7 @@ async function projectExecutionBindingForConversation(conversationId) {
 }
 
 function decorateProjectExecution(block, result) {
-  if (executionDecorated.has(block) || !assistantOwner(block)) return;
-  executionDecorated.add(block);
-  const host = block.closest("pre") || block.parentElement;
-  if (!(host instanceof HTMLElement)) return;
+  if (panelIsConnected(executionPanels.get(block))) return;
   const panel = document.createElement("div");
   panel.className = "bdb-vnext-project-execution-panel";
   const button = document.createElement("button");
@@ -181,7 +203,7 @@ function decorateProjectExecution(block, result) {
     }
   });
   panel.append(button, output);
-  host.insertAdjacentElement("afterend", panel);
+  mountPanel(block, panel, executionPanels, executionDecorated);
 }
 
 // Project launch is a transport handoff from the canonical GUI. It never
@@ -523,7 +545,7 @@ function isCanonicalResultCandidate(block) {
 }
 
 function scanBlock(block) {
-  if (!(block instanceof HTMLElement) || decorated.has(block) || executionDecorated.has(block)) {
+  if (!(block instanceof HTMLElement) || panelIsConnected(decoratedPanels.get(block)) || panelIsConnected(executionPanels.get(block))) {
     return;
   }
   if (!isCanonicalResultCandidate(block)) {
