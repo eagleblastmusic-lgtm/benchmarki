@@ -17,7 +17,7 @@ from bdb_vnext.project_workflow import CommandResult, ProjectWorkflow
 HEAD = "a" * 40
 
 
-def _plan(project_id: str, version: int = 1, *, statuses: tuple[str, str, str] = ("active", "pending", "pending"), supersedes: int | None = None, all_deterministic: bool = False, include_next_milestone: bool = False) -> ProjectPlan:
+def _plan(project_id: str, version: int = 1, *, statuses: tuple[str, str, str] = ("active", "pending", "pending"), supersedes: int | None = None, all_deterministic: bool = False, include_next_milestone: bool = False, current_task_id: str | None = "t1") -> ProjectPlan:
     document = {
         "schema": "bdb-project-plan-v1",
         "project_id": project_id,
@@ -30,14 +30,14 @@ def _plan(project_id: str, version: int = 1, *, statuses: tuple[str, str, str] =
             {"id": "t2", "milestone_id": "m1", "title": "Review", "description": "second", "status": statuses[1], "dependencies": ["t1"], "acceptance_criteria": ["test:fixture" if all_deterministic else "manual:visual review"]},
             {"id": "t3", "milestone_id": "m1", "title": "Retry", "description": "third", "status": statuses[2], "dependencies": ["t2"], "acceptance_criteria": ["test:fixture"]},
         ],
-        "current_task_id": "t1",
+        "current_task_id": current_task_id,
     }
     if include_next_milestone:
         document["tasks"].append({"id": "t4", "milestone_id": "m2", "title": "Next", "description": "next", "status": "pending", "dependencies": ["t3"], "acceptance_criteria": ["test:fixture"]})
     return validate_project_plan(document, expected_project_id=project_id)
 
 
-def _fixture(tmp_path: Path, *, all_deterministic: bool = False, include_next_milestone: bool = False) -> tuple[ProjectCatalog, ProjectExecutionCoordinator, str]:
+def _fixture(tmp_path: Path, *, all_deterministic: bool = False, include_next_milestone: bool = False, current_task_id: str | None = "t1") -> tuple[ProjectCatalog, ProjectExecutionCoordinator, str]:
     runtime = tmp_path / "runtime"
     repo = tmp_path / "repo"
     (repo / ".git").mkdir(parents=True)
@@ -45,7 +45,7 @@ def _fixture(tmp_path: Path, *, all_deterministic: bool = False, include_next_mi
     brief = ProjectBrief("Execution Fixture", "exercise bounded execution", "fixture", "test")
     project = new_project_record(project_id=project_id, display_name="Execution Fixture", repo_alias="execution-fixture", local_repo_path=repo, github_repo=None, brief=brief)
     catalog = ProjectCatalog(runtime); catalog.upsert(project)
-    memory = ProjectMemoryStore(runtime, project_id); plan = memory.ensure_initial_plan(_plan(project_id, all_deterministic=all_deterministic, include_next_milestone=include_next_milestone))
+    memory = ProjectMemoryStore(runtime, project_id); plan = memory.ensure_initial_plan(_plan(project_id, all_deterministic=all_deterministic, include_next_milestone=include_next_milestone, current_task_id=current_task_id))
     catalog.upsert(type(project)(**{**project.__dict__, "plan_imported": True, "plan_version": plan.plan_version, "total_tasks": len(plan.tasks), "current_milestone": plan.current_milestone.title if plan.current_milestone else None, "current_task": plan.current_task_id, "plan_path": str(memory.current_pointer), "project_status": "active"}))
     coordinator = ProjectExecutionCoordinator(runtime, catalog=catalog)
     return catalog, coordinator, project_id
@@ -78,6 +78,15 @@ def test_execution_binding_acceptance_progress_and_idempotent_replay(tmp_path: P
     assert snapshot["task_statuses"]["t1"] == "completed"
     assert snapshot["available_tasks"] == ["t2"]
     assert catalog.get(project_id).completed_tasks == 1
+
+
+def test_execution_binding_selects_single_runnable_task_when_plan_cursor_is_empty(tmp_path: Path) -> None:
+    _catalog, coordinator, project_id = _fixture(tmp_path, current_task_id=None)
+
+    binding = coordinator.start(project_id, expected_repo_head_before=HEAD)
+
+    assert binding.task_id == "t1"
+    assert coordinator.snapshot(project_id)["current_task_id"] == "t1"
 
 
 def test_milestone_auto_advances_in_plan_order_without_global_limits_and_stops_at_boundary(tmp_path: Path) -> None:

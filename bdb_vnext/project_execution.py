@@ -177,6 +177,16 @@ class ProjectExecutionCoordinator:
         project, plan, memory = self._project(project_id)
         state = memory.read_state(); execution = _execution_document(state)
         selected = task_id or execution.get("current_task_id") or plan.current_task_id
+        if selected is None:
+            available = available_project_tasks(plan, state)
+            if len(available) == 1:
+                selected = available[0].task_id
+            elif len(available) > 1:
+                _fail(
+                    "task_selection_required",
+                    "multiple execution tasks are runnable; choose one explicitly",
+                    details={"task_ids": [item.task_id for item in available]},
+                )
         task = next((item for item in plan.tasks if item.task_id == selected), None)
         if task is None:
             _fail("task_not_found", "execution task does not exist")
