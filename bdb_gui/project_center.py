@@ -364,7 +364,7 @@ class ProjectCenterWindow(QMainWindow):
                 self._status.setText(f"BDB AUTO: {snapshot.get('milestone_id')} już ukończony — następny milestone wymaga użytkownika")
                 return
             launch = self._workflow.queue_continue_prompt(self._current_project_id)
-            self._status.setText(f"BDB AUTO: {snapshot.get('milestone_id')} · {snapshot.get('current_task_id')} · prompt oczekuje ({launch.launch_id}); Send pozostaje ręczny")
+            self._status.setText(f"BDB AUTO: {snapshot.get('milestone_id')} · {snapshot.get('current_task_id')} · prompt oczekuje ({launch.launch_id}); BDB wstawi i wyśle automatycznie")
         except (ProjectWorkflowError, ProjectExecutionError) as exc:
             self._status.setText(f"BDB AUTO zatrzymany — {getattr(exc, 'code', 'milestone_auto_failed')}")
             return

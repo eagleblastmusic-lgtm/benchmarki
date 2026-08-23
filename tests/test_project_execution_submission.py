@@ -70,6 +70,8 @@ def test_project_execution_auto_accepts_once_and_queues_next_task(tmp_path: Path
     queue_adapter = ProjectLaunchQueueAdapter(queue)
     workflow = ProjectWorkflow(catalog.runtime_root, catalog=catalog, command_runner=Runner(), queue=queue_adapter)
     launch = workflow.queue_continue_prompt(project_id)
+    assert launch.auto_send is True
+    assert queue_adapter.peek() is not None and queue_adapter.peek().auto_send is True
     claim_id = str(uuid.uuid4())
     assert queue_adapter.claim(launch_id=launch.launch_id, claim_id=claim_id) == launch
     assert queue_adapter.acknowledge(launch_id=launch.launch_id, claim_id=claim_id) is True
@@ -87,6 +89,52 @@ def test_project_execution_auto_accepts_once_and_queues_next_task(tmp_path: Path
     assert replay["replayed"] is True
     assert len(coordinator.snapshot(project_id)["attempts"]) == 1
     assert len(coordinator.snapshot(project_id)["bindings"]) == 2
+
+
+def test_native_project_execution_status_exposes_only_current_auto_gate(tmp_path: Path) -> None:
+    catalog, coordinator, project_id = _fixture(tmp_path, all_deterministic=True)
+    coordinator.begin_milestone_auto(project_id, milestone_id="m1", milestone_run_id="milestone-run-status")
+
+    class Runner:
+        def run(self, args, *, cwd=None, timeout_seconds=120.0):
+            return CommandResult(tuple(args), 0, HEAD + "\n", "")
+
+    from bdb_vnext.project_launch import ProjectLaunchQueueAdapter
+
+    workflow = ProjectWorkflow(catalog.runtime_root, catalog=catalog, command_runner=Runner(), queue=ProjectLaunchQueueAdapter(tmp_path / "status-launch.json"))
+    launch = workflow.queue_continue_prompt(project_id)
+    binding = coordinator.binding(project_id, launch.execution_binding_id)
+    coordinator.bind_conversation(project_id, binding.execution_binding_id, "chatgpt-conversation-status")
+    config = VNextNativeConfig(runtime_root=catalog.runtime_root, legacy_runtime_root=tmp_path / "legacy", bootstrap_authority_root=tmp_path / "bootstrap")
+    response = handle_message(config, {
+        "schema": M9B_NATIVE_REQUEST_SCHEMA,
+        "request_id": "native-project-status-1",
+        "action": "project_execution_status",
+        "protocol_generation": PROTOCOL_GENERATION,
+        "browser_extension_id": BROWSER_EXTENSION_ID,
+        "conversation_id": "chatgpt-conversation-status",
+        "project_id": project_id,
+        "execution_binding_id": binding.execution_binding_id,
+    })
+    assert response["status"] == "project_execution_status"
+    assert response["current_binding_id"] == binding.execution_binding_id
+    assert response["current_task_id"] == binding.task_id
+    assert response["binding"]["conversation_id"] == "chatgpt-conversation-status"
+    assert response["milestone_auto"]["status"] == "RUNNABLE"
+    assert response["milestone_auto"]["milestone_run_id"] == "milestone-run-status"
+
+    coordinator.stop_milestone_auto(project_id, run_id="milestone-run-status", reason="test_stop")
+    stopped = handle_message(config, {
+        "schema": M9B_NATIVE_REQUEST_SCHEMA,
+        "request_id": "native-project-status-2",
+        "action": "project_execution_status",
+        "protocol_generation": PROTOCOL_GENERATION,
+        "browser_extension_id": BROWSER_EXTENSION_ID,
+        "conversation_id": "chatgpt-conversation-status",
+        "project_id": project_id,
+        "execution_binding_id": binding.execution_binding_id,
+    })
+    assert stopped["milestone_auto"]["status"] == "STOPPED"
 
 
 def test_project_execution_wrong_conversation_and_stale_binding_fail_closed(tmp_path: Path) -> None:

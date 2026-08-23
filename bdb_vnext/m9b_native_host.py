@@ -59,6 +59,7 @@ M9B_NATIVE_ACTIONS = frozenset({
     "project_launch_peek",
     "project_launch_claim",
     "project_launch_ack",
+    "project_execution_status",
     "project_execution_submit",
 })
 
@@ -323,6 +324,42 @@ def handle_message(
                 raise M9bNativeError(exc.code, str(exc)) from exc
             response["client_verification_sha256"] = verification["verification_sha256"]
         return response
+
+    if action == "project_execution_status":
+        project_id = _bounded_text(message.get("project_id"), field="project_id", maximum=128)
+        binding_id = _bounded_text(message.get("execution_binding_id"), field="execution_binding_id", maximum=128)
+        conversation_id = _conversation_id(message.get("conversation_id"))
+        try:
+            coordinator = ProjectExecutionCoordinator(config.runtime_root, catalog=ProjectCatalog(config.runtime_root))
+            binding = coordinator.binding(project_id, binding_id)
+            if binding.conversation_id not in (None, conversation_id):
+                _fail("execution_conversation_mismatch", "execution binding is owned by another conversation")
+            snapshot = coordinator.snapshot(project_id)
+            if snapshot.get("current_binding_id") != binding.execution_binding_id:
+                _fail("execution_binding_stale", "execution binding is not the current canonical binding")
+            auto = coordinator.milestone_auto_snapshot(project_id)
+            response = _base_response(config, request_id)
+            response.update({
+                "status": "project_execution_status",
+                "project_id": project_id,
+                "current_binding_id": snapshot.get("current_binding_id"),
+                "current_task_id": snapshot.get("current_task_id"),
+                "binding": {
+                    "execution_binding_id": binding.execution_binding_id,
+                    "project_id": binding.project_id,
+                    "plan_version": binding.plan_version,
+                    "task_id": binding.task_id,
+                    "launch_id": binding.launch_id,
+                    "conversation_id": binding.conversation_id,
+                    "status": binding.status,
+                    "superseded": binding.superseded,
+                },
+                "milestone_auto": dict(auto) if isinstance(auto, Mapping) else None,
+                "legacy_fallback": False,
+            })
+            return response
+        except ProjectExecutionError as exc:
+            raise M9bNativeError(getattr(exc, "code", "project_execution_status_failed"), str(exc)) from exc
 
     if action == "project_execution_submit":
         conversation_id = _conversation_id(message.get("conversation_id"))

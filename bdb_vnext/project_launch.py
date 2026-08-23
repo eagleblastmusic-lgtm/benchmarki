@@ -129,8 +129,8 @@ class ProjectLaunch:
             raise ValueError("repo_alias has an unsafe format")
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > MAX_PROJECT_PROMPT_CHARS:
             raise ValueError("prompt must be non-empty and bounded")
-        if auto_send is not False:
-            raise ValueError("project launch auto_send must be false")
+        if not isinstance(auto_send, bool):
+            raise ValueError("project launch auto_send must be boolean")
         created = _parse_utc(created_at, "created_at")
         expires = _parse_utc(expires_at, "expires_at")
         if expires <= created:
@@ -149,7 +149,7 @@ class ProjectLaunch:
             launch_id=launch_id,
             repo_alias=repo_alias,
             prompt=prompt,
-            auto_send=False,
+            auto_send=auto_send,
             created_at=created_at,
             expires_at=expires_at,
             schema=PROJECT_LAUNCH_SCHEMA,
@@ -260,6 +260,7 @@ class ProjectLaunchQueueAdapter:
         *,
         repo_alias: str,
         prompt: str,
+        auto_send: bool = False,
         ttl_minutes: int = 10,
         launch_id: str | None = None,
         project_id: str | None = None,
@@ -275,6 +276,8 @@ class ProjectLaunchQueueAdapter:
         normalized = prompt.strip()
         if not normalized or len(normalized) > MAX_PROJECT_PROMPT_CHARS:
             raise ProjectLaunchQueueError("prompt_invalid", "prompt is empty or exceeds its bound")
+        if not isinstance(auto_send, bool):
+            raise ProjectLaunchQueueError("auto_send_invalid", "auto_send must be boolean")
         if isinstance(ttl_minutes, bool) or not isinstance(ttl_minutes, int) or not 1 <= ttl_minutes <= 60:
             raise ProjectLaunchQueueError("ttl_invalid", "ttl_minutes must be between 1 and 60")
         supplied_launch_id = launch_id or str(uuid.uuid4())
@@ -306,7 +309,7 @@ class ProjectLaunchQueueAdapter:
                 launch_id=supplied_launch_id,
                 repo_alias=repo_alias,
                 prompt=normalized,
-                auto_send=False,
+                auto_send=auto_send,
                 created_at=_utc_text(now),
                 expires_at=_utc_text(now + timedelta(minutes=ttl_minutes)),
                 **metadata,

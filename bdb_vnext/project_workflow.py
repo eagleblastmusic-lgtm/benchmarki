@@ -518,13 +518,20 @@ class ProjectWorkflow:
         try:
             binding = self.execution.new_binding(project_id, expected_repo_head_before=head)
             prompt = build_start_prompt(project, plan=plan, state=state, git_head=head, binding=binding) if kind == "start" else build_continue_prompt(project, plan=plan, state=state, git_head=head, binding=binding)
+            auto = self.execution.milestone_auto_snapshot(project_id)
+            auto_send = (
+                auto.get("status") == "RUNNABLE" and
+                auto.get("current_task_id") == binding.task_id and
+                isinstance(auto.get("milestone_run_id"), str) and
+                bool(auto.get("milestone_run_id"))
+            )
             pending = self.queue.peek()
             if pending is not None:
                 if pending.launch_id != binding.launch_id or pending.execution_binding_id != binding.execution_binding_id:
                     raise ProjectWorkflowError("queue_pending", "project launch queue already contains another canonical binding")
                 launch = pending
             else:
-                launch = self.queue.enqueue(repo_alias=project.repo_alias, prompt=prompt, ttl_minutes=10, launch_id=binding.launch_id, project_id=binding.project_id, plan_version=binding.plan_version, task_id=binding.task_id, execution_binding_id=binding.execution_binding_id, correlation_id=binding.correlation_id, command_id=binding.command_id, expected_repo_head_before=binding.expected_repo_head_before)
+                launch = self.queue.enqueue(repo_alias=project.repo_alias, prompt=prompt, auto_send=auto_send, ttl_minutes=10, launch_id=binding.launch_id, project_id=binding.project_id, plan_version=binding.plan_version, task_id=binding.task_id, execution_binding_id=binding.execution_binding_id, correlation_id=binding.correlation_id, command_id=binding.command_id, expected_repo_head_before=binding.expected_repo_head_before)
             self.execution.persist_binding(binding)
         except (ProjectExecutionError, ProjectLaunchQueueError) as exc:
             raise ProjectWorkflowError(getattr(exc, "code", "project_execution_binding_failed"), str(exc)) from exc
