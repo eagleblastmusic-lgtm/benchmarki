@@ -15,6 +15,11 @@ const decorated = new WeakSet();
 const executionDecorated = new WeakSet();
 const decoratedPanels = new WeakMap();
 const executionPanels = new WeakMap();
+const projectAutoSubmissions = new Map();
+let projectAutoEpoch = 0;
+let projectAutoState = { phase: "awaiting_next_launch", launch_id: null, execution_binding_id: null, token: null };
+const PROJECT_AUTO_STOP_MESSAGE = "bdb-vnext-project-auto-stop";
+const PROJECT_EXECUTION_STATUS_MESSAGE = "bdb-vnext-project-execution-status";
 
 function parseSubmission(block) {
   const text = typeof block.textContent === "string" ? block.textContent.trim() : "";
@@ -227,6 +232,158 @@ async function projectExecutionBindingForConversation(conversationId, result) {
   return Object.values(bindings).find((value) => value && value.conversation_id === conversationId && value.project_id === result.project_id && value.execution_binding_id === result.execution_binding_id && typeof value.launch_id === "string" && value.launch_id.length > 0) || null;
 }
 
+async function projectExecutionStatusFor(projectId, executionBindingId, conversationId) {
+  if (!projectId || !executionBindingId || !conversationId) return null;
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: PROJECT_EXECUTION_STATUS_MESSAGE,
+      project_id: projectId,
+      execution_binding_id: executionBindingId,
+      conversation_id: conversationId
+    });
+    return response && response.ok === true && response.response && response.response.status === "project_execution_status"
+      ? response.response
+      : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function projectAutoStop(reason) {
+  projectAutoEpoch += 1;
+  projectAutoState = {
+    phase: "stopped",
+    launch_id: null,
+    execution_binding_id: null,
+    token: String(reason || "stopped")
+  };
+}
+
+function projectAutoGateMatches(status, result, conversationId) {
+  const binding = status && status.binding;
+  const auto = status && status.milestone_auto;
+  return Boolean(
+    status &&
+    status.current_binding_id === result.execution_binding_id &&
+    status.current_task_id === result.task_id &&
+    binding &&
+    binding.project_id === result.project_id &&
+    binding.execution_binding_id === result.execution_binding_id &&
+    binding.task_id === result.task_id &&
+    binding.conversation_id === conversationId &&
+    binding.status === "ACTIVE" &&
+    binding.superseded !== true &&
+    auto &&
+    auto.status === "RUNNABLE" &&
+    auto.current_task_id === result.task_id &&
+    typeof auto.milestone_run_id === "string" &&
+    auto.milestone_run_id.length > 0
+  );
+}
+
+function projectExecutionResultRefs(panel, button, output) {
+  return { panel, button, output };
+}
+
+async function submitProjectExecutionResult(block, result, refs, { automatic = false, gate = null } = {}) {
+  const { button, output } = refs;
+  const conversationId = projectConversationId();
+  if (!conversationId) {
+    setResult(output, "Project execution requires a canonical conversation.", "error");
+    return false;
+  }
+  let binding = await projectExecutionBindingForConversation(conversationId, result);
+  if (automatic && !projectAutoGateMatches(gate, result, conversationId)) {
+    projectAutoStop("canonical_auto_gate_rejected");
+    return false;
+  }
+  const autoEpoch = projectAutoEpoch;
+  if (automatic && projectAutoState.phase === "stopped") return false;
+  const request = {
+    type: "bdb-vnext-project-execution-submit",
+    result,
+    conversation_id: conversationId
+  };
+  if (binding) request.launch_id = binding.launch_id;
+  button.disabled = true;
+  setResult(output, automatic ? "BDB vNext: Submitting…" : "Submitting project result through canonical vNext transport…");
+  try {
+    if (automatic && (autoEpoch !== projectAutoEpoch || projectAutoState.phase === "stopped")) {
+      button.disabled = false;
+      return false;
+    }
+    const response = await chrome.runtime.sendMessage(request);
+    if (response && response.ok === true && response.receipt) {
+      const receipt = response.receipt;
+      const next = receipt.current_task_id ? ` · Next: ${receipt.current_task_id}` : "";
+      setResult(output, `${receipt.replayed ? "Replayed" : "Accepted"}: ${receipt.task_id}${next}`, "success");
+      button.textContent = "BDB vNext: Result accepted";
+      if (automatic) {
+        if (autoEpoch !== projectAutoEpoch || projectAutoState.phase === "stopped") {
+          projectAutoStop("user_stop_during_result_submit");
+          return true;
+        }
+        projectAutoState = {
+          phase: "result_accepted",
+          launch_id: binding ? binding.launch_id : null,
+          execution_binding_id: result.execution_binding_id,
+          token: receipt.replayed ? "replayed" : "accepted"
+        };
+        const nextLaunch = receipt.next_launch;
+        if (receipt.milestone_status === "RUNNABLE" && nextLaunch && nextLaunch.project_id === result.project_id && nextLaunch.task_id && nextLaunch.execution_binding_id) {
+          projectAutoState.phase = "awaiting_next_launch";
+          void projectHandleLaunch(nextLaunch, { automatic: true }).catch(() => projectAutoStop("next_launch_failed"));
+        } else {
+          projectAutoState.phase = receipt.milestone_status === "MILESTONE_COMPLETED" ? "stopped" : "awaiting_next_launch";
+        }
+      }
+      return true;
+    }
+    throw new Error(response && response.error ? response.error : "project execution result rejected");
+  } catch (error) {
+    setResult(output, error instanceof Error ? error.message : String(error), "error");
+    button.textContent = "BDB vNext: Retry result";
+    button.disabled = false;
+    if (automatic) projectAutoState.phase = "error";
+    return false;
+  }
+}
+
+async function autoSubmitProjectExecution(block, result, refs, panelKey) {
+  if (projectAutoSubmissions.has(panelKey)) return;
+  const record = { status: "checking" };
+  projectAutoSubmissions.set(panelKey, record);
+  try {
+    projectAutoState = {
+      phase: "detected",
+      launch_id: null,
+      execution_binding_id: result.execution_binding_id,
+      token: panelKey
+    };
+    const conversationId = projectConversationId();
+    const status = await projectExecutionStatusFor(result.project_id, result.execution_binding_id, conversationId);
+    if (!status) {
+      record.status = "manual";
+      return;
+    }
+    if (!projectAutoGateMatches(status, result, conversationId)) {
+      record.status = "stopped";
+      return;
+    }
+    projectAutoState = {
+      phase: "submitting_result",
+      launch_id: status.binding.launch_id,
+      execution_binding_id: result.execution_binding_id,
+      token: panelKey
+    };
+    record.status = "submitting";
+    record.result = await submitProjectExecutionResult(block, result, refs, { automatic: true, gate: status });
+    record.status = record.result ? "accepted" : "error";
+  } catch (_error) {
+    record.status = "error";
+  }
+}
+
 function decorateProjectExecution(block, result) {
   const panelClass = "bdb-vnext-project-execution-panel";
   const panelKind = PROJECT_EXECUTION_PANEL_KIND;
@@ -244,34 +401,11 @@ function decorateProjectExecution(block, result) {
   output.setAttribute("role", "status");
   output.setAttribute("aria-live", "polite");
   button.addEventListener("click", async () => {
-    button.disabled = true;
-    setResult(output, "Submitting project result through canonical vNext transport…");
-    try {
-      const conversationId = projectConversationId();
-      const binding = await projectExecutionBindingForConversation(conversationId, result);
-      const request = {
-        type: "bdb-vnext-project-execution-submit",
-        result,
-        conversation_id: conversationId
-      };
-      if (binding) request.launch_id = binding.launch_id;
-      const response = await chrome.runtime.sendMessage(request);
-      if (response && response.ok === true && response.receipt) {
-        const receipt = response.receipt;
-        const next = receipt.current_task_id ? ` · Next: ${receipt.current_task_id}` : "";
-        setResult(output, `${receipt.replayed ? "Replayed" : "Accepted"}: ${receipt.task_id}${next}`, "success");
-        button.textContent = "BDB vNext: Result accepted";
-        return;
-      }
-      throw new Error(response && response.error ? response.error : "project execution result rejected");
-    } catch (error) {
-      setResult(output, error instanceof Error ? error.message : String(error), "error");
-      button.textContent = "BDB vNext: Retry result";
-      button.disabled = false;
-    }
+    await submitProjectExecutionResult(block, result, projectExecutionResultRefs(panel, button, output));
   });
   panel.append(button, output);
   mountPanel(block, panel, panelClass, panelKind, panelKey, executionPanels, executionDecorated);
+  void autoSubmitProjectExecution(block, result, projectExecutionResultRefs(panel, button, output), panelKey);
 }
 
 // Project launch is a transport handoff from the canonical GUI. It never
@@ -386,7 +520,7 @@ function projectValidLaunch(value) {
     typeof value.launch_id === "string" && PROJECT_UUID_RE.test(value.launch_id) &&
     typeof value.repo_alias === "string" && /^[a-z][a-z0-9-]{0,31}$/.test(value.repo_alias) &&
     typeof value.prompt === "string" && value.prompt.trim() !== "" && value.prompt.length <= 50000 &&
-    value.auto_send === false && typeof value.created_at === "string" && typeof value.expires_at === "string"
+    typeof value.auto_send === "boolean" && typeof value.created_at === "string" && typeof value.expires_at === "string"
   );
 }
 
@@ -417,6 +551,7 @@ async function projectWriteBinding(launch, claimId, conversationId, state) {
     correlation_id: launch.correlation_id || null,
     command_id: launch.command_id || null,
     expected_repo_head_before: launch.expected_repo_head_before || null,
+    auto_send: launch.auto_send === true,
     state,
     updated_at: now
   };
@@ -471,6 +606,64 @@ function projectInsertExact(composer, prompt) {
   return projectComposerText(composer) === prompt;
 }
 
+function projectFindSendControl(composer) {
+  if (!composer) return null;
+  const form = typeof composer.closest === "function" ? composer.closest("form") : null;
+  const roots = form ? [form, document] : [document];
+  const selectors = [
+    "button[data-testid='send-button']",
+    "button[aria-label='Send prompt']",
+    "button[aria-label*='Send' i]",
+    "button[type='submit']"
+  ];
+  for (const root of roots) {
+    for (const selector of selectors) {
+      const matches = typeof root.querySelectorAll === "function" ? Array.from(root.querySelectorAll(selector)).filter(projectVisible) : [];
+      if (matches.length === 1) return matches[0];
+      if (matches.length > 1 && selector === "button[data-testid='send-button']") return null;
+    }
+  }
+  return null;
+}
+
+function projectDelay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function projectAutoSendInserted(launch, claimId, prompt, insertedComposer, token) {
+  if (projectAutoState.phase === "stopped") return false;
+  const epoch = projectAutoEpoch;
+  projectAutoState = { phase: "awaiting_send_ready", launch_id: launch.launch_id, execution_binding_id: launch.execution_binding_id, token };
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (epoch !== projectAutoEpoch || projectAutoState.phase === "stopped") return false;
+    const composer = projectFindComposer();
+    if (!composer || projectComposerText(composer) !== prompt) {
+      projectAutoStop("composer_changed_before_send");
+      projectAnnounce("BDB AUTO zatrzymane: composer został zmieniony przez użytkownika.", "warning");
+      return false;
+    }
+    const status = await projectExecutionStatusFor(launch.project_id, launch.execution_binding_id, projectConversationId());
+    if (!status || status.current_binding_id !== launch.execution_binding_id || status.current_task_id !== launch.task_id || !status.milestone_auto || status.milestone_auto.status !== "RUNNABLE" || status.binding?.conversation_id !== projectConversationId()) {
+      projectAutoStop("canonical_auto_send_gate_rejected");
+      projectAnnounce("BDB AUTO zatrzymane: canonical milestone nie jest już RUNNABLE.", "warning");
+      return false;
+    }
+    const send = projectFindSendControl(composer);
+    if (send && send.disabled !== true && projectComposerText(composer) === prompt && epoch === projectAutoEpoch) {
+      projectAutoState.phase = "sending_prompt";
+      if (typeof send.click !== "function") return false;
+      send.click();
+      projectAutoState.phase = "sent";
+      projectAnnounce("BDB AUTO: prompt wysłany automatycznie.", "success");
+      return true;
+    }
+    await projectDelay(100);
+  }
+  projectAutoState.phase = "error";
+  projectAnnounce("BDB AUTO zatrzymane: kontrolka Send nie stała się dostępna.", "warning");
+  return false;
+}
+
 async function projectPeek() {
   const result = await chrome.runtime.sendMessage({ type: "bdb-vnext-project-launch-peek" });
   if (!result || result.ok !== true || !result.response || result.response.status !== "project_launch") return null;
@@ -497,10 +690,11 @@ async function projectAck(launchId, claimId) {
   return Boolean(result && result.ok === true && result.response && result.response.status === "acknowledged");
 }
 
-async function projectHandleLaunch(launch, { selectedByUser = false } = {}) {
+async function projectHandleLaunch(launch, { selectedByUser = false, automatic = false } = {}) {
   if (projectInsertionActive || !projectPageEligible({ selectedByUser })) return false;
   const conversationId = projectConversationId();
   const blankNewChat = !conversationId && selectedByUser && projectBlankNewChat();
+  const autoMode = automatic || launch.auto_send === true;
   const composer = projectFindComposer();
   if ((!conversationId && !blankNewChat) || !composer) return false;
   const bindings = await projectReadBindings();
@@ -521,6 +715,13 @@ async function projectHandleLaunch(launch, { selectedByUser = false } = {}) {
     ? projectConversationId() === conversationId
     : !projectConversationId() && projectBlankNewChat();
   if (!projectPageEligible({ selectedByUser }) || !sameSelection) return false;
+  if (autoMode) {
+    const status = await projectExecutionStatusFor(claimed.project_id, claimed.execution_binding_id, conversationId);
+    if (!status || status.current_binding_id !== claimed.execution_binding_id || status.current_task_id !== claimed.task_id || !status.binding || status.binding.project_id !== claimed.project_id || status.binding.task_id !== claimed.task_id || status.binding.conversation_id !== conversationId || !status.milestone_auto || status.milestone_auto.status !== "RUNNABLE") {
+      projectAutoStop("canonical_launch_gate_rejected");
+      return false;
+    }
+  }
   if (conversationId) await projectWriteBinding(claimed, claimId, conversationId, "CLAIMED");
   projectInsertionActive = true;
   try {
@@ -539,7 +740,14 @@ async function projectHandleLaunch(launch, { selectedByUser = false } = {}) {
     const acknowledged = await projectAck(claimed.launch_id, claimId);
     if (acknowledged) {
       if (conversationId) await projectWriteBinding(claimed, claimId, conversationId, "ACKED");
-      projectAnnounce("BDB vNext: project prompt inserted (not sent).", "success");
+      if (autoMode) {
+        if (projectAutoState.phase === "stopped") return false;
+        const token = `${claimed.launch_id}:${claimed.execution_binding_id}:${Date.now()}`;
+        projectAutoState = { phase: "inserting_prompt", launch_id: claimed.launch_id, execution_binding_id: claimed.execution_binding_id, token };
+        await projectAutoSendInserted(claimed, claimId, claimed.prompt, projectFindComposer(), token);
+      } else {
+        projectAnnounce("BDB vNext: project prompt inserted (not sent).", "success");
+      }
       return true;
     }
     return false;
@@ -577,6 +785,11 @@ async function projectPoll() {
 
 if (typeof chrome === "object" && chrome.runtime && chrome.runtime.onMessage) {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message && message.type === PROJECT_AUTO_STOP_MESSAGE) {
+      projectAutoStop("user_stop");
+      sendResponse({ ok: true, code: "auto_stopped" });
+      return false;
+    }
     if (!message || message.type !== PROJECT_LAUNCH_INSERT_MESSAGE) return false;
     projectInsertSelectedLaunch()
       .then(sendResponse)

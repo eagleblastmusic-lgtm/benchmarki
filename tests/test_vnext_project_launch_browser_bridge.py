@@ -102,12 +102,14 @@ def test_vnext_project_launch_browser_path_is_bounded_and_submission_path_remain
     assert 'native("project_launch_claim"' in worker
     assert 'native("project_launch_ack"' in worker
     assert "message.conversation_id" in worker
-    assert 'value.auto_send === false' in adapter
+    assert 'typeof value.auto_send === "boolean"' in adapter
     assert "document.hasFocus()" in adapter
     assert "document.visibilityState === \"visible\"" in adapter
     assert "tab_instance_id" in adapter
     assert "insertText" in adapter
-    assert ".click(" not in adapter
+    assert "button[data-testid='send-button']" in adapter
+    assert "button[aria-label='Send prompt']" in adapter
+    assert "projectAutoSendInserted" in adapter
     assert "bdb-vnext-submission-v1" in adapter
 
 

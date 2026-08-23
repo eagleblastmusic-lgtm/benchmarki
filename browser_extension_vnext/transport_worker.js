@@ -21,6 +21,7 @@ const TYPES = new Set([
   "bdb-vnext-project-launch-peek",
   "bdb-vnext-project-launch-claim",
   "bdb-vnext-project-launch-ack",
+  "bdb-vnext-project-execution-status",
   "bdb-vnext-project-execution-submit"
 ]);
 let storageChain = Promise.resolve();
@@ -348,6 +349,15 @@ async function projectExecutionSubmit(result, conversationId, launchId) {
   return { ok: response.status === "project_execution", receipt: response.receipt || null };
 }
 
+async function projectExecutionStatus(projectId, executionBindingId, conversationId) {
+  const response = await sendNative(native("project_execution_status", {
+    project_id: boundedId(projectId, "project_id"),
+    execution_binding_id: boundedId(executionBindingId, "execution_binding_id"),
+    conversation_id: boundedId(conversationId, "conversation_id")
+  }));
+  return { ok: response.status === "project_execution_status", response };
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || typeof message !== "object" || !TYPES.has(message.type)) return false;
   if (sender.id !== chrome.runtime.id) {
@@ -361,6 +371,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     : message.type === "bdb-vnext-project-launch-peek" ? projectLaunchPeek()
     : message.type === "bdb-vnext-project-launch-claim" ? projectLaunchClaim(message.launch_id, message.claim_id, message.conversation_id)
     : message.type === "bdb-vnext-project-launch-ack" ? projectLaunchAck(message.launch_id, message.claim_id)
+    : message.type === "bdb-vnext-project-execution-status" ? projectExecutionStatus(message.project_id, message.execution_binding_id, message.conversation_id)
     : projectExecutionSubmit(message.result, message.conversation_id, message.launch_id);
   operation.then(
     (result) => sendResponse(result),
