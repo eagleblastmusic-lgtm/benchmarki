@@ -1,36 +1,61 @@
 # Architecture Decision Records
 
-ADR-y opisują decyzje architektoniczne, których kolejne etapy nie powinny zmieniać bez nowego ADR zastępującego poprzedni.
+Status tego katalogu: **HISTORICAL ADR SET / PRE-vNext PRODUCTIZATION**, chyba że konkretny ADR został jawnie reaffirmowany przez bieżący vNext architecture contract.
 
-| ADR | Status | Decyzja |
+ADR-y 0001–0018 dokumentują ważne decyzje wcześniejszego etapu Control Center / Operator API. Zachowujemy je dla audytu i historii decyzji, ale samo słowo `Accepted` w historycznym ADR nie oznacza, że jego każdy szczegół nadal opisuje `bdb-vnext`.
+
+Bieżący model vNext opisują:
+
+- [`../VNEXT_CURRENT_ARCHITECTURE.md`](../VNEXT_CURRENT_ARCHITECTURE.md)
+- [`../VNEXT_PROJECT_WORKFLOW.md`](../VNEXT_PROJECT_WORKFLOW.md)
+- [`../VNEXT_AUTO_BROWSER_NATIVE.md`](../VNEXT_AUTO_BROWSER_NATIVE.md)
+- [`../VNEXT_PRODUCTION_RUNTIME.md`](../VNEXT_PRODUCTION_RUNTIME.md)
+- [`../DOCUMENTATION_STATUS.md`](../DOCUMENTATION_STATUS.md)
+
+## Historyczny indeks ADR
+
+| ADR | Status historyczny | Decyzja w momencie przyjęcia |
 |---|---|---|
-| [0001](0001-thin-control-center-over-operator-api.md) | Accepted | Control Center jest cienkim GUI nad Operator API, a BDB Core pozostaje źródłem wykonania i trwałego stanu. |
-| [0002](0002-local-only-operator-api.md) | Accepted | Operator API jest lokalne, bez publicznego transportu sieciowego w MVP i niezależne od konkretnego IPC. |
-| [0003](0003-versioned-events-and-explicit-mutations.md) | Accepted | Zdarzenia używają `bdb-event-v1`, GUI otwiera się tylko do odczytu, a mutacje są jawne. |
-| [0004](0004-in-process-operator-api-with-json-cli.md) | Accepted | Operator API v1 działa in-process i udostępnia lokalny JSON CLI bez listenera sieciowego. |
-| [0005](0005-read-only-journal-event-projection.md) | Accepted | Eventy i bieżąca operacja są projekcją Journalu otwieranego przez SQLite `mode=ro`, bez migracji i zapisów. |
-| [0006](0006-pyside6-qt-widgets-for-control-center-mvp.md) | Accepted | MVP Control Center użyje opcjonalnego PySide6 + Qt Widgets i publicznego Operator API in-process. |
-| [0007](0007-read-only-asynchronous-gui-bootstrap.md) | Accepted | Okno uruchamia jawny, asynchroniczny bootstrap korzystający wyłącznie z odczytów `capabilities` i `list_projects`. |
-| [0008](0008-explicit-serialized-process-controls.md) | Accepted | Status pozostaje odczytem, a Start, Stop i re-arm są jawne, potwierdzane i serializowane przez Operator API. |
-| [0009](0009-read-only-current-operation-view.md) | Accepted | Bieżąca operacja jest ręcznie odświeżaną, read-only projekcją P04 bez bezpośredniego dostępu GUI do Journalu. |
-| [0010](0010-bounded-manual-journal-history.md) | Accepted | Historia Journalu jest ręczna, read-only, filtrowana i stronicowana bounded cursorem Operator API. |
-| [0011](0011-explicit-sanitized-diagnostics-export.md) | Accepted | Diagnostyka jest bounded i read-only, a sanitizowany ZIP powstaje wyłącznie po jawnym wyborze ścieżki. |
-| [0012](0012-two-gate-project-prepare-wizard.md) | Accepted | Kreator projektu najpierw buduje niemutujący plan, a Prepare uruchamia dopiero po świeżym acknowledgement i osobnym potwierdzeniu. |
-| [0013](0013-event-driven-local-tray.md) | Accepted | Tray i lokalne powiadomienia reagują wyłącznie na sygnały GUI, bez pollingu, backendu i automatycznych mutacji. |
-| [0014](0014-manual-verified-release-artifacts.md) | Accepted | Pakiet Windows powstaje wyłącznie ręcznie, przechodzi smoke i jest wiązany z commitem przez zamknięty manifest SHA-256 bez publikacji i self-update. |
-| [0015](0015-stateless-bartosz-os-adapter.md) | Accepted | Bartosz OS korzysta z bezstanowego adaptera in-process nad Operator API; mutacje są domyślnie wyłączone i wymagają dwóch bramek. |
-| [0016](0016-plan-only-gicleeapp-integration.md) | Accepted | Integracja GicleeApp tworzy wyłącznie read-only plan z bezpiecznym zakresem; nie wykonuje Prepare ani zmian w repozytorium aplikacji. |
-| [0017](0017-bounded-session-history-without-inferred-repair-links.md) | Accepted | Historia sesji i receipts jest bounded i read-only; relacje naprawcze między osobnymi sesjami nie są inferowane bez trwałego correlation ID. |
-| [0018](0018-explicit-durable-repair-correlation.md) | Accepted | Jawny correlation ID, role initial/repair i predecessor są trwale zapisywane; Control Center pokazuje wyłącznie zweryfikowane, nieinferowane łańcuchy naprawcze. |
+| [0001](0001-thin-control-center-over-operator-api.md) | Accepted | Control Center jako cienkie GUI nad Operator API. |
+| [0002](0002-local-only-operator-api.md) | Accepted | Operator API lokalne, bez publicznego transportu sieciowego w MVP. |
+| [0003](0003-versioned-events-and-explicit-mutations.md) | Accepted | Versioned events i jawne mutacje. |
+| [0004](0004-in-process-operator-api-with-json-cli.md) | Accepted | In-process Operator API z lokalnym JSON CLI. |
+| [0005](0005-read-only-journal-event-projection.md) | Accepted | Read-only Journal projection. |
+| [0006](0006-pyside6-qt-widgets-for-control-center-mvp.md) | Accepted | PySide6 + Qt Widgets dla Control Center MVP. |
+| [0007](0007-read-only-asynchronous-gui-bootstrap.md) | Accepted | Read-only asynchronous GUI bootstrap. |
+| [0008](0008-explicit-serialized-process-controls.md) | Accepted | Jawne serializowane process controls. |
+| [0009](0009-read-only-current-operation-view.md) | Accepted | Read-only current-operation view. |
+| [0010](0010-bounded-manual-journal-history.md) | Accepted | Bounded manual Journal history. |
+| [0011](0011-explicit-sanitized-diagnostics-export.md) | Accepted | Jawny sanitizowany diagnostics export. |
+| [0012](0012-two-gate-project-prepare-wizard.md) | Accepted | Two-gate project prepare wizard. |
+| [0013](0013-event-driven-local-tray.md) | Accepted | Event-driven local tray. |
+| [0014](0014-manual-verified-release-artifacts.md) | Accepted | Manual verified release artifacts. |
+| [0015](0015-stateless-bartosz-os-adapter.md) | Accepted | Stateless Bartosz OS adapter. |
+| [0016](0016-plan-only-gicleeapp-integration.md) | Accepted | Plan-only GicleeApp integration. |
+| [0017](0017-bounded-session-history-without-inferred-repair-links.md) | Accepted | Bounded session history bez inferowanych repair links. |
+| [0018](0018-explicit-durable-repair-correlation.md) | Accepted | Explicit durable repair correlation. |
 
-Dokument nadrzędny P02: [BDB Control Center — zamrożone granice](../BDB_CONTROL_CENTER_BOUNDARIES.md).
+## Jak interpretować te ADR-y dzisiaj
 
-## Zasada zmiany
+Przykłady elementów, które ewoluowały w vNext i dlatego nie wolno ich odczytywać wyłącznie ze starego ADR setu:
 
-Zmiana decyzji `Accepted` wymaga:
+- Project Center jest dziś project-centric powierzchnią nad `ProjectCatalog`, `ProjectMemory` i `ProjectExecution`, a techniczny CC1 ma własną canonical read-only projection boundary;
+- dedicated Native Host vNext to `com.bartosz.dev_bridge.vnext`;
+- Browser vNext ma własny Project Execution/AUTO transport;
+- Project Plan i immutable Project Memory history nie były pełnym modelem wcześniejszego Control Center;
+- production activation ma vNext Bootstrap/M9b/M3c authority chain.
 
-1. nowego ADR ze statusem `Proposed`;
-2. wskazania zastępowanego ADR;
-3. analizy wpływu na bezpieczeństwo, kompatybilność i migrację;
-4. zielonych testów kontraktowych;
-5. jawnej akceptacji przed implementacją.
+Historyczne ADR-y nadal są przydatne, gdy analizujemy dlaczego wcześniejszy interfejs lub policy powstały. Nie powinny jednak nadpisywać świeżego source behavior.
+
+## Zasada dla nowych decyzji
+
+Jeżeli bieżący vNext zmienia istotną decyzję architektoniczną:
+
+1. nie przepisuj historycznego ADR;
+2. dodaj successor ADR albo jawny current architecture override;
+3. wskaż, co zostało zastąpione;
+4. opisz wpływ na safety, compatibility i migration;
+5. dodaj testy kontraktowe;
+6. zaktualizuj odpowiedni dokument CURRENT.
+
+Historyczny dokument nadrzędny wcześniejszego Control Center: [BDB Control Center — zamrożone granice](../BDB_CONTROL_CENTER_BOUNDARIES.md). Nie jest on automatycznie nadrzędny wobec current vNext Project/Execution architecture.
