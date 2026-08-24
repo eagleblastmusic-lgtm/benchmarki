@@ -1,7 +1,7 @@
 # BDB vNext — produkcyjny runtime Windows
 
 Status: **CURRENT**  
-Source baseline: `56994a1b6abbfb275a974781c752d106fb48e201`
+Implementation baseline: `eae9fee9d171d61ded3c9cf539058559679aa9c8`
 
 ## 1. Canonical runtime root
 
@@ -59,6 +59,8 @@ GitHub branch HEAD opisuje najnowsze źródło. Nie dowodzi, że identyczne byte
 Installed runtime należy weryfikować przez source identity i digests zapisane w client/runtime evidence, m.in. `client-plan.json`, manifestach i odpowiednich activation records.
 
 Dokumentacja nie powinna mówić „produkcja jest na HEAD X” tylko dlatego, że branch wskazuje X.
+
+Implementation baseline dokumentacji może być starszym commitem kodowym niż branch HEAD, jeżeli późniejsze commity dotyczą wyłącznie dokumentacji. To nadal nie mówi nic o zainstalowanym runtime.
 
 ## 5. Staging vs live production
 
@@ -140,6 +142,8 @@ Po reload należy sprawdzić extension ID i real Browser smoke, ponieważ automa
 Build/deployment może mieć lokalne safety guards, np. minimalną ilość wolnego miejsca. Guard nie powinien być obchodzony przez obniżenie progu lub przypadkowe usuwanie danych użytkownika.
 
 Jeżeli build jest zablokowany, source commit może być poprawny i wypchnięty na GitHub, podczas gdy installed runtime pozostaje na wcześniejszej wersji. Te dwa statusy muszą być raportowane oddzielnie.
+
+Dla bounded repairu `eae9fee9d171d61ded3c9cf539058559679aa9c8` source validation zakończyła się pomyślnie, ale wolne miejsce na C było poniżej przyjętego progu 20 GB. Production package **nie został zbudowany**, production/runtime **nie został zmodyfikowany**, a real ChatGPT Browser smoke **nie został uruchomiony**. Z tego repairu nie wolno wyciągać wniosku, że live runtime używa bytes z `eae9fee9`.
 
 ## 12. Co sprawdzać po deploymentcie
 

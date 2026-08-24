@@ -1,7 +1,7 @@
 # BDB vNext — bieżąca architektura
 
 Status: **CURRENT**  
-Source baseline: `56994a1b6abbfb275a974781c752d106fb48e201`
+Implementation baseline: `eae9fee9d171d61ded3c9cf539058559679aa9c8`
 
 Ten dokument opisuje działającą architekturę `bdb-vnext`, a nie historyczny POC, Browser 0.4.x ani wcześniejszy Local Workspace Loop.
 
@@ -153,9 +153,11 @@ JSON result
 → optional next AUTO launch
 ```
 
-Exact replay nie tworzy drugiego attemptu. Receipt może zwrócić istniejący rezultat i — dla wcześniej zaakceptowanego PASS w aktywnym AUTO — zapewnić/recoverować usable current-task launch.
+Exact replay nie tworzy drugiego attemptu. Receipt może zwrócić istniejący rezultat i — tylko dla wcześniej zaakceptowanego PASS w aktywnym AUTO — zapewnić/recoverować usable current-task launch.
 
-Transport `ok=true` nie oznacza automatycznie task `PASS`. `accepted` i `result_status` są odrębną semantyką.
+Transport `ok=true` nie oznacza task `PASS`. Browser continuation wymaga równocześnie `receipt.accepted === true` oraz `receipt.result_status === "PASS"`.
+
+FAIL, replayed FAIL, REVIEW_REQUIRED i UNKNOWN nie są accepted PASS i nie mogą uruchomić next AUTO launch.
 
 ## 5. Task status i milestone AUTO
 
@@ -167,7 +169,7 @@ pending | active | review | completed | blocked | skipped
 
 AUTO jest milestone-scoped i sekwencyjne. BDB nie ustala globalnego limitu liczby iteracji ani czasu całego taska/milestone; bounded są pojedyncze operacje techniczne, payloady i polling.
 
-Zamierzona semantyka:
+Semantyka bieżącego source:
 
 - `PASS` → task `completed`, przejście do następnego runnable taska w tym samym milestone;
 - `REVIEW_REQUIRED`/odpowiedni unknown → `review`, AUTO stop;
@@ -175,7 +177,16 @@ Zamierzona semantyka:
 - `STOP AUTO` → brak dalszego auto-send;
 - ukończony milestone → stop przed następnym milestone.
 
-Browser nie może traktować samego faktu, że inny task jest technicznie runnable, jako pozwolenia na ominięcie blocked/review taska aktywnego runu.
+Dla aktywnego milestone runu durable `run.status` jest authority dla continuation. Tylko `running` może przesuwać execution cursor przez wyliczone `next_task_id`.
+
+Dla `blocked` i `review`:
+
+- `current_task_id` pozostaje na tasku blokującym/review;
+- milestone projection raportuje odpowiednio `BLOCKED` lub `REVIEW_REQUIRED`;
+- `runnable_task_ids` jest puste;
+- Browser nie może przeskoczyć do innego technicznie runnable taska.
+
+Nieznany run state jest fail-closed i nie jest admission do Browser AUTO.
 
 ## 6. Launch handoff
 
@@ -223,14 +234,18 @@ Sam staging Browser/Native bytes nie aktywuje produkcji.
 
 Szczegóły: [`VNEXT_PRODUCTION_RUNTIME.md`](VNEXT_PRODUCTION_RUNTIME.md).
 
-## 9. Znane defekty source baseline 56994a1
+## 9. Zweryfikowany bounded repair — eae9fee9
 
-Na tym baseline dokumentacja odnotowuje dwa znane rozjazdy implementacji od powyższej zamierzonej semantyki:
+Implementation baseline `eae9fee9d171d61ded3c9cf539058559679aa9c8` naprawia dwa wcześniej udokumentowane rozjazdy implementacji:
 
-1. Browser receipt UI może nazwać poprawnie obsłużony `FAIL` jako `Result accepted`, ponieważ obecna ścieżka UI nie rozróżnia jeszcze konsekwentnie transport success od task acceptance.
-2. `reconcile()`/milestone projection może dla aktywnego runu `blocked` lub `review` policzyć kolejny runnable task i wystawić niespójny cursor/status `RUNNABLE`.
+1. Browser receipt UI nie utożsamia już transport success z task acceptance. `Result accepted` jest możliwe wyłącznie przy `accepted === true` i `result_status === "PASS"`. FAIL/replayed FAIL są prezentowane jako failure.
+2. `reconcile()` oraz milestone projection zachowują blocked/review authority. Cursor pozostaje na tasku blokującym/review, a projekcja nie wystawia `RUNNABLE`; tylko run `running` może korzystać z `next_task_id` do przesuwania kursora.
 
-Dopóki source fix nie zostanie wdrożony, operator powinien traktować canonical `task_status=blocked/review` oraz run status jako stop, nawet jeśli UI/cursor sugeruje następny task.
+Dodatkowo Browser AUTO zatrzymuje chain na każdym nie-accepted-PASS, obejmując FAIL, REVIEW i UNKNOWN.
+
+Repair przeszedł focused suite `50 passed` oraz jawne regression checks dla FAIL/replayed FAIL, blocked/review cursor, istniejącego PASS flow i STOP semantics. `node --check`, `py_compile` i `git diff --check` również przeszły.
+
+To jest source-level evidence. W ramach repairu production package nie był budowany, production/runtime nie był modyfikowany, a real ChatGPT Browser smoke nie był uruchamiany.
 
 ## 10. Non-authorities
 

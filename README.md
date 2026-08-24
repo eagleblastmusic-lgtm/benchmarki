@@ -85,7 +85,7 @@ Docelowy happy path:
 ```text
 canonical result
 → automatic result submit
-→ PASS acceptance
+→ accepted PASS
 → ensure/recover one next launch
 → exact prompt insertion
 → composer/conversation/binding guard
@@ -94,7 +94,7 @@ canonical result
 → kolejny task
 ```
 
-AUTO zatrzymuje się przy m.in. FAIL/blocked, review, NEEDS_USER, manual confirmation, gate/open question, stale state, policy stop, transport failure albo `STOP AUTO`.
+Kontynuacja AUTO wymaga **jednocześnie** `accepted === true` i `result_status === "PASS"`. `FAIL`, `REVIEW_REQUIRED`, `UNKNOWN`, blocked/review, NEEDS_USER, manual confirmation, gate/open question, stale state, policy stop, transport failure oraz `STOP AUTO` zatrzymują chain.
 
 Nie ma globalnego limitu liczby iteracji ani całkowitego czasu milestone; bounded pozostają pojedyncze operacje techniczne.
 
@@ -119,6 +119,8 @@ Manifest V3
 Rozszerzenie działa tylko na `https://chatgpt.com/*`, używa `nativeMessaging` i `storage` oraz nie traktuje DOM/local storage jako canonical Project authority.
 
 Manual `Submit result` pozostaje fallbackiem; aktywny AUTO może wykonać tę samą canonical submission path automatycznie.
+
+Receipt UI nie traktuje samego `response.ok=true` jako sukcesu taska. PASS UI wymaga canonical accepted PASS; FAIL/replayed FAIL są pokazywane jako failure, a nie jako `Result accepted`.
 
 ## Native Host vNext
 
@@ -212,11 +214,11 @@ Milestone records, closure assessments, GHB/Local Workspace Loop, wcześniejsze 
 
 Najbardziej mylące generyczne dokumenty legacy Browser/Native oraz root POC start guides zostały usunięte z aktywnego drzewa; ich treść pozostaje w historii Git. Zobacz [`docs/legacy/README.md`](docs/legacy/README.md).
 
-## Znane luki bieżącego source baseline
+## Zweryfikowana semantyka fail-stop
 
-Dokumenty CURRENT są oparte na baseline `56994a1b6abbfb275a974781c752d106fb48e201`. Na tym source istnieją znane rozjazdy wymagające naprawy implementacji:
+Implementation baseline `eae9fee9d171d61ded3c9cf539058559679aa9c8` naprawia dwa wcześniej znane rozjazdy:
 
-- Browser receipt UI może myląco nazwać poprawnie przetworzony FAIL jako `Result accepted`;
-- blocked/review milestone projection może niespójnie pokazać `RUNNABLE` lub przesunąć cursor.
+- Browser receipt UI uznaje wynik za accepted tylko dla `accepted === true` i `result_status === "PASS"`; FAIL/replayed FAIL nie są etykietowane jako `Result accepted`;
+- aktywny milestone run w stanie `blocked` lub `review` zachowuje cursor na tasku blokującym/review i nie projektuje `RUNNABLE`; tylko run `running` może przesuwać cursor przez `next_task_id`.
 
-Nie są to zamierzone reguły produktu. Canonical FAIL/blocked/review ma zatrzymywać AUTO.
+Focused validation tego repairu zakończyła się wynikiem `50 passed`. Ten fakt dotyczy source validation; nie dowodzi deploymentu produkcyjnego ani realnego smoke w aktualnym DOM ChatGPT.

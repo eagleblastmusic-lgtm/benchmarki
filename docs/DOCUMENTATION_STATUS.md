@@ -23,7 +23,7 @@ Dokument historyczny nie może samodzielnie służyć do wnioskowania o bieżąc
 - [`VNEXT_AUTO_BROWSER_NATIVE.md`](VNEXT_AUTO_BROWSER_NATIVE.md) — Browser vNext, Native Host, milestone AUTO, recovery i handoff `PENDING/SENT`.
 - [`VNEXT_PRODUCTION_RUNTIME.md`](VNEXT_PRODUCTION_RUNTIME.md) — produkcyjny runtime Windows, client plan, Browser/Native identity i aktywacja.
 
-Dokumenty CURRENT opisują implementację obserwowaną na source baseline `56994a1b6abbfb275a974781c752d106fb48e201`. Jeżeli HEAD jest nowszy, najpierw należy porównać zmianę źródła z tym baseline i zaktualizować dokumentację.
+Dokumenty CURRENT opisują implementację obserwowaną na implementation baseline `eae9fee9d171d61ded3c9cf539058559679aa9c8`. Późniejsze commity dokumentacyjne mogą znajdować się ponad tym commitem bez zmiany source semantics. Jeżeli kod wykonawczy pójdzie dalej, należy porównać zmianę źródła z tym baseline i ponownie zsynchronizować dokumentację.
 
 ## FROZEN GOVERNANCE — zachować
 
@@ -67,11 +67,15 @@ Przy zmianie kontraktu BDB vNext, która dotyczy Project Memory, Project Executi
 5. nie utożsamiaj branch HEAD z wersją aktualnie zainstalowaną — produkcyjną source identity należy odczytać z client/runtime evidence;
 6. nie opisuj browserowego cache jako canonical authority; jest wyłącznie projekcją/transportem.
 
-## Znane luki implementacyjne baseline 56994a1
+## Zweryfikowane repair semantics — baseline eae9fee9
 
-Dokumentacja CURRENT rozróżnia kontrakt docelowy od znanych defektów bieżącego source baseline. Na `56994a1` znane są co najmniej dwa problemy wymagające naprawy źródła:
+Bounded repair `eae9fee9d171d61ded3c9cf539058559679aa9c8` usunął dwa wcześniej odnotowane defekty source:
 
-- Browser może etykietować poprawnie obsłużony receipt `FAIL` jako `Result accepted`, ponieważ transport success jest mylony z task acceptance;
-- projekcja/reconcile aktywnego milestone run może niespójnie pokazać `RUNNABLE` lub przesunąć cursor, mimo że run jest `blocked`/`review`.
+- Browser receipt UI wymaga teraz `accepted === true` oraz `result_status === "PASS"`; FAIL/replayed FAIL nie są prezentowane jako accepted PASS.
+- Milestone AUTO `blocked`/`review` zachowuje canonical cursor na tasku blokującym/review i nie projektuje `RUNNABLE`; tylko run `running` może przesuwać cursor przez `next_task_id`.
 
-Te problemy nie zmieniają authority modelu: `FAIL`, `blocked`, `review`, `STOPPED` i wymagania użytkownika muszą zatrzymywać AUTO. Dokumentacja nie może przedstawiać obecnego błędnego UI/projection jako zamierzonej semantyki.
+AUTO continuation jest fail-closed: FAIL, REVIEW i UNKNOWN nie uruchamiają następnego launchu.
+
+Focused validation repairu: `50 passed`, plus Browser FAIL/replay-FAIL PASS, blocked/review cursor PASS, existing PASS flow PASS, STOP semantics PASS, `node --check` PASS, `py_compile` PASS i `git diff --check` PASS.
+
+W ramach tego repairu production package nie był budowany, production/runtime nie był modyfikowany, a real ChatGPT Browser smoke nie był uruchamiany. Nie wolno więc z samego source baseline wnioskować, że identyczny build jest już wdrożony produkcyjnie.

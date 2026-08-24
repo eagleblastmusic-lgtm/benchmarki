@@ -1,7 +1,7 @@
 # BDB vNext — Project workflow
 
 Status: **CURRENT**  
-Source baseline: `56994a1b6abbfb275a974781c752d106fb48e201`
+Implementation baseline: `eae9fee9d171d61ded3c9cf539058559679aa9c8`
 
 ## 1. Utworzenie projektu
 
@@ -120,11 +120,13 @@ Po submission BDB:
 
 Deterministyczny PASS wymaga zgodnej walidacji i kryteriów. Kryteria manual/external mogą prowadzić do `REVIEW_REQUIRED`. FAIL lub niespełniona walidacja nie może być traktowana jak PASS tylko dlatego, że transport odebrał result.
 
+Status typu `WAITING_EXTERNAL` nie jest sam w sobie successful validation status. Jeżeli canonical acceptance kończy się FAIL, task pozostaje blokujący i AUTO nie może przejść dalej.
+
 ## 8. Replay
 
 Ponowne wysłanie dokładnie tego samego resultu nie tworzy nowego attemptu.
 
-BDB zwraca receipt z `replayed=true`. Dla replayed PASS w aktywnym AUTO workflow może zapewnić lub odzyskać dokładnie jeden launch bieżącego następnego taska. Dla replayed FAIL nie wolno omijać zablokowanego zadania.
+BDB zwraca receipt z `replayed=true`. Dla replayed PASS w aktywnym AUTO workflow może zapewnić lub odzyskać dokładnie jeden launch bieżącego następnego taska. Dla replayed FAIL nie wolno omijać zablokowanego zadania ani prezentować replayu jako accepted PASS.
 
 ## 9. Milestone AUTO
 
@@ -151,10 +153,11 @@ AUTO nie ma globalnego limitu liczby iteracji ani całkowitego czasu milestone. 
 
 ## 10. Stop conditions
 
-AUTO powinno zatrzymać się przy co najmniej:
+AUTO zatrzymuje się przy co najmniej:
 
 - `FAIL` / blocked;
 - `REVIEW_REQUIRED` / review;
+- `UNKNOWN` / niejednoznacznym nie-accepted result;
 - manual visual confirmation;
 - `NEEDS_USER`;
 - gate/open question wymagającym interwencji;
@@ -165,7 +168,9 @@ AUTO powinno zatrzymać się przy co najmniej:
 - jawny `STOP AUTO`;
 - końcu milestone.
 
-Browser nie może sam „przeskoczyć” do innego runnable taska, jeśli canonical active run jest blocked/review.
+Browser continuation po result submission wymaga równocześnie `accepted === true` oraz `result_status === "PASS"`.
+
+Browser nie może sam „przeskoczyć” do innego runnable taska, jeśli canonical active run jest blocked/review. W tych stanach execution cursor pozostaje na tasku blokującym/review, a projekcja nie raportuje `RUNNABLE`.
 
 ## 11. Review i poprawki
 
@@ -174,6 +179,8 @@ Project Center posiada jawne akcje review. Manual approval nie może nadpisać d
 ## 12. Watchdog / WAITING_EXTERNAL
 
 Długi task sam w sobie nie jest failure. Watchdog rozróżnia aktywną pracę, oczekiwanie na zewnętrzne CI/build i brak postępu. Same-binding resume ma zachować project/task/binding identity.
+
+`WAITING_EXTERNAL` może opisywać stan wykonania/oczekiwania, ale nie należy utożsamiać go z successful validation. Acceptance pozostaje zależne od canonical validation result i criteria.
 
 Prompt wykonawczy instruuje, by nie robić bezproduktywnego, nieograniczonego pollingu zewnętrznych operacji.
 
@@ -189,6 +196,18 @@ calculator/app result = derived from actual repo + validation
 
 Nie należy aktualizować `project-plan.json`, aby księgować każdy completed task. Postęp wykonania należy do Project Execution/Memory.
 
-## 14. Known baseline caveats
+## 14. Zweryfikowana fail-stop semantyka baseline eae9fee9
 
-Na source baseline `56994a1` istnieją znane błędy projekcji/etykiet opisane w [`VNEXT_CURRENT_ARCHITECTURE.md`](VNEXT_CURRENT_ARCHITECTURE.md). W szczególności UI może myląco nazwać obsłużony FAIL „accepted”, a blocked/review milestone może mieć niespójny cursor/progress projection. Są to defekty implementacji do naprawy, nie część kontraktu workflow.
+Bounded repair `eae9fee9d171d61ded3c9cf539058559679aa9c8` usunął wcześniejsze caveaty dotyczące receipt UI i blocked/review projection.
+
+Na tym baseline:
+
+- FAIL/replayed FAIL nie są pokazywane jako `Result accepted`;
+- Browser AUTO nie kontynuuje dla FAIL, REVIEW ani UNKNOWN;
+- blocked/review zachowują current task na blockerze/review;
+- tylko aktywny run `running` może przesunąć cursor przez `next_task_id`;
+- blocked/review milestone projection nie raportuje `RUNNABLE`.
+
+Focused validation repairu zakończyła się wynikiem `50 passed` wraz z regression checks dla FAIL/replay-FAIL, blocked/review cursor, istniejącego PASS flow i STOP semantics.
+
+Nie jest to dowód deploymentu: production package i real ChatGPT Browser smoke nie były częścią tego repairu.
