@@ -206,3 +206,19 @@ Real ChatGPT Browser E2E jest osobnym testem po deploymentcie i nie powinien by�
 Aktualizacja Browser/Native/GUI nie może sama w sobie ręcznie przepisywać Project Memory. Project Memory i Project Execution są danymi runtime projektów, natomiast client package jest deploymentem aplikacji BDB.
 
 Recovery projektu powinno korzystać z canonical workflow/coordinator primitives, a nie z ręcznej edycji JSON state files.
+
+## 14. Missing-M9b recovery
+
+Jeżeli Bootstrap ACTIVE, zweryfikowany klient i canonical M3c są spójne, a
+`config/m9b-activation.json` jest dokładnie nieobecny, nie wolno odtwarzać M9b
+ręcznym zapisem ani kopiowaniem starego pliku. Operacja
+`bdb-vnext-m9b-recovery` tworzy immutable, source-bound plan oraz journal i
+wymaga exact plan SHA, jawnej zgody operatora i `bootstrap.lock`.
+
+Recovery jest roll-forward-only: `PREPARED → CLIENTS_VERIFIED → ACTIVATING →
+ACTIVE → COMPLETED`. Każdy zapis ponownie rewaliduje Bootstrap ACTIVE/PREVIOUS,
+client plan i wszystkie digesty Browser/Native/config, M3c, route bez Legacy oraz
+zaufaną historyczną linię M9a. Obcy lub zmieniony M9b, inny plan, stale
+verification albo niepełna historia kończą się fail-closed. Crash po zapisie
+rekordu jest bezpiecznie wznawiany przez readback i journal; ukończony plan jest
+idempotentny. Recovery nie zmienia Bootstrap, route, Legacy ani Project Memory.

@@ -34,6 +34,7 @@ bdb-vnext-legacy-recovery = "bdb_vnext.m11c_legacy_recovery:main"
 bdb-vnext-m12a = "bdb_vnext.m12a_compatibility_zero:main"
 bdb-vnext-m12a-closure = "bdb_vnext.m12a_closure:main"
 bdb-vnext-maintenance = "bdb_vnext.m11c_post_active_maintenance_cli:main"
+bdb-vnext-m9b-recovery = "bdb_vnext.m9b_recovery_cli:main"
 
 [tool.setuptools.packages.find]
 include = [
