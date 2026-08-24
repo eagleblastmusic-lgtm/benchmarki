@@ -28,6 +28,9 @@ CLIENT = "sha256:" + "a" * 64
 OLD_M9A = "sha256:" + "b" * 64
 OLD_BROWSER = "sha256:" + "c" * 64
 OLD_NATIVE = "sha256:" + "d" * 64
+FINAL_HEAD = "5" * 40
+FINAL_TREE = "6" * 40
+FINAL_CLIENT = "sha256:" + "e" * 64
 
 
 def _write(path: Path, payload: bytes) -> None:
@@ -288,3 +291,77 @@ def test_retirement_fails_closed_before_live_gates(tmp_path: Path, monkeypatch: 
             operator_approved=True,
         )
     assert source.is_dir()
+
+
+def test_retirement_binds_advanced_source_matched_live_subject(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, target, legacy = _fixture(tmp_path, monkeypatch)
+    prepared = _prepare(source, target, legacy)
+    migration.apply_single_root_migration(
+        target_runtime_root=target,
+        migration_id="single-root-test",
+        expected_plan_sha256=prepared["plan"]["plan_sha256"],
+        operator_approved=True,
+    )
+    final_client = {
+        "client_plan_sha256": FINAL_CLIENT,
+        "source_head": FINAL_HEAD,
+        "source_tree": FINAL_TREE,
+        "production_activation_performed": False,
+        "browser_bundle_root": str(target / "clients" / "browser-extension"),
+        "native_manifest_path": str(target / "clients" / "native-host" / "com.bartosz.dev_bridge.vnext.json"),
+        "native_host_executable": str(target / "clients" / "native-host" / "BDB-vNext-NativeHost.exe"),
+        "native_config_path": str(target / "config" / "native-host.json"),
+    }
+    monkeypatch.setattr(migration, "query_client_plan", lambda **_: {"plan": final_client})
+    monkeypatch.setattr(
+        migration,
+        "require_client_verification",
+        lambda **_: {"client_plan_sha256": FINAL_CLIENT, "verification_sha256": "sha256:" + "f" * 64},
+    )
+    monkeypatch.setattr(
+        migration,
+        "observe_windows_native_routes",
+        lambda **_: {"target_registered": True, "target_conflict": False, "legacy_route_present": False},
+    )
+    monkeypatch.setattr(
+        migration,
+        "observe_bootstrap_activation",
+        lambda **_: {
+            "status": "ACTIVE",
+            "slots": {
+                "ACTIVE": {"source_commit": FINAL_HEAD, "bundle_root": str(target / "bootstrap" / "active")},
+                "PREVIOUS": {"source_commit": HEAD, "bundle_root": str(target / "bootstrap" / "previous")},
+            },
+            "state": {"state_sha256": "sha256:" + "0" * 64, "production_activation_performed": True},
+        },
+    )
+    final_activation = ActivationRecord(
+        activation_id="m9b-final-active",
+        state="ACTIVE",
+        source_head=FINAL_HEAD,
+        source_tree=FINAL_TREE,
+        m9a_freeze_digest=OLD_M9A,
+        browser_bundle_digest=OLD_BROWSER,
+        native_manifest_digest=OLD_NATIVE,
+        writer_enabled=True,
+        intake_enabled=True,
+    )
+    monkeypatch.setattr(migration, "read_activation", lambda *_: final_activation)
+    monkeypatch.setattr(migration, "_verify_control", lambda *_args, **_kwargs: {"m3c_control_sha256": "sha256:" + "9" * 64})
+
+    retired = migration.retire_single_root_source(
+        authority_root=tmp_path / "authority",
+        target_runtime_root=target,
+        migration_id="single-root-test",
+        expected_plan_sha256=prepared["plan"]["plan_sha256"],
+        operator_approved=True,
+    )
+
+    assert retired["status"] == "RETIRED"
+    assert retired["retirement"]["live_source_head"] == FINAL_HEAD
+    assert retired["retirement"]["live_source_tree"] == FINAL_TREE
+    assert retired["retirement"]["live_client_plan_sha256"] == FINAL_CLIENT
+    assert not source.exists()

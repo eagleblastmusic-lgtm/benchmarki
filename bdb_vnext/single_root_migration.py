@@ -326,14 +326,23 @@ def _migration_lock(target: Path, migration_id: str) -> Iterator[None]:
             handle.close()
 
 
-def _client_subject(target: Path, *, expected_plan_sha256: str, source_head: str, source_tree: str) -> dict[str, Any]:
+def _client_subject(
+    target: Path,
+    *,
+    expected_plan_sha256: str | None,
+    source_head: str | None,
+    source_tree: str | None,
+) -> dict[str, Any]:
     try:
         plan = dict(query_client_plan(runtime_root=target)["plan"])
     except (M11cClientError, KeyError) as exc:
         raise SingleRootMigrationError(getattr(exc, "code", "migration_client_unavailable"), str(exc)) from exc
-    if plan.get("client_plan_sha256") != expected_plan_sha256:
+    plan_sha256 = _digest(plan.get("client_plan_sha256"), field="client_plan_sha256")
+    current_head = _sha40(plan.get("source_head"), field="source_head")
+    current_tree = _sha40(plan.get("source_tree"), field="source_tree")
+    if expected_plan_sha256 is not None and plan_sha256 != expected_plan_sha256:
         _fail("migration_client_mismatch", "target client plan differs")
-    if plan.get("source_head") != source_head or plan.get("source_tree") != source_tree:
+    if (source_head is not None and current_head != source_head) or (source_tree is not None and current_tree != source_tree):
         _fail("migration_client_mismatch", "target clients bind another source")
     if plan.get("production_activation_performed") is not False:
         _fail("migration_client_mismatch", "target client plan claims activation")
@@ -691,9 +700,17 @@ def retire_single_root_source(
         source = _absolute(plan["source_runtime_root"], field="source_runtime_root")
         if _document_digest({"files": _inventory(source)}) != plan["source_subject_sha256"]:
             _fail("retirement_source_changed", "old runtime changed after migration")
-        client = _client_subject(target, expected_plan_sha256=plan["client_plan_sha256"], source_head=plan["source_head"], source_tree=plan["source_tree"])
+        # The migration plan binds the exact old source bytes and their target.
+        # A source-matched client repair may legitimately advance the final live
+        # source before retirement.  Retirement therefore observes the current
+        # target client and requires every live authority below to agree with
+        # that exact subject instead of pinning it to the earlier migration HEAD.
+        client = _client_subject(target, expected_plan_sha256=None, source_head=None, source_tree=None)
         try:
-            verification = require_client_verification(runtime_root=target, expected_client_plan_sha256=plan["client_plan_sha256"])
+            verification = require_client_verification(
+                runtime_root=target,
+                expected_client_plan_sha256=client["client_plan_sha256"],
+            )
             routes = observe_windows_native_routes(runtime_root=target)
         except (M11cClientError, BootstrapError) as exc:
             raise SingleRootMigrationError(exc.code, str(exc)) from exc
@@ -708,14 +725,21 @@ def retire_single_root_source(
         previous = slots.get("PREVIOUS")
         if not isinstance(active, Mapping) or not isinstance(previous, Mapping):
             _fail("retirement_bootstrap_invalid", "Bootstrap recovery slots are incomplete")
-        if active.get("source_commit") != plan["source_head"] or state.get("production_activation_performed") is not True:
+        if active.get("source_commit") != client["source_head"] or state.get("production_activation_performed") is not True:
             _fail("retirement_bootstrap_mismatch", "Bootstrap ACTIVE differs from the repo-local source")
         for slot in (active, previous):
             root = slot.get("bundle_root")
             if isinstance(root, str) and _under(Path(root), source):
                 _fail("retirement_source_referenced", "Bootstrap still references the old runtime")
         m9b = read_activation(target)
-        if m9b is None or m9b.state != "ACTIVE" or m9b.source_head != plan["source_head"] or not m9b.writer_enabled or not m9b.intake_enabled:
+        if (
+            m9b is None
+            or m9b.state != "ACTIVE"
+            or m9b.source_head != client["source_head"]
+            or m9b.source_tree != client["source_tree"]
+            or not m9b.writer_enabled
+            or not m9b.intake_enabled
+        ):
             _fail("retirement_m9b_mismatch", "M9b is not ACTIVE for the repo-local source")
         control = _verify_control(
             target,
@@ -736,9 +760,12 @@ def retire_single_root_source(
             "target_runtime_root": str(target),
             "source_subject_sha256": plan["source_subject_sha256"],
             "reclaimed_bytes": source_size,
+            "live_source_head": client["source_head"],
+            "live_source_tree": client["source_tree"],
+            "live_client_plan_sha256": client["client_plan_sha256"],
             "bootstrap_state_sha256": state.get("state_sha256"),
             "client_verification_sha256": verification.get("verification_sha256"),
-            "m9b_record_sha256": m9b.record_digest,
+            "m9b_record_sha256": m9b.as_dict()["record_digest"],
             "m3c_control_sha256": control["m3c_control_sha256"],
             "legacy_route_present": False,
             "retired": True,
