@@ -74,6 +74,33 @@ def test_stage_clients_requires_verified_artifact_and_never_activates(monkeypatc
     assert output["production_activation_performed"] is False
 
 
+def test_promote_clients_forwards_canonical_roots_without_activation(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli,
+        "promote_client_plan",
+        lambda **kwargs: captured.update(kwargs) or {
+            "status": "COMMITTED",
+            "production_activation_performed": False,
+            "registry_mutation_performed": False,
+        },
+    )
+
+    code = cli.main([
+        "promote-clients",
+        "--staged-runtime-root", "C:/stage",
+        "--production-runtime-root", "C:/production",
+    ])
+
+    assert code == 0
+    assert captured == {"staged_runtime_root": "C:/stage", "production_runtime_root": "C:/production"}
+    output = json.loads(capsys.readouterr().out)
+    assert output["action"] == "promote-clients"
+    assert output["production_activation_performed"] is False
+
+
 def test_client_status_missing_browser_witness_is_waiting_not_failure(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

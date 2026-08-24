@@ -29,6 +29,7 @@ from bdb_vnext.m11c_windows_clients import (
     require_client_verification,
     stage_client_plan,
 )
+from bdb_vnext.m11c_client_promotion import promote_client_plan
 from bdb_vnext.m9b_activation import M9bActivationError, read_activation
 
 
@@ -124,6 +125,18 @@ def _client_status(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _promote_clients(args: argparse.Namespace) -> dict[str, Any]:
+    result = promote_client_plan(
+        staged_runtime_root=args.staged_runtime_root,
+        production_runtime_root=args.production_runtime_root,
+    )
+    return {
+        "schema": CLI_SCHEMA,
+        "action": "promote-clients",
+        **result,
+    }
+
+
 def _prepare(args: argparse.Namespace) -> dict[str, Any]:
     report = _load_json_file(args.m9a_report, field="m9a_report")
     client_plan = query_client_plan(runtime_root=args.runtime_root)["plan"]
@@ -179,6 +192,11 @@ def _parser() -> argparse.ArgumentParser:
     client_status = sub.add_parser("client-status", help="observe staged clients and Browser launch witness")
     client_status.add_argument("--runtime-root", required=True)
     client_status.set_defaults(handler=_client_status)
+
+    promote = sub.add_parser("promote-clients", help="promote one immutable client stage into the stable production root")
+    promote.add_argument("--staged-runtime-root", required=True)
+    promote.add_argument("--production-runtime-root", required=True)
+    promote.set_defaults(handler=_promote_clients)
 
     prepare = sub.add_parser("prepare", help="prepare exact final cutover plan; does not activate")
     prepare.add_argument("--authority-root", required=True)

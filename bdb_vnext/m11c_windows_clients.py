@@ -222,6 +222,48 @@ def _native_manifest(executable: Path) -> dict[str, Any]:
     }
 
 
+def _client_plan_document(
+    *,
+    runtime: Path,
+    source_head: str,
+    source_tree: str,
+    browser_bundle_root: Path,
+    browser_bundle_digest: str,
+    executable: Path,
+    executable_digest: str,
+    config_path: Path,
+    config: Mapping[str, Any],
+    manifest_path: Path,
+) -> dict[str, Any]:
+    """Build the canonical path-bound client plan for one runtime root."""
+
+    payload = {
+        "schema": CLIENT_PLAN_SCHEMA,
+        "runtime_id": RUNTIME_ID,
+        "generation_id": GENERATION_ID,
+        "protocol_generation": PROTOCOL_GENERATION,
+        "source_head": source_head,
+        "source_tree": source_tree,
+        "browser_extension_id": BROWSER_EXTENSION_ID,
+        "browser_install_mode": BROWSER_INSTALL_MODE,
+        "browser_operator_action_required": True,
+        "browser_bundle_root": str(browser_bundle_root),
+        "browser_bundle_digest": browser_bundle_digest,
+        "native_host_name": NATIVE_HOST_NAME,
+        "native_host_executable": str(executable),
+        "native_host_executable_sha256": executable_digest,
+        "native_config_path": str(config_path),
+        "native_config_sha256": _digest_bytes(canonical_json_bytes(config)),
+        "native_manifest_path": str(manifest_path),
+        "native_manifest_sha256": _digest_bytes(canonical_json_bytes(_native_manifest(executable))),
+        "target_registry_key": TARGET_REGISTRY_KEY,
+        "legacy_native_host_name": LEGACY_NATIVE_HOST_NAME,
+        "legacy_registry_key": LEGACY_REGISTRY_KEY,
+        "production_activation_performed": False,
+    }
+    return {**payload, "client_plan_sha256": _digest(payload)}
+
+
 def stage_client_plan(
     *,
     runtime_root: str | Path,
@@ -258,31 +300,18 @@ def stage_client_plan(
     _atomic_json(config_path, config)
     _atomic_json(manifest_path, native_manifest)
 
-    payload = {
-        "schema": CLIENT_PLAN_SCHEMA,
-        "runtime_id": RUNTIME_ID,
-        "generation_id": GENERATION_ID,
-        "protocol_generation": PROTOCOL_GENERATION,
-        "source_head": source_head,
-        "source_tree": source_tree,
-        "browser_extension_id": BROWSER_EXTENSION_ID,
-        "browser_install_mode": BROWSER_INSTALL_MODE,
-        "browser_operator_action_required": True,
-        "browser_bundle_root": str(staged_browser),
-        "browser_bundle_digest": browser["bundle_digest"],
-        "native_host_name": NATIVE_HOST_NAME,
-        "native_host_executable": str(staged_executable),
-        "native_host_executable_sha256": executable_digest,
-        "native_config_path": str(config_path),
-        "native_config_sha256": _digest_bytes(canonical_json_bytes(config)),
-        "native_manifest_path": str(manifest_path),
-        "native_manifest_sha256": _digest_bytes(canonical_json_bytes(native_manifest)),
-        "target_registry_key": TARGET_REGISTRY_KEY,
-        "legacy_native_host_name": LEGACY_NATIVE_HOST_NAME,
-        "legacy_registry_key": LEGACY_REGISTRY_KEY,
-        "production_activation_performed": False,
-    }
-    document = {**payload, "client_plan_sha256": _digest(payload)}
+    document = _client_plan_document(
+        runtime=runtime,
+        source_head=source_head,
+        source_tree=source_tree,
+        browser_bundle_root=staged_browser,
+        browser_bundle_digest=browser["bundle_digest"],
+        executable=staged_executable,
+        executable_digest=executable_digest,
+        config_path=config_path,
+        config=config,
+        manifest_path=manifest_path,
+    )
     _atomic_json(_plan_path(runtime), document, immutable=True)
     return query_client_plan(runtime_root=runtime)
 

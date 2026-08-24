@@ -77,6 +77,40 @@ mogą być tymczasowym build/recovery inputem, ale nie powinny być opisywane ja
 
 Po świadomym deploymentcie docelowe live components powinny znajdować się pod canonical runtime root.
 
+### 5.1 Canonical client promotion
+
+Przejście ze staged client plan do stabilnego runtime wykonuje wyłącznie
+`bdb_vnext.m11c_client_promotion.promote_client_plan()` (CLI:
+`m11c_cutover_cli promote-clients`). Staged runtime jest wejściem
+content-addressed; nie wolno nadpisywać istniejącego live client setu ani
+kopiować plików ręcznie.
+
+Promocja jest transakcją recoverable dla jednego runtime root:
+
+```text
+PREPARED
+  -> LIVE_BACKED_UP       (old clients/config moved to recovery/<id>/previous)
+  -> NEW_CLIENTS_INSTALLED
+  -> VERIFIED              (path-bound plan/config/manifest + route readback)
+  -> COMMITTED
+```
+
+Przed pierwszym ruchem wykonywany jest exact readback staged plan, bieżącego
+live planu, HKCU 32/64 route i braku Legacy route. Staged Browser/native bytes
+oraz produkcyjnie związane manifest/config/client-plan są budowane przez
+istniejące serializery. Każdy stan transakcji ma digestowany zapis i pozostawia
+`previous` jako recovery authority. Awaria po ruchu uruchamia dokładny rollback
+do poprzedniego spójnego zestawu; rollback jest potwierdzany przez ponowny
+client-plan i route readback. Awaria, której nie da się tak potwierdzić, kończy
+się `promotion_recovery_required` bez cichego wyboru innego źródła.
+
+Wznowienie sprawdza istniejącą transakcję przed normalnym live preflightem.
+Jest to wymagane, ponieważ po przerwaniu podczas backupu live root może być
+chwilowo niekompletny. Replay identycznego staged planu jest idempotentny;
+inny plan lub niespójne bytes są odrzucane fail-closed. Promocja nie zmienia
+HKCU route, Bootstrap, Legacy, Project Memory ani writer/intake/production
+acceptance — te granice mają osobne canonical operacje i preflighty.
+
 ## 6. Native Messaging route
 
 Dedicated vNext manifest:
