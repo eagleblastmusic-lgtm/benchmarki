@@ -14,6 +14,16 @@ HEAD = "a" * 40
 TREE = "b" * 40
 
 
+def test_onedir_native_artifact_is_built_windowless() -> None:
+    source = (
+        Path(__file__).resolve().parents[1] / "bdb_vnext" / "m11c_native_artifact.py"
+    ).read_text(encoding="utf-8")
+
+    assert '"--onedir"' in source
+    assert '"--windowed"' in source
+    assert '"--console"' not in source
+
+
 def _fake_artifact(tmp_path: Path) -> Path:
     root = tmp_path / "artifact"
     root.mkdir()

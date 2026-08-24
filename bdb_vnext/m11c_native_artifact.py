@@ -339,7 +339,7 @@ def build_windows_native_artifact(
             "--noconfirm",
             "--clean",
             "--onedir",
-            "--console",
+            "--windowed",
             "--name",
             NATIVE_EXECUTABLE_NAME.removesuffix(".exe"),
             "--paths",
