@@ -310,6 +310,7 @@ def test_vnext_project_auto_contract_preserves_manual_fallback_and_stops_at_boun
     assert 'projectAutoStop("canonical_launch_gate_rejected")' in adapter
     assert 'const sent = await projectAutoSendInserted' in adapter
     assert 'projectAck(claimed.launch_id, claimId, {' in adapter
-    assert adapter.index('const sent = await projectAutoSendInserted') < adapter.index('const acknowledged = await projectAck(claimed.launch_id, claimId, {')
+    send_index = adapter.index('const sent = await projectAutoSendInserted')
+    assert send_index < adapter.index('const acknowledged = await projectAck(claimed.launch_id, claimId, {', send_index)
     assert 'handoff_status: "SENT"' in worker
     assert 'launch_handoff' in native
