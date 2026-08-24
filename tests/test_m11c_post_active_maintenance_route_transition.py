@@ -15,6 +15,7 @@ from bdb_vnext.m11c_route_transition import (
     RouteTransitionFault,
     classify_route,
     restore_old_route,
+    route_matches_candidate,
     transition_to_candidate,
 )
 
@@ -64,6 +65,31 @@ def test_route_transition_replay_rejects_candidate_as_new_old_subject(tmp_path: 
     with pytest.raises(RouteTransitionError) as caught:
         transition_to_candidate(old_routes=routes, candidate_manifest_path=candidate, observe=lambda: _observation(values), write_view=lambda *_: None)
     assert caught.value.code == "route_plan_stale"
+
+
+def test_same_path_route_transition_uses_exact_candidate_readback(tmp_path: Path) -> None:
+    candidate = str((tmp_path / "repo-runtime" / "native-host.json").resolve())
+    values = {"32": candidate, "64": candidate}
+    old = [{"root": "HKCU", "view": view, "value": candidate} for view in ("32", "64")]
+    writes: list[tuple[str, str]] = []
+
+    def observe() -> dict[str, object]:
+        return _observation(values)
+
+    def write(view: str, path: str) -> None:
+        writes.append((view, path))
+        values[view] = path
+
+    transitioned = transition_to_candidate(
+        old_routes=old,
+        candidate_manifest_path=candidate,
+        observe=observe,
+        write_view=write,
+    )
+
+    assert classify_route(transitioned, old_routes=old, candidate_manifest_path=candidate) == "OLD"
+    assert route_matches_candidate(transitioned, candidate_manifest_path=candidate) is True
+    assert writes == [("32", candidate), ("64", candidate)]
 
 
 

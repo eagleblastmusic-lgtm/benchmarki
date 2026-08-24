@@ -111,6 +111,17 @@ def classify_route(observation: Mapping[str, Any], *, old_routes: Sequence[Mappi
     return "FOREIGN"
 
 
+def route_matches_candidate(observation: Mapping[str, Any], *, candidate_manifest_path: str) -> bool:
+    """Return whether both exact, Legacy-free HKCU views bind the candidate."""
+
+    candidate = _path(candidate_manifest_path, field="candidate_manifest_path")
+    try:
+        routes = canonical_routes(observation)
+    except RouteTransitionError:
+        return False
+    return all(os.path.normcase(item["value"]) == os.path.normcase(candidate) for item in routes)
+
+
 def transition_to_candidate(
     *,
     old_routes: Sequence[Mapping[str, str]],
@@ -134,7 +145,7 @@ def transition_to_candidate(
     if fault_hook:
         fault_hook("after_hkcu_64")
     after = observe()
-    if classify_route(after, old_routes=old_routes, candidate_manifest_path=candidate) != "CANDIDATE":
+    if not route_matches_candidate(after, candidate_manifest_path=candidate):
         _fail("route_readback_mismatch", "candidate Native route did not read back exactly")
     if fault_hook:
         fault_hook("after_route_readback")
@@ -154,6 +165,8 @@ def roll_forward_to_candidate(
 
     candidate = _path(candidate_manifest_path, field="candidate_manifest_path")
     current = observe()
+    if route_matches_candidate(current, candidate_manifest_path=candidate):
+        return current
     phase = classify_route(current, old_routes=old_routes, candidate_manifest_path=candidate)
     if phase == "CANDIDATE":
         return current
@@ -164,7 +177,7 @@ def roll_forward_to_candidate(
     write_view("32", candidate)
     write_view("64", candidate)
     recovered = observe()
-    if classify_route(recovered, old_routes=old_routes, candidate_manifest_path=candidate) != "CANDIDATE":
+    if not route_matches_candidate(recovered, candidate_manifest_path=candidate):
         _fail("route_roll_forward_mismatch", "exact candidate Native route was not restored")
     return recovered
 
@@ -206,6 +219,7 @@ __all__ = [
     "classify_route",
     "restore_old_route",
     "roll_forward_to_candidate",
+    "route_matches_candidate",
     "route_values",
     "transition_to_candidate",
 ]

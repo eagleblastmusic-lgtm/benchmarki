@@ -61,6 +61,7 @@ from bdb_vnext.m11c_route_transition import (
     classify_route,
     restore_old_route,
     roll_forward_to_candidate,
+    route_matches_candidate,
     transition_to_candidate,
 )
 from bdb_vnext.m11c_windows_clients import (
@@ -303,7 +304,10 @@ def _route_phase(plan: Mapping[str, Any], observation: Mapping[str, Any]) -> str
 
 
 def _verify_final_route(plan: Mapping[str, Any], observation: Mapping[str, Any]) -> None:
-    if _route_phase(plan, observation) != "CANDIDATE":
+    if not route_matches_candidate(
+        observation,
+        candidate_manifest_path=plan["candidate_native_manifest_path"],
+    ):
         _fail("route_bootstrap_mismatch", "Native route is not the exact candidate route")
 
 def _load_candidate(authority: Path, digest: str) -> dict[str, Any]:
