@@ -21,7 +21,15 @@ from typing import Any, Iterator, NoReturn
 
 from bdb_shared.evidence import canonical_json_bytes, semantic_digest
 from bdb_vnext.bootstrap import BootstrapError
-from bdb_vnext.control_store import CONTROL_DB_USER_VERSION, prepare_control_store
+from bdb_vnext.control_store import (
+    CONTROL_DB_USER_VERSION,
+    CONTROL_SCHEMA_CHECKSUM,
+    ControlStoreError,
+    ensure_layout_identity,
+    expected_identity,
+    finalize_control_store,
+    prepare_control_store,
+)
 from bdb_vnext.m11c_active_reader import observe_bootstrap_activation
 from bdb_vnext.m11c_windows_clients import (
     M11cClientError,
@@ -29,7 +37,14 @@ from bdb_vnext.m11c_windows_clients import (
     query_client_plan,
     require_client_verification,
 )
-from bdb_vnext.m3c_admission import CanonicalVNextAdmissionAuthority, M3C_CONTROL_SCHEMA
+from bdb_vnext.m3c_admission import (
+    CanonicalVNextAdmissionAuthority,
+    M3C_AUTHORITY_ID,
+    M3C_CONTROL_SCHEMA,
+    M3C_KILL_SWITCH_SCHEMA,
+    M3C_PROTOCOL_GENERATION,
+    M3C_WRITER_ID,
+)
 from bdb_vnext.m9b_activation import read_activation
 from bdb_vnext.project_catalog import ProjectCatalog
 
@@ -43,6 +58,14 @@ _MAX_FILE_BYTES = 64 * 1024 * 1024
 _MAX_TOTAL_BYTES = 512 * 1024 * 1024
 _DIGEST_PREFIX = "sha256:"
 _TRANSIENT_NAMES = {"control.db-wal", "control.db-shm", "execution.lock"}
+_KNOWN_INITIALIZING_TABLES = {
+    "m3a_consumer_bindings",
+    "m3a_intent_revisions",
+    "m3a_submissions",
+    "m3a_tasks",
+    "m3c_kill_switch",
+    "vnext_control_metadata",
+}
 
 
 class SingleRootMigrationError(RuntimeError):
@@ -414,8 +437,139 @@ def _copy_exact(source: Path, target: Path, *, size: int, digest: str) -> None:
         raise
 
 
-def _verify_control(target: Path, legacy: Path) -> dict[str, Any]:
-    database = prepare_control_store(target)
+def _complete_known_empty_initializing_control(target: Path, legacy: Path, migration_id: str) -> dict[str, Any]:
+    """Finish only the exact empty historical initialization found in AppData.
+
+    This is deliberately not a general repair path.  It accepts one closed
+    legacy shape with no semantic records, preserves its exact bytes as
+    immutable recovery evidence, and lets the existing domain stores create
+    the current layout before the normal Control DB seal is finalized.
+    """
+
+    database = target / "control" / "control.db"
+    seal_path = target / "control" / "control.db.seal.json"
+    seal = _read_json(seal_path, field="initializing Control DB seal")
+    supplied = dict(seal)
+    seal_digest = supplied.pop("seal_digest", None)
+    expected = expected_identity()
+    if (
+        seal_digest != _document_digest(supplied)
+        or set(supplied) != {
+            "schema",
+            "state",
+            "instance_id",
+            "store_id",
+            "generation_id",
+            "config_generation",
+            "schema_checksum",
+            "user_version",
+        }
+        or supplied.get("schema") != "bdb-vnext-control-seal-v1"
+        or supplied.get("state") != "INITIALIZING"
+        or supplied.get("user_version") != 0
+        or not isinstance(supplied.get("instance_id"), str)
+        or not supplied["instance_id"]
+        or supplied.get("store_id") != expected["store_id"]
+        or supplied.get("generation_id") != expected["generation_id"]
+        or supplied.get("config_generation") != expected["config_generation"]
+        or supplied.get("schema_checksum") != CONTROL_SCHEMA_CHECKSUM
+    ):
+        _fail("migration_control_initialization_unknown", "historical Control DB seal is not the exact known initialization")
+
+    connection = sqlite3.connect(f"file:{database.as_posix()}?mode=ro&immutable=1", uri=True)
+    try:
+        integrity = str(connection.execute("PRAGMA integrity_check").fetchone()[0])
+        violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        }
+        identity = {
+            str(row[0]): str(row[1])
+            for row in connection.execute("SELECT key,value FROM vnext_control_metadata ORDER BY key").fetchall()
+        }
+        semantic_counts = {
+            table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            for table in sorted(_KNOWN_INITIALIZING_TABLES - {"vnext_control_metadata", "m3c_kill_switch"})
+        }
+        kill = connection.execute(
+            "SELECT schema,authority_id,protocol_generation,writer_id,admission_enabled "
+            "FROM m3c_kill_switch ORDER BY id"
+        ).fetchall()
+    except sqlite3.DatabaseError as exc:
+        raise SingleRootMigrationError("migration_control_initialization_unknown", "historical Control DB cannot be verified") from exc
+    finally:
+        connection.close()
+    if (
+        integrity != "ok"
+        or violations
+        or version != 0
+        or tables != _KNOWN_INITIALIZING_TABLES
+        or identity != expected
+        or any(semantic_counts.values())
+        or kill != [(M3C_KILL_SWITCH_SCHEMA, M3C_AUTHORITY_ID, M3C_PROTOCOL_GENERATION, M3C_WRITER_ID, 1)]
+    ):
+        _fail("migration_control_initialization_unknown", "historical Control DB contains non-empty or foreign authority state")
+
+    archive = target / "recovery" / "single-root-migration" / f"{migration_id}.initializing-control"
+    _copy_exact(database, archive / "control.db", size=database.stat().st_size, digest=_file_digest(database))
+    _copy_exact(seal_path, archive / "control.db.seal.json", size=seal_path.stat().st_size, digest=_file_digest(seal_path))
+
+    from bdb_vnext.candidate import CandidateStore
+    from bdb_vnext.content_store import DurableBindingStore
+    from bdb_vnext.engineering_loop import EditorPort
+    from bdb_vnext.m3c_admission import _open_vnext_admission_composition
+    from bdb_vnext.m4a_work_kernel import WorkKernelStore
+    from bdb_vnext.m4c_evidence import EvidenceStore
+    from bdb_vnext.n4_publication import PublicationStore
+
+    bindings = admission = work_kernel = candidate = evidence = publication = None
+    try:
+        bindings = DurableBindingStore(target)
+        admission = _open_vnext_admission_composition(
+            target,
+            legacy_root=legacy,
+            existing_outbox=(target / "browser" / "outbox" / "anchor.json").is_file(),
+        )
+        work_kernel = WorkKernelStore.open(target, task_authority=admission.authority, legacy_root=legacy)
+        candidate = CandidateStore(target, content_store=bindings.content_store, work_kernel=work_kernel)
+        evidence = EvidenceStore(target, content_store=bindings.content_store, candidate_store=candidate)
+        EditorPort(candidate, evidence_store=evidence)
+        publication = PublicationStore(
+            target,
+            content_store=bindings.content_store,
+            task_authority=admission.authority,
+            work_kernel=work_kernel,
+            candidate_store=candidate,
+            evidence_store=evidence,
+        )
+        ensure_layout_identity(work_kernel._connection)
+        current_seal = _read_json(seal_path, field="completed Control DB seal")
+        if current_seal.get("state") == "INITIALIZING":
+            finalize_control_store(work_kernel._connection)
+    finally:
+        for store in (publication, evidence, candidate, work_kernel, admission, bindings):
+            if store is not None:
+                store.close()
+    return {
+        "upgraded_from_initializing": True,
+        "initializing_database_sha256": _file_digest(archive / "control.db"),
+        "initializing_seal_sha256": _file_digest(archive / "control.db.seal.json"),
+    }
+
+
+def _verify_control(target: Path, legacy: Path, *, migration_id: str) -> dict[str, Any]:
+    upgrade: dict[str, Any] = {"upgraded_from_initializing": False}
+    try:
+        database = prepare_control_store(target)
+    except ControlStoreError as exc:
+        if exc.code != "control_initialization_incomplete":
+            raise
+        upgrade = _complete_known_empty_initializing_control(target, legacy, migration_id)
+        database = prepare_control_store(target)
     authority = CanonicalVNextAdmissionAuthority.open(target, legacy_root=legacy)
     authority.close()
     connection = sqlite3.connect(f"file:{database.as_posix()}?mode=ro", uri=True)
@@ -433,6 +587,7 @@ def _verify_control(target: Path, legacy: Path) -> dict[str, Any]:
     catalog = ProjectCatalog(target)
     projects = catalog.read()
     return {
+        **upgrade,
         "database_sha256": _file_digest(database),
         "integrity_check": integrity,
         "foreign_key_violations": len(violations),
@@ -477,12 +632,15 @@ def apply_single_root_migration(
                 fault_hook(f"after_copy_{index}")
         if _document_digest({"files": _inventory(source)}) != plan["source_subject_sha256"]:
             _fail("migration_source_changed", "source runtime changed during migration")
-        control = _verify_control(target, legacy)
+        control = _verify_control(target, legacy, migration_id=migration_id)
         expected_database = next(item["sha256"] for item in plan["migrated_files"] if item["path"] == "control/control.db")
-        if control["database_sha256"] != expected_database:
+        if control["upgraded_from_initializing"] is not True and control["database_sha256"] != expected_database:
             _fail("migration_control_copy_mismatch", "Control DB bytes changed during canonical verification")
+        mutable_during_upgrade = {"control/m3c-control.json"}
+        if control["upgraded_from_initializing"] is True:
+            mutable_during_upgrade.update({"control/control.db", "control/control.db.seal.json"})
         for item in plan["migrated_files"]:
-            if item["path"] == "control/m3c-control.json":
+            if item["path"] in mutable_during_upgrade:
                 continue
             destination = target.joinpath(*PurePosixPath(item["target_path"]).parts)
             if destination.stat().st_size != int(item["size_bytes"]) or _file_digest(destination) != item["sha256"]:
@@ -559,7 +717,11 @@ def retire_single_root_source(
         m9b = read_activation(target)
         if m9b is None or m9b.state != "ACTIVE" or m9b.source_head != plan["source_head"] or not m9b.writer_enabled or not m9b.intake_enabled:
             _fail("retirement_m9b_mismatch", "M9b is not ACTIVE for the repo-local source")
-        control = _verify_control(target, _absolute(plan["legacy_runtime_root"], field="legacy_runtime_root"))
+        control = _verify_control(
+            target,
+            _absolute(plan["legacy_runtime_root"], field="legacy_runtime_root"),
+            migration_id=migration_id,
+        )
         if verification.get("client_plan_sha256") != client["client_plan_sha256"]:
             _fail("retirement_browser_mismatch", "Browser verification differs from the target client")
         source_size = int(plan["source_size_bytes"])

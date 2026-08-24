@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ import bdb_vnext.single_root_migration as migration
 from bdb_shared.evidence import canonical_json_bytes
 from bdb_vnext.composition import build_vnext_composition_manifest
 from bdb_vnext.m3c_admission import (
+    CanonicalVNextAdmissionAuthority,
     M3C_AUTHORITY_ID,
     M3C_CONTROL_SCHEMA,
     M3C_CONTROL_SCHEMA_V1,
@@ -33,7 +35,12 @@ def _write(path: Path, payload: bytes) -> None:
     path.write_bytes(payload)
 
 
-def _fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, Path]:
+def _fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    initializing: bool = False,
+) -> tuple[Path, Path, Path]:
     source = tmp_path / "retired-appdata"
     target = tmp_path / "repo" / "runtime"
     legacy = tmp_path / "legacy"
@@ -41,15 +48,19 @@ def _fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Pat
     target.mkdir(parents=True)
     legacy.mkdir()
 
-    composition = VNextCompositionRoot.from_manifest(
-        build_vnext_composition_manifest(
-            source_commit=HEAD,
-            runtime_root=source,
-            legacy_runtime_root=legacy,
+    if initializing:
+        authority = CanonicalVNextAdmissionAuthority.open(source, legacy_root=legacy)
+        authority.close()
+    else:
+        composition = VNextCompositionRoot.from_manifest(
+            build_vnext_composition_manifest(
+                source_commit=HEAD,
+                runtime_root=source,
+                legacy_runtime_root=legacy,
+            )
         )
-    )
-    with composition.open_control_plane():
-        pass
+        with composition.open_control_plane():
+            pass
     marker = {
         "schema": M3C_CONTROL_SCHEMA_V1,
         "authority_id": M3C_AUTHORITY_ID,
@@ -183,6 +194,60 @@ def test_copy_fault_replays_without_duplicate_or_source_loss(tmp_path: Path, mon
     )
     assert completed["status"] == "COMPLETED"
     assert source.exists()
+
+
+def test_known_empty_initializing_control_is_preserved_then_completed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source, target, legacy = _fixture(tmp_path, monkeypatch, initializing=True)
+    source_database = (source / "control" / "control.db").read_bytes()
+    source_seal = (source / "control" / "control.db.seal.json").read_bytes()
+    assert json.loads(source_seal)["state"] == "INITIALIZING"
+    prepared = _prepare(source, target, legacy)
+
+    applied = migration.apply_single_root_migration(
+        target_runtime_root=target,
+        migration_id="single-root-test",
+        expected_plan_sha256=prepared["plan"]["plan_sha256"],
+        operator_approved=True,
+    )
+
+    control = applied["result"]["control"]
+    assert control["upgraded_from_initializing"] is True
+    assert control["integrity_check"] == "ok"
+    assert control["foreign_key_violations"] == 0
+    assert control["user_version"] == migration.CONTROL_DB_USER_VERSION
+    archive = target / "recovery" / "single-root-migration" / "single-root-test.initializing-control"
+    assert (archive / "control.db").read_bytes() == source_database
+    assert (archive / "control.db.seal.json").read_bytes() == source_seal
+    assert (source / "control" / "control.db").read_bytes() == source_database
+    assert (source / "control" / "control.db.seal.json").read_bytes() == source_seal
+    assert json.loads((target / "control" / "control.db.seal.json").read_text(encoding="utf-8"))["state"] == "SEALED"
+
+
+def test_nonempty_initializing_control_is_not_silently_completed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source, target, legacy = _fixture(tmp_path, monkeypatch, initializing=True)
+    connection = sqlite3.connect(source / "control" / "control.db")
+    try:
+        connection.execute(
+            "INSERT INTO m3a_submissions("
+            "submission_key,request_digest,canonical_request,status,disposition,created_order"
+            ") VALUES (?,?,?,?,?,?)",
+            ("foreign", "sha256:" + "1" * 64, b"{}", "TOMBSTONED", "REJECTED", 1),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    prepared = _prepare(source, target, legacy)
+
+    with pytest.raises(migration.SingleRootMigrationError) as caught:
+        migration.apply_single_root_migration(
+            target_runtime_root=target,
+            migration_id="single-root-test",
+            expected_plan_sha256=prepared["plan"]["plan_sha256"],
+            operator_approved=True,
+        )
+
+    assert caught.value.code == "migration_control_initialization_unknown"
+    assert json.loads((target / "control" / "control.db.seal.json").read_text(encoding="utf-8"))["state"] == "INITIALIZING"
 
 
 def test_changed_or_unknown_source_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
