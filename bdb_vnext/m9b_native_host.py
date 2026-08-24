@@ -43,7 +43,6 @@ from bdb_vnext.project_workflow import ProjectWorkflow, ProjectWorkflowError
 from bdb_vnext.project_launch import (
     ProjectLaunchQueueAdapter,
     ProjectLaunchQueueError,
-    default_project_launch_queue_path,
 )
 
 
@@ -215,10 +214,10 @@ def _assert_protocol(message: Mapping[str, Any], config: VNextNativeConfig) -> N
         _fail("client_identity_mismatch", "Browser extension identity differs")
 
 
-def _project_launch_queue() -> ProjectLaunchQueueAdapter:
+def _project_launch_queue(runtime_root: Path) -> ProjectLaunchQueueAdapter:
     """Open the one vNext GUI queue; it is intentionally outside lifecycle DB state."""
 
-    return ProjectLaunchQueueAdapter(default_project_launch_queue_path())
+    return ProjectLaunchQueueAdapter(runtime_root / "control" / "project-launch-queue.json")
 
 
 def _project_launch_response(config: VNextNativeConfig, request_id: str, *, status: str, launch: object = None, **extra: Any) -> dict[str, Any]:
@@ -386,7 +385,7 @@ def handle_message(
     # production admission/activation: it never writes Task/Work state and it
     # cannot enable intake or change Bootstrap authority.
     if action in {"project_launch_peek", "project_launch_claim", "project_launch_ack"}:
-        queue = _project_launch_queue()
+        queue = _project_launch_queue(config.runtime_root)
         try:
             if action == "project_launch_peek":
                 launch = queue.peek()

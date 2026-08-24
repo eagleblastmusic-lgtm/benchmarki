@@ -70,10 +70,10 @@ def test_vnext_queue_expired_claim_can_be_reclaimed_without_duplicate_launch(tmp
 
 
 def test_vnext_native_project_launch_operations_reuse_one_queue_and_do_not_require_intake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    queue_path = tmp_path / "shared" / "project-launch-queue.json"
+    queue_path = tmp_path / "runtime" / "control" / "project-launch-queue.json"
     queue = ProjectLaunchQueueAdapter(queue_path)
     launch = queue.enqueue(repo_alias="demo-project", prompt="Create\ncalculator", project_id="p", task_id="t")
-    monkeypatch.setattr("bdb_vnext.m9b_native_host.default_project_launch_queue_path", lambda: queue_path)
+    monkeypatch.setattr("bdb_vnext.m9b_native_host.default_vnext_runtime_root", lambda: tmp_path / "wrong-packaged-root")
     config = VNextNativeConfig(
         runtime_root=tmp_path / "runtime",
         legacy_runtime_root=tmp_path / "legacy",
