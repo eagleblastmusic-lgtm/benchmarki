@@ -801,10 +801,7 @@ class ProjectExecutionCoordinator:
         active = execution.get("active_milestone_run") if isinstance(execution.get("active_milestone_run"), Mapping) else None
         selected_run = run_id or (active.get("milestone_run_id") if active else None)
         run = execution.get("milestone_runs", {}).get(selected_run) if selected_run else active
-        milestone_id = run.get("milestone_id") if isinstance(run, Mapping) else None
-        progress = milestone_auto_progress(plan, state, milestone_id)
-        if isinstance(run, Mapping) and run.get("status") in {"stopped", "completed"}:
-            progress = {**progress, "status": "MILESTONE_COMPLETED" if run.get("status") == "completed" else "STOPPED"}
+        progress = self._milestone_auto_projection(plan, state, run)
         return {
             "schema": "bdb-milestone-auto-v1",
             "project_id": project_id,
@@ -819,6 +816,35 @@ class ProjectExecutionCoordinator:
             "blocker": progress.get("blocker"),
             "task_statuses": dict(execution.get("task_statuses", {})),
         }
+
+    @staticmethod
+    def _milestone_auto_projection(plan: ProjectPlan, state: ProjectMemoryState, run: Mapping[str, Any] | None) -> dict[str, Any]:
+        """Project AUTO state without allowing a stopped run to look runnable.
+
+        The durable run state is authoritative for whether Browser AUTO may
+        continue.  Progress calculation remains authoritative for the
+        deterministic task cursor only while the run is actually running.
+        """
+        milestone_id = run.get("milestone_id") if isinstance(run, Mapping) else None
+        progress = milestone_auto_progress(plan, state, str(milestone_id) if milestone_id is not None else None)
+        if not isinstance(run, Mapping):
+            return progress
+        run_status = str(run.get("status") or "")
+        if run_status == "completed":
+            return {**progress, "status": "MILESTONE_COMPLETED", "next_task_id": None}
+        if run_status == "stopped":
+            return {**progress, "status": "STOPPED", "next_task_id": run.get("current_task_id")}
+        if run_status in {"blocked", "review"}:
+            status = "BLOCKED" if run_status == "blocked" else "REVIEW_REQUIRED"
+            current_task_id = run.get("current_task_id") or progress.get("next_task_id")
+            blocker = progress.get("blocker")
+            if not blocker and current_task_id:
+                blocker = {"id": current_task_id, "kind": "task" if run_status == "blocked" else "review", "status": run_status}
+            return {**progress, "status": status, "next_task_id": current_task_id, "blocker": blocker, "runnable_task_ids": []}
+        if run_status == "running":
+            return progress
+        # Unknown run states are never a Browser AUTO admission.
+        return {**progress, "status": "BLOCKED", "next_task_id": run.get("current_task_id") or progress.get("next_task_id"), "runnable_task_ids": []}
 
     @staticmethod
     def _criterion_type(criterion: str) -> str:
@@ -1034,13 +1060,15 @@ class ProjectExecutionCoordinator:
         state = memory.read_state(); execution = _execution_document(state); statuses = dict(execution.get("task_statuses", {}))
         completed = sum(statuses.get(task.task_id, task.status) in {"completed", "skipped"} for task in plan.tasks)
         active_run = execution.get("active_milestone_run") if isinstance(execution.get("active_milestone_run"), Mapping) else None
-        auto_active = active_run and active_run.get("status") in {"running", "review", "blocked"}
-        auto_progress = milestone_auto_progress(plan, state, str(active_run.get("milestone_id"))) if auto_active else None
-        available = available_project_tasks(plan, state, str(active_run.get("milestone_id"))) if auto_active else available_project_tasks(plan, state)
+        run_status = str(active_run.get("status") or "") if active_run else None
+        auto_progress = milestone_auto_progress(plan, state, str(active_run.get("milestone_id"))) if run_status == "running" else None
+        available = available_project_tasks(plan, state, str(active_run.get("milestone_id"))) if run_status == "running" and active_run else available_project_tasks(plan, state)
         if "current_task_id" in execution:
             current_id = execution.get("current_task_id")
-            if auto_active:
+            if run_status == "running":
                 current_id = auto_progress.get("next_task_id") if auto_progress else current_id
+            elif run_status in {"review", "blocked"}:
+                current_id = active_run.get("current_task_id") or current_id
             elif current_id is None and not (active_run and active_run.get("status") in {"completed", "stopped"}) and len(available) == 1:
                 current_id = available[0].task_id
         else:
@@ -1062,7 +1090,7 @@ class ProjectExecutionCoordinator:
     def snapshot(self, project_id: str) -> dict[str, Any]:
         project, plan, memory = self._project(project_id); state = memory.read_state(); execution = _execution_document(state)
         active_run = execution.get("active_milestone_run") if isinstance(execution.get("active_milestone_run"), Mapping) else None
-        auto_progress = milestone_auto_progress(plan, state, str(active_run.get("milestone_id"))) if active_run else None
+        auto_progress = self._milestone_auto_projection(plan, state, active_run) if active_run else None
         return {"schema": PROJECT_EXECUTION_SCHEMA, "project_id": project_id, "plan_version": plan.plan_version, "task_statuses": dict(execution.get("task_statuses", {})), "gate_statuses": dict(execution.get("gate_statuses", {})), "open_question_statuses": dict(execution.get("open_question_statuses", {})), "bindings": list(execution["bindings"]), "attempts": list(execution["attempts"]), "acceptance_results": list(execution["acceptance_results"]), "checkpoints": dict(execution.get("checkpoints", {})), "launch_handoffs": dict(execution.get("launch_handoffs", {})), "current_binding_id": execution.get("current_binding_id"), "current_task_id": execution.get("current_task_id"), "available_tasks": [task.task_id for task in (available_project_tasks(plan, state, str(active_run.get("milestone_id"))) if active_run else available_project_tasks(plan, state))], "milestone_auto": {**(auto_progress or {}), "milestone_run_id": active_run.get("milestone_run_id")} if active_run and auto_progress else None, "watchdog": self.watchdog(project_id), "stale_result": bool(execution.get("stale_result", False))}
 
 

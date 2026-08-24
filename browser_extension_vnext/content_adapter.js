@@ -317,11 +317,29 @@ async function submitProjectExecutionResult(block, result, refs, { automatic = f
     if (response && response.ok === true && response.receipt) {
       const receipt = response.receipt;
       const next = receipt.current_task_id ? ` · Next: ${receipt.current_task_id}` : "";
-      setResult(output, `${receipt.replayed ? "Replayed" : "Accepted"}: ${receipt.task_id}${next}`, "success");
-      button.textContent = "BDB vNext: Result accepted";
+      const resultStatus = String(receipt.result_status || "UNKNOWN").toUpperCase();
+      const acceptedPass = receipt.accepted === true && resultStatus === "PASS";
+      const blocked = receipt.task_status === "blocked";
+      const label = acceptedPass
+        ? "BDB vNext: Result accepted"
+        : blocked
+          ? "BDB vNext: Result blocked"
+          : resultStatus === "REVIEW_REQUIRED"
+            ? "BDB vNext: Review required"
+            : resultStatus === "UNKNOWN"
+              ? "BDB vNext: Result unknown"
+              : "BDB vNext: Result failed";
+      const prefix = receipt.replayed ? `Replayed ${resultStatus}` : acceptedPass ? "Accepted" : "Failed";
+      const suffix = blocked ? " · blocked" : next;
+      setResult(output, `${prefix}: ${receipt.task_id}${suffix}`, acceptedPass ? "success" : "error");
+      button.textContent = label;
       if (automatic) {
         if (autoEpoch !== projectAutoEpoch || projectAutoState.phase === "stopped") {
           projectAutoStop("user_stop_during_result_submit");
+          return true;
+        }
+        if (!acceptedPass) {
+          projectAutoStop("result_not_accepted");
           return true;
         }
         projectAutoState = {
@@ -331,7 +349,7 @@ async function submitProjectExecutionResult(block, result, refs, { automatic = f
           token: receipt.replayed ? "replayed" : "accepted"
         };
         const nextLaunch = receipt.next_launch;
-        if (receipt.milestone_status === "RUNNABLE" && nextLaunch && nextLaunch.project_id === result.project_id && nextLaunch.task_id && nextLaunch.execution_binding_id) {
+        if (acceptedPass && receipt.milestone_status === "RUNNABLE" && nextLaunch && nextLaunch.project_id === result.project_id && nextLaunch.task_id && nextLaunch.execution_binding_id) {
           projectAutoState.phase = "awaiting_next_launch";
           void projectHandleLaunch(nextLaunch, { automatic: true }).catch(() => projectAutoStop("next_launch_failed"));
         } else if (receipt.next_launch_status === "already_sent" || receipt.milestone_status === "MILESTONE_COMPLETED") {

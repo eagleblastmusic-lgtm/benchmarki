@@ -115,7 +115,6 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
                 while (current) {
                   if (selector === "pre" && current.kind === "pre") return current;
                   if (selector.includes("assistant") && current.kind === "assistant") return current;
-                  if (selector.includes("assistant")) return null;
                   current = current.parentElement;
                 }
                 return null;
@@ -218,10 +217,14 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
                         launch_handoff: mode === "sent" && next ? { status: "SENT" } : { status: "PENDING" }
                       }};
                     }
-                    if (message.type === "bdb-vnext-project-execution-submit") return { ok: true, receipt: {
-                      task_id: taskId, replayed: false, milestone_status: mode === "completed" ? "MILESTONE_COMPLETED" : "RUNNABLE",
-                      current_task_id: "P0-02", next_launch: mode === "completed" ? null : nextLaunch
-                    }};
+                    if (message.type === "bdb-vnext-project-execution-submit") {
+                      const failed = mode === "fail" || mode === "replay-fail";
+                      return { ok: true, receipt: {
+                      accepted: !failed, result_status: failed ? "FAIL" : "PASS", task_status: failed ? "blocked" : "completed",
+                      task_id: taskId, replayed: mode === "replay-fail", milestone_status: mode === "completed" ? "MILESTONE_COMPLETED" : "RUNNABLE",
+                      current_task_id: "P0-02", next_launch: mode === "completed" || failed ? null : nextLaunch
+                      }};
+                    }
                     if (message.type === "bdb-vnext-project-launch-claim") return { ok: true, response: { status: "claimed", launch: nextLaunch } };
                     if (message.type === "bdb-vnext-project-launch-ack") { events.push("ack"); return { ok: true, response: { status: "acknowledged" } }; }
                     return { ok: false, error: "unexpected message" };
@@ -274,6 +277,18 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
                 assert.equal(claimMessages.length, 1);
                 assert.equal(ackMessages.length, 0, "missing Send must not ACK/consume");
                 assert.equal(sendClicks, 0);
+              } else if (mode === "fail" || mode === "replay-fail") {
+                assert.equal(submitMessages.length, 1, "transport success must still expose semantic failure");
+                assert.equal(claimMessages.length, 0, "failed result must not claim a next launch");
+                assert.equal(ackMessages.length, 0, "failed result must not ACK a next launch");
+                assert.equal(sendClicks, 0, "failed result must not send a next prompt");
+                const nodes = [];
+                const visit = (item) => { nodes.push(item); for (const child of item.children || []) visit(child); };
+                visit(assistant);
+                const output = nodes.find((item) => item.className === "bdb-vnext-project-execution-output");
+                const resultButton = nodes.find((item) => item.className === "bdb-vnext-project-execution-submit");
+                assert.doesNotMatch(resultButton?.textContent || "", /Result accepted/);
+                assert.match(output?.textContent || "", mode === "replay-fail" ? /Replayed FAIL/ : /Failed:/);
               } else {
                 assert.equal(submitMessages.length, 0, "stale/wrong gate must not submit");
                 assert.equal(sendClicks, 0);
@@ -283,7 +298,7 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
         ),
         encoding="utf-8",
     )
-    for mode in ("happy", "completed", "nonempty", "edited", "stopped", "nosend", "sent", "stale", "wrong"):
+    for mode in ("happy", "completed", "nonempty", "edited", "stopped", "nosend", "sent", "fail", "replay-fail", "stale", "wrong"):
         completed = subprocess.run(
             [node, str(harness), str(ROOT / "browser_extension_vnext" / "content_adapter.js"), mode],
             capture_output=True,
@@ -305,7 +320,9 @@ def test_vnext_project_auto_contract_preserves_manual_fallback_and_stops_at_boun
     assert 'type: "bdb-vnext-project-auto-stop"' in adapter or 'PROJECT_AUTO_STOP_MESSAGE = "bdb-vnext-project-auto-stop"' in adapter
     assert '"bdb-vnext-project-execution-status"' in worker
     assert '"project_execution_status"' in native
-    assert 'button.textContent = "BDB vNext: Result accepted"' in adapter
+    assert '"BDB vNext: Result accepted"' in adapter
+    assert '"BDB vNext: Result failed"' in adapter
+    assert 'result_not_accepted' in adapter
     assert 'button.textContent = "BDB vNext: Retry result"' in adapter
     assert 'projectAutoStop("canonical_launch_gate_rejected")' in adapter
     assert 'const sent = await projectAutoSendInserted' in adapter
