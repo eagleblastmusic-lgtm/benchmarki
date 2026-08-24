@@ -1,7 +1,7 @@
-"""Rollback-safe promotion of an immutable M11c client stage.
+"""Rollback-safe migration/recovery of an immutable historical client stage.
 
 ``stage_client_plan`` deliberately refuses to overwrite a path-bound stage.
-This module is the separate, explicit production-boundary operation: it
+This migration-only module is the separate, explicit production-boundary operation: it
 validates one immutable stage, builds a production-path-bound document set,
 and swaps the coherent client set under a recoverable transaction.
 
@@ -27,6 +27,7 @@ from bdb_vnext.m11c_windows_clients import (
     _client_plan_document,
     _copy_browser_bundle,
     _copy_native_executable,
+    _copy_native_payload,
     _digest,
     _digest_bytes,
     _native_config,
@@ -49,6 +50,20 @@ PROMOTION_STATES = frozenset(
         "RECOVERY_REQUIRED",
     }
 )
+
+
+def _native_payload_for_root(plan: Mapping[str, Any], root: Path) -> dict[str, Any] | None:
+    if "native_artifact_manifest_path" not in plan:
+        return None
+    return {
+        "native_artifact_kind": plan["native_artifact_kind"],
+        "native_payload_sha256": plan["native_payload_sha256"],
+        "native_payload_size_bytes": plan["native_payload_size_bytes"],
+        "native_artifact_manifest_path": str(root / "clients" / "native-host" / Path(plan["native_artifact_manifest_path"]).name),
+        "native_artifact_manifest_sha256": plan["native_artifact_manifest_sha256"],
+    }
+
+
 _MUTATING_STATES = frozenset({"LIVE_BACKED_UP", "NEW_CLIENTS_INSTALLED", "VERIFIED"})
 FaultInjector = Callable[[str], None]
 
@@ -220,6 +235,7 @@ def _production_documents(
         config_path=config_path,
         config=config,
         manifest_path=manifest_path,
+        native_payload=_native_payload_for_root(plan, production),
     )
     if production_plan["native_manifest_sha256"] != _digest_bytes(canonical_json_bytes(manifest)):
         _fail("promotion_document_mismatch", "production Native manifest digest differs")
@@ -274,7 +290,14 @@ def _build_candidate(
         _fail("promotion_transaction_corrupt", "promotion candidate already exists before preparation")
     candidate.mkdir(parents=True)
     _copy_browser_bundle(stage_browser, candidate_browser, browser["bundle_digest"])
-    _copy_native_executable(stage_executable, candidate_executable, stage_plan["native_host_executable_sha256"])
+    native_payload = _copy_native_payload(
+        stage_executable,
+        candidate_executable.parent,
+        source_head=stage_plan["source_head"],
+        source_tree=stage_plan["source_tree"],
+    )
+    if native_payload is None:
+        _copy_native_executable(stage_executable, candidate_executable, stage_plan["native_host_executable_sha256"])
 
     # First validate a complete candidate with candidate-bound documents.
     candidate_config = _native_config(runtime=candidate, legacy=legacy, bootstrap=bootstrap)
@@ -292,6 +315,7 @@ def _build_candidate(
         config_path=candidate_config_path,
         config=candidate_config,
         manifest_path=candidate_manifest_path,
+        native_payload=_native_payload_for_root(stage_plan, candidate),
     )
     _atomic_json(candidate / "clients" / "client-plan.json", candidate_plan)
     query_client_plan(runtime_root=candidate)

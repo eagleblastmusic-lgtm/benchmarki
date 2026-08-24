@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from bdb_vnext.control_center_query import ControlCenterQueryError, ControlCenterSnapshot, read_control_center_snapshot
+from bdb_vnext.composition import default_vnext_runtime_root
 from bdb_vnext.project_catalog import ProjectBrief, ProjectCatalog, ProjectCatalogError, ProjectRecord
 from bdb_vnext.project_execution import ProjectExecutionError
 from bdb_vnext.project_workflow import ProjectWorkflow, ProjectWorkflowError
@@ -188,7 +189,7 @@ class ProjectCenterWindow(QMainWindow):
         self.setStyleSheet(CONTROL_CENTER_STYLESHEET)
         self._runtime_root = Path(runtime_root).expanduser().absolute() if runtime_root is not None else None
         self._snapshot_loader = snapshot_loader
-        self._catalog = catalog or ProjectCatalog(self._runtime_root or Path.home() / "AppData" / "Local" / "BartoszDevBridge-vNext")
+        self._catalog = catalog or ProjectCatalog(self._runtime_root or default_vnext_runtime_root())
         self._workflow = workflow or ProjectWorkflow(self._catalog.runtime_root, catalog=self._catalog)
         self._snapshot: ControlCenterSnapshot | None = None
         self._projects: tuple[ProjectRecord, ...] = ()

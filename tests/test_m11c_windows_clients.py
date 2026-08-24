@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 
 from bdb_vnext.composition import BROWSER_EXTENSION_ID, NATIVE_HOST_NAME, PROTOCOL_GENERATION
+import bdb_vnext.m11c_native_artifact as native_artifact
+from bdb_shared.evidence import canonical_json_bytes
 from bdb_vnext.m11c_windows_clients import (
     BROWSER_INSTALL_MODE,
     M11cClientError,
@@ -78,6 +80,55 @@ def test_stage_client_plan_copies_exact_browser_and_builds_native_manifest(tmp_p
     assert NATIVE_HOST_NAME in manifest
     assert ORIGIN in manifest
     assert query_client_plan(runtime_root=runtime)["plan"]["client_plan_sha256"] == plan["client_plan_sha256"]
+
+
+def test_stage_client_plan_copies_and_verifies_complete_onedir_payload(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "artifact"
+    dependency = artifact_root / "_internal" / "VCRUNTIME140.dll"
+    dependency.parent.mkdir(parents=True)
+    dependency.write_bytes(b"runtime-dependency")
+    executable = artifact_root / native_artifact.NATIVE_EXECUTABLE_NAME
+    executable.write_bytes(b"native-executable")
+    files, total, payload_digest = native_artifact._payload_inventory(artifact_root)
+    payload = {
+        "schema": native_artifact.NATIVE_ARTIFACT_SCHEMA,
+        "runtime_id": "devmaster.bdb.vnext.runtime",
+        "generation_id": "bdb-vnext-g1",
+        "protocol_generation": PROTOCOL_GENERATION,
+        "native_host_name": NATIVE_HOST_NAME,
+        "browser_extension_id": BROWSER_EXTENSION_ID,
+        "artifact_kind": "pyinstaller-onedir",
+        "source_head": HEAD,
+        "source_tree": TREE,
+        "entrypoint": native_artifact.NATIVE_ENTRYPOINT,
+        "python_version": "3.14.0",
+        "pyinstaller_version": "6.14.0",
+        "platform": "windows-x86_64",
+        "executable": {"name": executable.name, "size_bytes": executable.stat().st_size, "sha256": native_artifact._sha256_path(executable)},
+        "payload": {
+            "files": [{"path": path, "size_bytes": size, "sha256": digest} for path, size, digest in files],
+            "total_size_bytes": total,
+            "sha256": payload_digest,
+        },
+        "production_activation_performed": False,
+    }
+    document = {**payload, "manifest_sha256": native_artifact._document_digest(payload)}
+    (artifact_root / native_artifact.NATIVE_ARTIFACT_MANIFEST).write_bytes(canonical_json_bytes(document))
+    runtime = tmp_path / "runtime"
+    result = stage_client_plan(
+        runtime_root=runtime,
+        legacy_runtime_root=tmp_path / "legacy",
+        bootstrap_authority_root=tmp_path / "bootstrap",
+        browser_source_root=BROWSER_SOURCE,
+        native_host_executable=executable,
+        source_head=HEAD,
+        source_tree=TREE,
+    )
+    plan = result["plan"]
+    assert plan["native_artifact_kind"] == "pyinstaller-onedir"
+    assert plan["native_payload_sha256"] == payload_digest
+    assert (runtime / "clients" / "native-host" / "_internal" / "VCRUNTIME140.dll").read_bytes() == b"runtime-dependency"
+    assert query_client_plan(runtime_root=runtime)["plan"] == plan
 
 
 def test_conflicting_staged_native_bytes_fail_closed(tmp_path: Path) -> None:

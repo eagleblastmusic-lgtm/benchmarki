@@ -1,15 +1,19 @@
 # BDB vNext — produkcyjny runtime Windows
 
 Status: **CURRENT**  
-Implementation baseline: `eae9fee9d171d61ded3c9cf539058559679aa9c8`
 
 ## 1. Canonical runtime root
 
-Domyślny vNext runtime root na Windows:
+Canonical BDB root na Windows:
 
 ```text
-%LOCALAPPDATA%\BartoszDevBridge-vNext
+C:\Projekty\DevMaster\bartosz-dev-bridge-vnext
 ```
+
+Live Browser/Native/config bytes znajdują się wyłącznie pod repo-local
+`runtime\`. `%LOCALAPPDATA%`, Temp, `.codex` i immutable build inputs nie są
+live runtime authority. Chronione Bootstrap/lock/activation records mogą
+pozostać w dedykowanym ProgramData authority store.
 
 Legacy runtime jest osobny:
 
@@ -24,7 +28,7 @@ Te rooty nie mogą się nakładać.
 Current client staging/deployment primitives używają layoutu:
 
 ```text
-%LOCALAPPDATA%\BartoszDevBridge-vNext\
+<canonical-repo>\runtime\
 ├─ clients\
 │  ├─ browser-extension\
 │  ├─ native-host\
@@ -62,9 +66,12 @@ Dokumentacja nie powinna mówić „produkcja jest na HEAD X” tylko dlatego, �
 
 Implementation baseline dokumentacji może być starszym commitem kodowym niż branch HEAD, jeżeli późniejsze commity dotyczą wyłącznie dokumentacji. To nadal nie mówi nic o zainstalowanym runtime.
 
-## 5. Staging vs live production
+## 5. Build input vs repo-local live runtime
 
-`stage_client_plan()` przygotowuje dokładne Browser/Native bytes, config i client plan. Sam staging nie jest aktywacją produktu.
+`stage_client_plan()` przygotowuje dokładne Browser/Native bytes, config i client
+plan. Normalny update kończy się fizycznym readbackiem w repo-local `runtime`;
+tymczasowy build/stage jest tylko wejściem bounded transaction i po sukcesie
+nie może pozostać drugą instalacją.
 
 Katalogi takie jak:
 
@@ -75,17 +82,19 @@ staging\clients\<sha>\...
 
 mogą być tymczasowym build/recovery inputem, ale nie powinny być opisywane jako finalny live runtime produktu.
 
-Po świadomym deploymentcie docelowe live components powinny znajdować się pod canonical runtime root.
+Po świadomym deploymentcie wszystkie live components muszą znajdować się pod
+canonical repo root.
 
-### 5.1 Canonical client promotion
+### 5.1 Historyczna promocja
 
-Przejście ze staged client plan do stabilnego runtime wykonuje wyłącznie
+Historyczna/migracyjna operacja przejścia ze staged client plan wykonuje
 `bdb_vnext.m11c_client_promotion.promote_client_plan()` (CLI:
 `m11c_cutover_cli promote-clients`). Staged runtime jest wejściem
 content-addressed; nie wolno nadpisywać istniejącego live client setu ani
 kopiować plików ręcznie.
 
-Promocja jest transakcją recoverable dla jednego runtime root:
+Nie jest to normalny canonical update workflow. Pozostaje recoverable mechanizmem
+jednorazowej migracji/rollbacku dla jednego runtime root:
 
 ```text
 PREPARED
@@ -116,7 +125,7 @@ acceptance — te granice mają osobne canonical operacje i preflighty.
 Dedicated vNext manifest:
 
 ```text
-%LOCALAPPDATA%\BartoszDevBridge-vNext\clients\native-host\com.bartosz.dev_bridge.vnext.json
+<canonical-repo>\runtime\clients\native-host\com.bartosz.dev_bridge.vnext.json
 ```
 
 Na Windows należy weryfikować odpowiednie HKCU registry views używane przez Chrome. Route ma wskazywać dedicated vNext manifest i pinned extension origin.
@@ -144,7 +153,11 @@ Native Host opisuje trzy niezależne warunki admission:
 
 1. zewnętrzny M11c ProgramData Bootstrap jest `ACTIVE`;
 2. M9b Browser/Native client gate jest `ACTIVE`;
-3. canonical M3c intake/admission jest enabled.
+3. canonical M3c admission kill-switch jest enabled.
+
+M9b jest jedyną authority dla writer/intake. M3c v2 opisuje statyczny
+`INTERNAL_CANONICAL_ONLY` admission mode oraz osobny dynamiczny kill-switch;
+nie publikuje konkurencyjnej projekcji `production_intake`.
 
 Dopiero zgodność authority może oznaczać produkcyjny acceptance. Sam poprawny handshake albo zarejestrowany Native route nie wystarcza.
 
@@ -163,21 +176,29 @@ Projection nie ma Legacy fallback i nie powinna automatycznie naprawiać runtime
 
 ## 10. Browser installation/update
 
-Bieżący model Browsera to operator-loaded unpacked extension. Po aktualizacji produkcyjnych bytes Chrome musi korzystać z:
+Bieżący model Browsera to operator-loaded unpacked extension. Po aktualizacji Chrome musi korzystać z:
 
 ```text
-%LOCALAPPDATA%\BartoszDevBridge-vNext\clients\browser-extension
+<canonical-repo>\runtime\clients\browser-extension
 ```
 
 Po reload należy sprawdzić extension ID i real Browser smoke, ponieważ automated source tests nie dowodzą zgodności aktualnego DOM ChatGPT.
 
-## 11. Build i disk guard
+## 11. Native packaging i disk guard
+
+Native Host jest pakowany jako zweryfikowany PyInstaller `onedir`. Executable i
+cały content-addressed payload są związane przez artifact/client-plan digests.
+Host uruchamia dependencies bez ekstrakcji `_MEI` i musi przejść `status` jako
+zwykły użytkownik Chrome; elevated-only PASS nie jest akceptacją.
 
 Build/deployment może mieć lokalne safety guards, np. minimalną ilość wolnego miejsca. Guard nie powinien być obchodzony przez obniżenie progu lub przypadkowe usuwanie danych użytkownika.
 
 Jeżeli build jest zablokowany, source commit może być poprawny i wypchnięty na GitHub, podczas gdy installed runtime pozostaje na wcześniejszej wersji. Te dwa statusy muszą być raportowane oddzielnie.
 
-Dla bounded repairu `eae9fee9d171d61ded3c9cf539058559679aa9c8` source validation zakończyła się pomyślnie, ale wolne miejsce na C było poniżej przyjętego progu 20 GB. Production package **nie został zbudowany**, production/runtime **nie został zmodyfikowany**, a real ChatGPT Browser smoke **nie został uruchomiony**. Z tego repairu nie wolno wyciągać wniosku, że live runtime używa bytes z `eae9fee9`.
+
+Browser AUTO stosuje sekwencję: exact identity/prompt → jedna próba Send →
+fizyczny send-effect readback → ACK/SENT. `click()` ani focus nie są dowodem
+wysłania; obcy composer i niepewna wcześniejsza próba pozostają fail-closed.
 
 ## 12. Co sprawdzać po deploymentcie
 

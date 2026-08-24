@@ -28,6 +28,7 @@ from bdb_vnext.composition import (
     RUNTIME_ID,
     load_browser_identity,
 )
+from bdb_vnext.m11c_native_artifact import NATIVE_ARTIFACT_MANIFEST, verify_native_artifact
 
 
 CLIENT_PLAN_SCHEMA = "bdb-vnext-m11c-client-plan-v1"
@@ -199,6 +200,35 @@ def _copy_native_executable(source: Path, target: Path, expected_digest: str) ->
         raise
 
 
+def _copy_native_payload(source_executable: Path, target_directory: Path, *, source_head: str, source_tree: str) -> dict[str, Any] | None:
+    """Copy a verified onedir payload; retain standalone onefile compatibility."""
+
+    artifact_manifest = source_executable.parent / NATIVE_ARTIFACT_MANIFEST
+    if not artifact_manifest.is_file():
+        return None
+    try:
+        artifact = verify_native_artifact(
+            artifact_manifest,
+            expected_source_head=source_head,
+            expected_source_tree=source_tree,
+        )
+    except Exception as exc:
+        raise M11cClientError("native_artifact_invalid", "Native Host payload failed exact artifact verification") from exc
+    for relative, _size, expected_digest in artifact.payload_files:
+        source = artifact.payload_root / Path(relative)
+        target = target_directory / Path(relative)
+        _copy_native_executable(source, target, expected_digest)
+    copied_manifest = target_directory / artifact.manifest_path.name
+    _copy_native_executable(artifact.manifest_path, copied_manifest, _digest_bytes(artifact.manifest_path.read_bytes()))
+    return {
+        "native_artifact_kind": artifact.artifact_kind,
+        "native_payload_sha256": artifact.payload_sha256,
+        "native_payload_size_bytes": artifact.payload_size_bytes,
+        "native_artifact_manifest_path": str(copied_manifest),
+        "native_artifact_manifest_sha256": artifact.manifest_sha256,
+    }
+
+
 def _native_config(*, runtime: Path, legacy: Path, bootstrap: Path) -> dict[str, Any]:
     return {
         "schema": NATIVE_CONFIG_SCHEMA,
@@ -234,6 +264,7 @@ def _client_plan_document(
     config_path: Path,
     config: Mapping[str, Any],
     manifest_path: Path,
+    native_payload: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the canonical path-bound client plan for one runtime root."""
 
@@ -261,6 +292,8 @@ def _client_plan_document(
         "legacy_registry_key": LEGACY_REGISTRY_KEY,
         "production_activation_performed": False,
     }
+    if native_payload is not None:
+        payload.update(native_payload)
     return {**payload, "client_plan_sha256": _digest(payload)}
 
 
@@ -293,7 +326,14 @@ def stage_client_plan(
     config_path = runtime / "config" / "native-host.json"
     staged_executable = runtime / "clients" / "native-host" / executable.name
     executable_digest = _digest_bytes(executable.read_bytes())
-    _copy_native_executable(executable, staged_executable, executable_digest)
+    native_payload = _copy_native_payload(
+        executable,
+        staged_executable.parent,
+        source_head=source_head,
+        source_tree=source_tree,
+    )
+    if native_payload is None:
+        _copy_native_executable(executable, staged_executable, executable_digest)
     manifest_path = runtime / "clients" / "native-host" / f"{NATIVE_HOST_NAME}.json"
     config = _native_config(runtime=runtime, legacy=legacy, bootstrap=bootstrap)
     native_manifest = _native_manifest(staged_executable)
@@ -311,6 +351,7 @@ def stage_client_plan(
         config_path=config_path,
         config=config,
         manifest_path=manifest_path,
+        native_payload=native_payload,
     )
     _atomic_json(_plan_path(runtime), document, immutable=True)
     return query_client_plan(runtime_root=runtime)
@@ -351,6 +392,22 @@ def query_client_plan(*, runtime_root: str | Path) -> dict[str, Any]:
     executable = Path(plan["native_host_executable"])
     if not executable.is_file() or _digest_bytes(executable.read_bytes()) != plan["native_host_executable_sha256"]:
         _fail("native_host_executable_stale", "Native Host executable differs from client plan")
+    if "native_artifact_manifest_path" in plan:
+        try:
+            artifact = verify_native_artifact(
+                plan["native_artifact_manifest_path"],
+                expected_source_head=plan["source_head"],
+                expected_source_tree=plan["source_tree"],
+            )
+        except Exception as exc:
+            raise M11cClientError("native_payload_stale", "Native Host onedir payload differs from client plan") from exc
+        if (
+            artifact.artifact_kind != plan.get("native_artifact_kind")
+            or artifact.payload_sha256 != plan.get("native_payload_sha256")
+            or artifact.payload_size_bytes != plan.get("native_payload_size_bytes")
+            or artifact.manifest_sha256 != plan.get("native_artifact_manifest_sha256")
+        ):
+            _fail("native_payload_stale", "Native Host onedir payload receipt differs from client plan")
     config_path = Path(plan["native_config_path"])
     manifest_path = Path(plan["native_manifest_path"])
     if not config_path.is_file() or _digest_bytes(config_path.read_bytes()) != plan["native_config_sha256"]:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -33,11 +32,10 @@ def _chrome_argv() -> list[str]:
     staged = _staged_runtime_config(Path(sys.executable))
     if staged is not None:
         return [*argv, "--config", str(staged)]
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if not local_app_data:
-        return argv
-    config = Path(local_app_data) / "BartoszDevBridge-Next" / "runtime" / "config" / "native-host.json"
-    return [*argv, "--config", str(config)]
+    # A registered frozen host is valid only when it is structurally installed
+    # below one runtime root.  Do not silently fall back to an AppData copy,
+    # because that would create a second live-client authority.
+    return argv
 
 
 if __name__ == "__main__":

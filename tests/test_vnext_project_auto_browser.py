@@ -73,6 +73,8 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
             let sweepCallback = null;
             let sendClicks = 0;
             let codeText = "";
+            const userMessages = [];
+            const localStorage = {};
 
             class Element {
               constructor(kind = "div", text = "") {
@@ -106,6 +108,7 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
               remove() { if (this.parentElement) this.parentElement.children = this.parentElement.children.filter((item) => item !== this); this.parentElement = null; }
               addEventListener(type, callback) { this.listeners[type] = callback; }
               setAttribute() {}
+              getAttribute() { return null; }
               focus() {}
               dispatchEvent() {}
               matches(selector) { return selector === "pre code" && this.kind === "code" && this.parentElement?.kind === "pre"; }
@@ -149,7 +152,16 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
             const form = new Element("form");
             const sendButton = new Element("button");
             sendButton.disabled = false;
-            sendButton.click = () => { sendClicks += 1; events.push("send"); };
+            sendButton.click = () => {
+              sendClicks += 1;
+              events.push("send");
+              if (mode !== "noeffect") setTimeout(() => {
+                composer.value = "";
+                const message = new Element("user", prompt);
+                userMessages.push(message);
+                documentElement.append(message);
+              }, 0);
+            };
             pre.append(code);
             assistant.append(pre);
             code.textContent = codeText;
@@ -176,7 +188,8 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
               location: { protocol: "https:", hostname: "chatgpt.com", pathname: `/c/${conversationId}` },
               document: {
                 visibilityState: "visible",
-                hasFocus: () => true,
+                activeElement: { kind: "body" },
+                hasFocus: () => false,
                 documentElement,
                 querySelector(selector) {
                   if (selector === "#prompt-textarea") return composer;
@@ -186,6 +199,7 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
                 querySelectorAll(selector) {
                   if (selector === "pre code") return codeText ? [code] : [];
                   if (selector === "#prompt-textarea") return [composer];
+                  if (selector === "[data-message-author-role='user']") return userMessages;
                   return [];
                 },
                 createElement: (kind) => new Element(kind),
@@ -196,7 +210,10 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
               clearTimeout,
               setInterval: (callback, interval) => { if (interval === 750) sweepCallback = callback; return { unref() {} }; },
               chrome: {
-                storage: { local: { async get() { return {}; }, async set() {} } },
+                storage: { local: {
+                  async get(key) { return { [key]: localStorage[key] }; },
+                  async set(value) { Object.assign(localStorage, value); }
+                } },
                 runtime: {
                   onMessage: { addListener(callback) { stopListener = callback; } },
                   async sendMessage(message) {
@@ -251,7 +268,7 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
                 assert.equal(claimMessages.length, mode === "completed" ? 0 : 1);
                 assert.equal(ackMessages.length, mode === "completed" ? 0 : 1);
                 assert.equal(sendClicks, mode === "happy" ? 1 : 0);
-                assert.equal(composer.value, mode === "happy" ? prompt : "");
+                assert.equal(composer.value, "");
                 if (mode === "happy") assert.deepEqual(events, ["send", "ack"]);
               } else if (mode === "sent") {
                 assert.equal(submitMessages.length, 1);
@@ -277,6 +294,12 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
                 assert.equal(claimMessages.length, 1);
                 assert.equal(ackMessages.length, 0, "missing Send must not ACK/consume");
                 assert.equal(sendClicks, 0);
+              } else if (mode === "noeffect") {
+                assert.equal(submitMessages.length, 1);
+                assert.equal(claimMessages.length, 1);
+                assert.equal(ackMessages.length, 0, "click without physical send effect must not ACK");
+                assert.equal(sendClicks, 1, "exactly one Send attempt is permitted");
+                assert.equal(composer.value, prompt);
               } else if (mode === "fail" || mode === "replay-fail") {
                 assert.equal(submitMessages.length, 1, "transport success must still expose semantic failure");
                 assert.equal(claimMessages.length, 0, "failed result must not claim a next launch");
@@ -293,12 +316,12 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
                 assert.equal(submitMessages.length, 0, "stale/wrong gate must not submit");
                 assert.equal(sendClicks, 0);
               }
-            }, 180);
+            }, mode === "noeffect" ? 5300 : 350);
             '''
         ),
         encoding="utf-8",
     )
-    for mode in ("happy", "completed", "nonempty", "edited", "stopped", "nosend", "sent", "fail", "replay-fail", "stale", "wrong"):
+    for mode in ("happy", "completed", "nonempty", "edited", "stopped", "nosend", "noeffect", "sent", "fail", "replay-fail", "stale", "wrong"):
         completed = subprocess.run(
             [node, str(harness), str(ROOT / "browser_extension_vnext" / "content_adapter.js"), mode],
             capture_output=True,
@@ -315,7 +338,7 @@ def test_vnext_project_auto_contract_preserves_manual_fallback_and_stops_at_boun
     native = (ROOT / "bdb_vnext" / "m9b_native_host.py").read_text(encoding="utf-8")
     assert "projectAutoSubmissions" in adapter
     assert 'phase: "detected"' in adapter
-    for phase in ("submitting_result", "result_accepted", "awaiting_next_launch", "inserting_prompt", "awaiting_send_ready", "sending_prompt", "sent", "stopped", "error"):
+    for phase in ("submitting_result", "result_accepted", "awaiting_next_launch", "inserting_prompt", "awaiting_send_ready", "sending_prompt", "verifying_send_effect", "sent", "stopped", "error"):
         assert f'"{phase}"' in adapter
     assert 'type: "bdb-vnext-project-auto-stop"' in adapter or 'PROJECT_AUTO_STOP_MESSAGE = "bdb-vnext-project-auto-stop"' in adapter
     assert '"bdb-vnext-project-execution-status"' in worker
@@ -326,6 +349,9 @@ def test_vnext_project_auto_contract_preserves_manual_fallback_and_stops_at_boun
     assert 'button.textContent = "BDB vNext: Retry result"' in adapter
     assert 'projectAutoStop("canonical_launch_gate_rejected")' in adapter
     assert 'const sent = await projectAutoSendInserted' in adapter
+    assert "document.hasFocus" not in adapter
+    assert '"SEND_ATTEMPTED"' in adapter
+    assert '"SEND_CONFIRMED"' in adapter
     assert 'projectAck(claimed.launch_id, claimId, {' in adapter
     send_index = adapter.index('const sent = await projectAutoSendInserted')
     assert send_index < adapter.index('const acknowledged = await projectAck(claimed.launch_id, claimId, {', send_index)

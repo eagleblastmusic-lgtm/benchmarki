@@ -103,7 +103,7 @@ def test_vnext_project_launch_browser_path_is_bounded_and_submission_path_remain
     assert 'native("project_launch_ack"' in worker
     assert "message.conversation_id" in worker
     assert 'typeof value.auto_send === "boolean"' in adapter
-    assert "document.hasFocus()" in adapter
+    assert "document.hasFocus()" not in adapter
     assert "document.visibilityState === \"visible\"" in adapter
     assert "tab_instance_id" in adapter
     assert "insertText" in adapter
@@ -924,7 +924,7 @@ def test_vnext_project_find_composer_uses_ordered_selector_priority_and_fails_cl
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
-def test_vnext_project_launch_inserts_exact_multiline_prompt_without_send(tmp_path: Path) -> None:
+def test_vnext_selected_project_launch_inserts_exact_multiline_prompt_without_send(tmp_path: Path) -> None:
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is required for the Browser content contract")
@@ -951,6 +951,7 @@ def test_vnext_project_launch_inserts_exact_multiline_prompt_without_send(tmp_pa
             const composer = new Element();
             composer.textContent = process.argv[3] || "";
             const messages = [];
+            const listeners = [];
             const store = {};
             const launchId = "11111111-1111-4111-8111-111111111111";
             const claimId = "22222222-2222-4222-8222-222222222222";
@@ -984,7 +985,7 @@ def test_vnext_project_launch_inserts_exact_multiline_prompt_without_send(tmp_pa
                   async get(key) { return Object.prototype.hasOwnProperty.call(store, key) ? { [key]: store[key] } : {}; },
                   async set(values) { Object.assign(store, values); }
                 }},
-                runtime: { async sendMessage(message) {
+                runtime: { onMessage: { addListener(listener) { listeners.push(listener); } }, async sendMessage(message) {
                   messages.push(message);
                   if (message.type === "bdb-vnext-project-launch-peek") return { ok: true, response: { status: "project_launch", launch } };
                   if (message.type === "bdb-vnext-project-launch-claim") return { ok: true, response: { status: "claimed", launch } };
@@ -996,13 +997,21 @@ def test_vnext_project_launch_inserts_exact_multiline_prompt_without_send(tmp_pa
             context.globalThis = context;
             vm.createContext(context);
             vm.runInContext(fs.readFileSync(process.argv[2], "utf8"), context, { filename: process.argv[2] });
-            setTimeout(() => {
+            setTimeout(async () => {
+              assert.equal(listeners.length, 1);
+              const result = await new Promise((resolve) => listeners[0]({ type: "bdb-vnext-project-launch-insert" }, {}, resolve));
               if (process.argv[3] === "user is typing") {
+                assert.equal(result.ok, false);
                 assert.equal(composer.textContent, process.argv[3]);
-                assert.deepEqual(messages.map((item) => item.type), ["bdb-vnext-project-launch-peek"]);
+                assert.deepEqual(messages.map((item) => item.type), [
+                  "bdb-vnext-project-launch-peek",
+                  "bdb-vnext-project-launch-peek"
+                ]);
               } else {
+                assert.equal(result.ok, true);
                 assert.equal(composer.textContent, launch.prompt);
                 assert.deepEqual(messages.map((item) => item.type), [
+                  "bdb-vnext-project-launch-peek",
                   "bdb-vnext-project-launch-peek",
                   "bdb-vnext-project-launch-claim",
                   "bdb-vnext-project-launch-ack"

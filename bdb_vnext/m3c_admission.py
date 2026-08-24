@@ -42,7 +42,8 @@ from bdb_vnext.m3b_browser_admission import (
 
 
 M3C_SCHEMA = "bdb-vnext-m3c-admission-v1"
-M3C_CONTROL_SCHEMA = "bdb-vnext-m3c-control-v1"
+M3C_CONTROL_SCHEMA_V1 = "bdb-vnext-m3c-control-v1"
+M3C_CONTROL_SCHEMA = "bdb-vnext-m3c-control-v2"
 M3C_KILL_SWITCH_SCHEMA = "bdb-vnext-m3c-kill-switch-v1"
 M3C_PROTOCOL_GENERATION = M3B_PROTOCOL_GENERATION
 M3C_AUTHORITY_ID = "devmaster.bdb.vnext.canonical-submission-task"
@@ -87,10 +88,19 @@ def _gate_lock(path: Path) -> threading.RLock:
 
 
 def _write_canonical(path: Path, value: Mapping[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(canonical_json_bytes(value))
+        with temporary.open("xb") as handle:
+            handle.write(canonical_json_bytes(value))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
     except OSError as exc:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
         _fail("control_state_write_failed", f"cannot write {path.name}")
 
 
@@ -326,15 +336,24 @@ class CanonicalVNextAdmissionAuthority:
             "writer_id": M3C_WRITER_ID,
             "protocol_generation": M3C_PROTOCOL_GENERATION,
             "mode": "INTERNAL_CANONICAL_ONLY",
-            "production_intake": False,
             "legacy_import": False,
             "alternate_admission": False,
         }
-        if self._control_marker.exists():
-            if _read_object(self._control_marker, code="control_state_invalid") != expected:
-                _fail("control_store_identity_mismatch", "M3c control marker differs")
-            return
-        _write_canonical(self._control_marker, expected)
+        legacy = {
+            **expected,
+            "schema": M3C_CONTROL_SCHEMA_V1,
+            "production_intake": False,
+        }
+        with self._lock:
+            if self._control_marker.exists():
+                current = _read_object(self._control_marker, code="control_state_invalid")
+                if current == legacy:
+                    _write_canonical(self._control_marker, expected)
+                    return
+                if current != expected:
+                    _fail("control_store_identity_mismatch", "M3c control marker differs")
+                return
+            _write_canonical(self._control_marker, expected)
 
     def _ensure_kill_switch(self) -> None:
         expected_static = {
@@ -635,6 +654,7 @@ __all__ = [
     "M3C_AUTHORITY_ID",
     "M3C_CANONICAL_ROLE",
     "M3C_CONTROL_SCHEMA",
+    "M3C_CONTROL_SCHEMA_V1",
     "M3C_KILL_SWITCH_SCHEMA",
     "M3C_PROTOCOL_GENERATION",
     "M3C_SCHEMA",

@@ -10,7 +10,10 @@ from bdb_vnext.composition import ADMISSION_PROVIDER_ID, build_vnext_composition
 from bdb_vnext.m3a_submission import M3aError, ShadowSubmissionRequest, ShadowSubmissionStore
 from bdb_vnext.m3b_browser_admission import AdmissionEnvelope, M3B_PROTOCOL_GENERATION, M3bError
 from bdb_vnext.m3c_admission import (
+    M3C_AUTHORITY_ID,
     M3C_CANONICAL_ROLE,
+    M3C_CONTROL_SCHEMA,
+    M3C_CONTROL_SCHEMA_V1,
     M3C_PROTOCOL_GENERATION,
     M3C_SCHEMA,
     M3C_WRITER_ID,
@@ -290,9 +293,39 @@ def test_m3c_query_schema_and_control_markers_are_deterministic(tmp_path: Path) 
         control_root = tmp_path / "vnext" / "control"
         marker = json.loads((control_root / "m3c-control.json").read_text(encoding="utf-8"))
         kill = json.loads((control_root / "m3c-kill-switch.json").read_text(encoding="utf-8"))
-        assert marker["production_intake"] is False
+        assert marker["schema"] == M3C_CONTROL_SCHEMA
+        assert "production_intake" not in marker
         assert marker["alternate_admission"] is False
         assert kill["admission_enabled"] is True
+
+
+def test_exact_m3c_v1_marker_migrates_to_unambiguous_v2(tmp_path: Path) -> None:
+    runtime = tmp_path / "vnext"
+    legacy = tmp_path / "legacy"
+    with ShadowSubmissionStore(runtime, shadow=True, legacy_root=legacy) as store:
+        marker_path = runtime / "control" / "m3c-control.json"
+        marker_path.write_text(json.dumps({
+            "schema": M3C_CONTROL_SCHEMA_V1,
+            "authority_id": M3C_AUTHORITY_ID,
+            "writer_id": M3C_WRITER_ID,
+            "protocol_generation": M3C_PROTOCOL_GENERATION,
+            "mode": "INTERNAL_CANONICAL_ONLY",
+            "production_intake": False,
+            "legacy_import": False,
+            "alternate_admission": False,
+        }), encoding="utf-8")
+        authority = CanonicalVNextAdmissionAuthority(store)
+        migrated = json.loads(marker_path.read_text(encoding="utf-8"))
+        assert migrated == {
+            "schema": M3C_CONTROL_SCHEMA,
+            "authority_id": M3C_AUTHORITY_ID,
+            "writer_id": M3C_WRITER_ID,
+            "protocol_generation": M3C_PROTOCOL_GENERATION,
+            "mode": "INTERNAL_CANONICAL_ONLY",
+            "legacy_import": False,
+            "alternate_admission": False,
+        }
+        assert authority.runtime_root == runtime
 
 
 def test_composition_manifest_declares_canonical_admission_edge(tmp_path: Path) -> None:

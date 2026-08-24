@@ -83,7 +83,9 @@ Wynik z modelu nie zmienia stanu na podstawie prose. Musi przejść strict `bdb-
 
 To transportowa kolejka jednego pending promptu z claim lease. Nie jest semantic authority. Launch może zawierać exact project/task/binding identity oraz `auto_send`.
 
-Historycznie plik kolejki znajduje się w kompatybilnościowej lokalizacji `%LOCALAPPDATA%\BartoszDevBridge\project-launch-queue.json`. Sama lokalizacja nie czyni starego runtime authority; canonical semantic state pozostaje w vNext Project Memory/Execution.
+Canonical kolejka transportowa znajduje się w repo-local
+`runtime/control/project-launch-queue.json`. Nie jest authority semantycznym;
+canonical Task/Project state pozostaje w vNext Project Memory/Execution.
 
 ### Browser local storage
 

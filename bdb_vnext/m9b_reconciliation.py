@@ -207,7 +207,7 @@ def _m3c_state(runtime: Path) -> dict[str, Any]:
     if (
         kill.get("schema") != "bdb-vnext-m3c-kill-switch-v1"
         or kill.get("admission_enabled") is not True
-        or control.get("schema") != "bdb-vnext-m3c-control-v1"
+        or control.get("schema") != "bdb-vnext-m3c-control-v2"
         or control.get("alternate_admission") is not False
         or control.get("legacy_import") is not False
     ):

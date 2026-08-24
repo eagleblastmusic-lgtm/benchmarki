@@ -254,7 +254,7 @@ def _m3c_state(runtime: Path) -> dict[str, str]:
     except Exception as exc:
         raise ClientRouteRebindError("m3c_state_unavailable", "canonical M3c state cannot be observed") from exc
     if (
-        control.get("schema") != "bdb-vnext-m3c-control-v1"
+        control.get("schema") != "bdb-vnext-m3c-control-v2"
         or control.get("alternate_admission") is not False
         or control.get("legacy_import") is not False
         or kill.get("schema") != "bdb-vnext-m3c-kill-switch-v1"

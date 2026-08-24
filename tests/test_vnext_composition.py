@@ -25,6 +25,7 @@ from bdb_vnext.composition import (
     VNextCompositionError,
     build_vnext_composition_manifest,
     composition_status,
+    default_vnext_runtime_root,
     load_browser_identity,
     load_vnext_composition_manifest,
     main,
@@ -35,6 +36,10 @@ from bdb_vnext.composition import (
 BASIS = "4998aa16ff68d728637d09639ac79ced886393f6"
 LEGACY_EXTENSION_ID = "b" * 32
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_default_vnext_runtime_is_single_repo_local_root() -> None:
+    assert default_vnext_runtime_root() == ROOT / "runtime"
 
 
 def browser_bundle(root: Path, *, key: str | None = None) -> Path:

@@ -76,7 +76,14 @@ def default_local_app_data_root() -> Path:
 
 
 def default_vnext_runtime_root() -> Path:
-    return default_local_app_data_root() / "BartoszDevBridge-vNext"
+    """Return the single repo-local live runtime root.
+
+    vNext code and client bytes deliberately live with the canonical source
+    checkout.  Protected Bootstrap/admission state remains in its dedicated
+    authority stores; this path is only the live code/client root.
+    """
+
+    return Path(__file__).resolve().parents[1] / "runtime"
 
 
 def default_legacy_runtime_root() -> Path:
@@ -220,11 +227,18 @@ def _directory_membership(path: Path) -> tuple[tuple[str, str, tuple[int, int, i
                 )
             if stat.S_ISDIR(info.st_mode):
                 kind = "directory"
+                # Windows may update directory size/mtime metadata lazily while
+                # the already-created subtree is first enumerated.  Directory
+                # identity plus the recursively re-read membership is the
+                # stable authority here; every regular file retains the full
+                # size/mtime token and byte digest checks below.
+                token = (info.st_dev, info.st_ino, 0, 0)
             elif stat.S_ISREG(info.st_mode):
                 kind = "file"
+                token = _file_token(info)
             else:
                 raise VNextCompositionError("invalid_bundle_entry", "bundle entry type is unsupported")
-            entries.append((entry.name, kind, _file_token(info)))
+            entries.append((entry.name, kind, token))
     return tuple(sorted(entries, key=lambda item: item[0]))
 
 

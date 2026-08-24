@@ -457,8 +457,7 @@ function projectBlankNewChat() {
 function projectPageEligible({ selectedByUser = false } = {}) {
   return Boolean(
     (projectConversationId() || (selectedByUser && projectBlankNewChat())) &&
-    document.visibilityState === "visible" &&
-    (selectedByUser || (typeof document.hasFocus === "function" && document.hasFocus()))
+    document.visibilityState === "visible"
   );
 }
 
@@ -555,7 +554,7 @@ async function projectReadBindings() {
   }
 }
 
-async function projectWriteBinding(launch, claimId, conversationId, state) {
+async function projectWriteBinding(launch, claimId, conversationId, state, extra = {}) {
   const bindings = await projectReadBindings();
   const now = Date.now();
   bindings[launch.launch_id] = {
@@ -574,6 +573,7 @@ async function projectWriteBinding(launch, claimId, conversationId, state) {
     expected_repo_head_before: launch.expected_repo_head_before || null,
     auto_send: launch.auto_send === true,
     state,
+    ...extra,
     updated_at: now
   };
   const entries = Object.entries(bindings)
@@ -647,6 +647,32 @@ function projectFindSendControl(composer) {
   return null;
 }
 
+function projectExactUserMessageCount(prompt) {
+  if (typeof prompt !== "string" || prompt === "") return 0;
+  let count = 0;
+  for (const node of document.querySelectorAll("[data-message-author-role='user']")) {
+    if (!(node instanceof HTMLElement)) continue;
+    if (typeof node.closest === "function" && node.closest(".bdb-vnext-project-launch-status, .bdb-vnext-project-execution-panel")) continue;
+    const value = typeof node.innerText === "string" ? node.innerText : node.textContent || "";
+    if (value === prompt) count += 1;
+  }
+  return count;
+}
+
+function projectSendControlEnabled(send) {
+  return Boolean(
+    send && send.disabled !== true &&
+    (typeof send.getAttribute !== "function" || send.getAttribute("aria-disabled") !== "true")
+  );
+}
+
+function projectSendEffectObserved(prompt, baselineCount, conversationId) {
+  if (!conversationId || projectConversationId() !== conversationId) return false;
+  const composer = projectFindComposer();
+  if (!composer || projectComposerText(composer) !== "") return false;
+  return projectExactUserMessageCount(prompt) > baselineCount;
+}
+
 function projectDelay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -670,13 +696,39 @@ async function projectAutoSendInserted(launch, claimId, prompt, insertedComposer
       return false;
     }
     const send = projectFindSendControl(composer);
-    if (send && send.disabled !== true && projectComposerText(composer) === prompt && epoch === projectAutoEpoch) {
+    if (projectSendControlEnabled(send) && projectComposerText(composer) === prompt && epoch === projectAutoEpoch) {
+      const conversationId = projectConversationId();
+      const baselineCount = projectExactUserMessageCount(prompt);
       projectAutoState.phase = "sending_prompt";
       if (typeof send.click !== "function") return false;
-      send.click();
-      projectAutoState.phase = "sent";
-      projectAnnounce("BDB AUTO: prompt wysłany automatycznie.", "success");
-      return true;
+      await projectWriteBinding(launch, claimId, conversationId, "SEND_ATTEMPTED", {
+        send_baseline_count: baselineCount,
+        send_attempt_token: token
+      });
+      try {
+        send.click();
+      } catch (_error) {
+        projectAutoState.phase = "error";
+        projectAnnounce("BDB AUTO zatrzymane: kontrolka Send odrzuciła próbę.", "warning");
+        return false;
+      }
+      projectAutoState.phase = "verifying_send_effect";
+      for (let verifyAttempt = 0; verifyAttempt < 50; verifyAttempt += 1) {
+        if (epoch !== projectAutoEpoch || projectAutoState.phase === "stopped") return false;
+        if (projectSendEffectObserved(prompt, baselineCount, conversationId)) {
+          await projectWriteBinding(launch, claimId, conversationId, "SEND_CONFIRMED", {
+            send_baseline_count: baselineCount,
+            send_attempt_token: token
+          });
+          projectAutoState.phase = "sent";
+          projectAnnounce("BDB AUTO: wysłanie promptu potwierdzone.", "success");
+          return true;
+        }
+        await projectDelay(100);
+      }
+      projectAutoState.phase = "error";
+      projectAnnounce("BDB AUTO zatrzymane: brak potwierdzonego efektu Send; ponowna próba jest zablokowana.", "warning");
+      return false;
     }
     await projectDelay(100);
   }
@@ -721,6 +773,10 @@ async function projectHandleLaunch(launch, { selectedByUser = false, automatic =
   if ((!conversationId && !blankNewChat) || !composer) return false;
   const bindings = await projectReadBindings();
   const existing = conversationId ? projectBindingFor(bindings, launch.launch_id, conversationId) : null;
+  if (!existing && autoMode && projectExactUserMessageCount(launch.prompt) > 0 && projectComposerText(composer) === "") {
+    projectAnnounce("BDB AUTO zatrzymane: istnieje wysłana identyczna wiadomość bez lokalnego dowodu próby.", "warning");
+    return false;
+  }
   if (!existing && projectComposerHasForeignState(composer)) {
     if (projectComposerText(composer) === launch.prompt) {
       // Storage may have been lost after insertion but before ACK. The exact
@@ -744,6 +800,26 @@ async function projectHandleLaunch(launch, { selectedByUser = false, automatic =
       projectAutoStop("canonical_launch_gate_rejected");
       return false;
     }
+  }
+  if (existing?.state === "ACKED") return true;
+  if (autoMode && existing?.state === "SEND_CONFIRMED") {
+    const acknowledged = await projectAck(claimed.launch_id, claimId, { project_id: claimed.project_id, execution_binding_id: claimed.execution_binding_id, conversation_id: conversationId });
+    if (acknowledged) await projectWriteBinding(claimed, claimId, conversationId, "ACKED");
+    return acknowledged;
+  }
+  if (autoMode && existing?.state === "SEND_ATTEMPTED") {
+    const baseline = existing.send_baseline_count;
+    if (Number.isInteger(baseline) && baseline >= 0 && projectSendEffectObserved(claimed.prompt, baseline, conversationId)) {
+      await projectWriteBinding(claimed, claimId, conversationId, "SEND_CONFIRMED", {
+        send_baseline_count: baseline,
+        send_attempt_token: existing.send_attempt_token || null
+      });
+      const acknowledged = await projectAck(claimed.launch_id, claimId, { project_id: claimed.project_id, execution_binding_id: claimed.execution_binding_id, conversation_id: conversationId });
+      if (acknowledged) await projectWriteBinding(claimed, claimId, conversationId, "ACKED");
+      return acknowledged;
+    }
+    projectAnnounce("BDB AUTO zatrzymane: poprzednia próba Send pozostaje niepewna; duplicate Send zablokowany.", "warning");
+    return false;
   }
   if (conversationId) await projectWriteBinding(claimed, claimId, conversationId, "CLAIMED");
   projectInsertionActive = true;
@@ -805,7 +881,10 @@ async function projectPoll() {
   projectPollActive = true;
   try {
     const launch = await projectPeek();
-    if (launch) await projectHandleLaunch(launch);
+    // Manual launches remain owned by the explicit popup action in the tab
+    // selected by the user.  Only canonical AUTO launches may be consumed by
+    // the background poller without a focus heuristic.
+    if (launch?.auto_send === true) await projectHandleLaunch(launch, { automatic: true });
   } catch (_error) {
     // A transient Native/DOM failure leaves the canonical launch pending.
   } finally {

@@ -1,7 +1,8 @@
 """Operator CLI for the single M11c External Bootstrap cutover path.
 
-Staging consumes a verified frozen Native Host artifact. The one production
-apply boundary still requires an exact reviewed cutover-plan SHA.
+Build inputs consume a verified frozen Native Host artifact. Historical
+promotion remains migration/recovery-only. The one production apply boundary
+still requires an exact reviewed cutover-plan SHA.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from typing import Any, Mapping
 
 from bdb_shared.evidence import canonical_json_bytes
 from bdb_vnext.bootstrap import BootstrapError
+from bdb_vnext.composition import default_vnext_runtime_root
 from bdb_vnext.m11c_cutover import (
     M11cCutoverError,
     apply_windows_cutover,
@@ -175,7 +177,7 @@ def _parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     stage = sub.add_parser("stage-clients", help="stage exact Browser/Native client subjects only")
-    stage.add_argument("--runtime-root", required=True)
+    stage.add_argument("--runtime-root", default=str(default_vnext_runtime_root()))
     stage.add_argument("--legacy-runtime-root", required=True)
     stage.add_argument("--authority-root", required=True)
     stage.add_argument("--browser-source-root", required=True)
@@ -185,22 +187,22 @@ def _parser() -> argparse.ArgumentParser:
     stage.set_defaults(handler=_stage_clients)
 
     register = sub.add_parser("register-native", help="register only the dedicated vNext Native host")
-    register.add_argument("--runtime-root", required=True)
+    register.add_argument("--runtime-root", default=str(default_vnext_runtime_root()))
     register.add_argument("--replace-existing-target", action="store_true", help="backup and replace an existing conflicting HKCU vNext rehearsal registration; HKLM still blocks")
     register.set_defaults(handler=_register_native)
 
     client_status = sub.add_parser("client-status", help="observe staged clients and Browser launch witness")
-    client_status.add_argument("--runtime-root", required=True)
+    client_status.add_argument("--runtime-root", default=str(default_vnext_runtime_root()))
     client_status.set_defaults(handler=_client_status)
 
-    promote = sub.add_parser("promote-clients", help="promote one immutable client stage into the stable production root")
+    promote = sub.add_parser("promote-clients", help="migration/recovery only: promote an immutable historical stage")
     promote.add_argument("--staged-runtime-root", required=True)
     promote.add_argument("--production-runtime-root", required=True)
     promote.set_defaults(handler=_promote_clients)
 
     prepare = sub.add_parser("prepare", help="prepare exact final cutover plan; does not activate")
     prepare.add_argument("--authority-root", required=True)
-    prepare.add_argument("--runtime-root", required=True)
+    prepare.add_argument("--runtime-root", default=str(default_vnext_runtime_root()))
     prepare.add_argument("--legacy-runtime-root", required=True)
     prepare.add_argument("--preparation-id", required=True)
     prepare.add_argument("--cutover-id", required=True)
@@ -211,7 +213,7 @@ def _parser() -> argparse.ArgumentParser:
 
     status = sub.add_parser("status", help="observe exact external/client cutover state")
     status.add_argument("--authority-root", required=True)
-    status.add_argument("--runtime-root", required=True)
+    status.add_argument("--runtime-root", default=str(default_vnext_runtime_root()))
     status.add_argument("--cutover-id", required=True)
     status.set_defaults(handler=_status)
 

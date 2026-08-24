@@ -20,6 +20,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
+from bdb_vnext.composition import default_vnext_runtime_root
+
 
 PROJECT_LAUNCH_SCHEMA = "bdb-project-launch-v1"
 PROJECT_LAUNCH_QUEUE_SCHEMA = "bdb-project-launch-queue-v1"
@@ -37,9 +39,7 @@ def _utc_now() -> datetime:
 def default_project_launch_queue_path() -> Path:
     """Return the one queue path shared by the canonical GUI and Native host."""
 
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    root = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
-    return (root / "BartoszDevBridge" / "project-launch-queue.json").absolute()
+    return (default_vnext_runtime_root() / "control" / "project-launch-queue.json").absolute()
 
 
 def _utc_text(value: datetime) -> str:

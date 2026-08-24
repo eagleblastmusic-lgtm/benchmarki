@@ -2,9 +2,10 @@
 
 The production Browser/Native route must never be bound merely to a Python
 console-script launcher that imports mutable repo/site-packages state.  This
-module builds and verifies a Windows PyInstaller onefile executable, publishes
-an immutable provenance manifest for its exact Git subject, and can wrap those
-same executable bytes in the M1b/M11a runtime-bundle contract.
+module builds and verifies a Windows PyInstaller onedir payload, publishes an
+immutable provenance manifest for its exact Git subject, and can wrap those
+same bytes in the M1b/M11a runtime-bundle contract.  Verification remains
+backward compatible with historical onefile artifacts.
 
 Nothing here installs, registers, starts, activates, or switches production.
 """
@@ -37,8 +38,9 @@ from bdb_vnext.composition import (
 )
 
 
-NATIVE_ARTIFACT_SCHEMA = "bdb-vnext-native-host-artifact-v1"
-NATIVE_ARTIFACT_MANIFEST = "bdb-vnext-native-host-artifact-v1.json"
+NATIVE_ARTIFACT_SCHEMA_V1 = "bdb-vnext-native-host-artifact-v1"
+NATIVE_ARTIFACT_SCHEMA = "bdb-vnext-native-host-artifact-v2"
+NATIVE_ARTIFACT_MANIFEST = "bdb-vnext-native-host-artifact-v2.json"
 NATIVE_EXECUTABLE_NAME = "BDB-vNext-NativeHost.exe"
 NATIVE_ENTRYPOINT = "packaging/windows/vnext_native_host_entry.py"
 RUNTIME_PROVENANCE_SCHEMA = "bdb-vnext-runtime-bundle-provenance-v1"
@@ -48,6 +50,7 @@ _SHA40 = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
+_MAX_ARTIFACT_FILES = 4096
 
 
 class M11cArtifactError(RuntimeError):
@@ -135,6 +138,35 @@ class VerifiedNativeArtifact:
     executable_sha256: str
     executable_size_bytes: int
     manifest_sha256: str
+    artifact_kind: str
+    payload_root: Path
+    payload_files: tuple[tuple[str, int, str], ...]
+    payload_sha256: str
+    payload_size_bytes: int
+
+
+def _payload_inventory(root: Path, *, manifest_name: str | None = None) -> tuple[tuple[tuple[str, int, str], ...], int, str]:
+    files: list[tuple[str, int, str]] = []
+    total = 0
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            _fail("native_artifact_tampered", "Native Host payload may not contain symlinks")
+        if not path.is_file() or (
+            path.parent == root
+            and path.name in {manifest_name, f"{NATIVE_HOST_NAME}.json"}
+        ):
+            continue
+        relative = path.relative_to(root).as_posix()
+        size = path.stat().st_size
+        total += size
+        files.append((relative, size, _sha256_path(path)))
+        if len(files) > _MAX_ARTIFACT_FILES or total > _MAX_ARTIFACT_BYTES:
+            _fail("native_artifact_too_large", "Native Host payload exceeds bounded artifact limits")
+    payload = {
+        "files": [{"path": path, "size_bytes": size, "sha256": digest} for path, size, digest in files],
+        "total_size_bytes": total,
+    }
+    return tuple(files), total, _document_digest(payload)
 
 
 def _load_manifest(path: Path) -> dict[str, Any]:
@@ -157,7 +189,7 @@ def verify_native_artifact(
 ) -> VerifiedNativeArtifact:
     manifest = _absolute_path(manifest_path, field="artifact_manifest")
     document = _load_manifest(manifest)
-    expected_fields = {
+    base_fields = {
         "schema",
         "runtime_id",
         "generation_id",
@@ -175,14 +207,19 @@ def verify_native_artifact(
         "production_activation_performed",
         "manifest_sha256",
     }
+    schema = document.get("schema")
+    kind = document.get("artifact_kind")
+    expected_fields = base_fields if schema == NATIVE_ARTIFACT_SCHEMA_V1 else base_fields | {"payload"}
     if set(document) != expected_fields or (
-        document.get("schema") != NATIVE_ARTIFACT_SCHEMA
+        schema not in {NATIVE_ARTIFACT_SCHEMA_V1, NATIVE_ARTIFACT_SCHEMA}
         or document.get("runtime_id") != RUNTIME_ID
         or document.get("generation_id") != GENERATION_ID
         or document.get("protocol_generation") != PROTOCOL_GENERATION
         or document.get("native_host_name") != NATIVE_HOST_NAME
         or document.get("browser_extension_id") != BROWSER_EXTENSION_ID
-        or document.get("artifact_kind") != "pyinstaller-onefile"
+        or kind not in {"pyinstaller-onefile", "pyinstaller-onedir"}
+        or (schema == NATIVE_ARTIFACT_SCHEMA_V1 and kind != "pyinstaller-onefile")
+        or (schema == NATIVE_ARTIFACT_SCHEMA and kind != "pyinstaller-onedir")
         or document.get("entrypoint") != NATIVE_ENTRYPOINT
         or document.get("platform") != "windows-x86_64"
         or document.get("production_activation_performed") is not False
@@ -214,7 +251,43 @@ def verify_native_artifact(
     observed_size = executable_path.stat().st_size
     observed_digest = _sha256_path(executable_path)
     if observed_size != size or observed_digest != expected_digest:
-        _fail("native_artifact_tampered", "Native Host onefile bytes differ from artifact manifest")
+        _fail("native_artifact_tampered", "Native Host executable bytes differ from artifact manifest")
+    if schema == NATIVE_ARTIFACT_SCHEMA_V1:
+        payload_files = ((NATIVE_EXECUTABLE_NAME, observed_size, observed_digest),)
+        payload_size = observed_size
+        payload_sha = _document_digest({
+            "files": [{"path": NATIVE_EXECUTABLE_NAME, "size_bytes": observed_size, "sha256": observed_digest}],
+            "total_size_bytes": observed_size,
+        })
+    else:
+        payload = document.get("payload")
+        if not isinstance(payload, dict) or set(payload) != {"files", "total_size_bytes", "sha256"}:
+            _fail("artifact_manifest_invalid", "Native Host onedir payload receipt is invalid")
+        records = payload.get("files")
+        declared_total = payload.get("total_size_bytes")
+        declared_sha = _digest(payload.get("sha256"), "payload.sha256")
+        if not isinstance(records, list) or not records or len(records) > _MAX_ARTIFACT_FILES:
+            _fail("artifact_manifest_invalid", "Native Host onedir file inventory is invalid")
+        declared: list[tuple[str, int, str]] = []
+        seen: set[str] = set()
+        for item in records:
+            if not isinstance(item, dict) or set(item) != {"path", "size_bytes", "sha256"}:
+                _fail("artifact_manifest_invalid", "Native Host onedir file receipt is invalid")
+            relative = item.get("path")
+            item_size = item.get("size_bytes")
+            item_sha = _digest(item.get("sha256"), "payload.files.sha256")
+            if not isinstance(relative, str) or not relative or relative.startswith(("/", "\\")) or ".." in Path(relative).parts or relative in seen:
+                _fail("artifact_manifest_invalid", "Native Host onedir path is invalid")
+            if isinstance(item_size, bool) or not isinstance(item_size, int) or item_size < 0:
+                _fail("artifact_manifest_invalid", "Native Host onedir file size is invalid")
+            seen.add(relative)
+            declared.append((relative, item_size, item_sha))
+        observed_files, observed_total, observed_payload_sha = _payload_inventory(manifest.parent, manifest_name=manifest.name)
+        if tuple(declared) != observed_files or declared_total != observed_total or declared_sha != observed_payload_sha:
+            _fail("native_artifact_tampered", "Native Host onedir payload differs from artifact manifest")
+        payload_files = observed_files
+        payload_size = observed_total
+        payload_sha = observed_payload_sha
     return VerifiedNativeArtifact(
         manifest_path=manifest,
         executable_path=executable_path,
@@ -223,6 +296,11 @@ def verify_native_artifact(
         executable_sha256=observed_digest,
         executable_size_bytes=observed_size,
         manifest_sha256=supplied_manifest_digest,
+        artifact_kind=str(kind),
+        payload_root=manifest.parent,
+        payload_files=payload_files,
+        payload_sha256=payload_sha,
+        payload_size_bytes=payload_size,
     )
 
 
@@ -231,7 +309,7 @@ def build_windows_native_artifact(
     repo_root: str | Path,
     output_root: str | Path,
 ) -> VerifiedNativeArtifact:
-    """Build one frozen vNext Native Host artifact from one clean Git subject."""
+    """Build one extraction-free vNext Native Host payload from one Git subject."""
 
     if os.name != "nt":
         _fail("windows_required", "vNext Native Host artifact build requires Windows")
@@ -260,7 +338,7 @@ def build_windows_native_artifact(
             "PyInstaller",
             "--noconfirm",
             "--clean",
-            "--onefile",
+            "--onedir",
             "--console",
             "--name",
             NATIVE_EXECUTABLE_NAME.removesuffix(".exe"),
@@ -289,15 +367,29 @@ def build_windows_native_artifact(
         )
         if completed.returncode != 0:
             tail = completed.stdout.decode("utf-8", errors="replace")[-4000:]
-            raise M11cArtifactError("pyinstaller_build_failed", f"vNext Native Host onefile build failed: {tail}")
-        built = dist / NATIVE_EXECUTABLE_NAME
-        if not built.is_file():
+            raise M11cArtifactError("pyinstaller_build_failed", f"vNext Native Host onedir build failed: {tail}")
+        built_root = dist / NATIVE_EXECUTABLE_NAME.removesuffix(".exe")
+        built = built_root / NATIVE_EXECUTABLE_NAME
+        if not built_root.is_dir() or not built.is_file():
             _fail("pyinstaller_output_missing", "PyInstaller did not produce the expected Native Host executable")
+        for source in sorted(built_root.rglob("*")):
+            relative = source.relative_to(built_root)
+            destination = output / relative
+            if source.is_dir():
+                destination.mkdir(parents=True, exist_ok=True)
+            elif source.is_file():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
         target = output / NATIVE_EXECUTABLE_NAME
-        shutil.copyfile(built, target)
 
     size = target.stat().st_size
     digest = _sha256_path(target)
+    payload_files, payload_size, payload_sha = _payload_inventory(output)
+    payload_receipt = {
+        "files": [{"path": path, "size_bytes": item_size, "sha256": item_sha} for path, item_size, item_sha in payload_files],
+        "total_size_bytes": payload_size,
+        "sha256": payload_sha,
+    }
     payload = {
         "schema": NATIVE_ARTIFACT_SCHEMA,
         "runtime_id": RUNTIME_ID,
@@ -305,7 +397,7 @@ def build_windows_native_artifact(
         "protocol_generation": PROTOCOL_GENERATION,
         "native_host_name": NATIVE_HOST_NAME,
         "browser_extension_id": BROWSER_EXTENSION_ID,
-        "artifact_kind": "pyinstaller-onefile",
+        "artifact_kind": "pyinstaller-onedir",
         "source_head": subject["source_head"],
         "source_tree": subject["source_tree"],
         "entrypoint": NATIVE_ENTRYPOINT,
@@ -313,6 +405,7 @@ def build_windows_native_artifact(
         "pyinstaller_version": str(PyInstaller.__version__),
         "platform": "windows-x86_64",
         "executable": {"name": NATIVE_EXECUTABLE_NAME, "size_bytes": size, "sha256": digest},
+        "payload": payload_receipt,
         "production_activation_performed": False,
     }
     document = {**payload, "manifest_sha256": _document_digest(payload)}
@@ -388,7 +481,11 @@ def materialize_runtime_bundle(
     if output.exists():
         _fail("runtime_bundle_exists", "runtime bundle output already exists")
     output.mkdir(parents=True)
-    shutil.copyfile(artifact.executable_path, output / NATIVE_EXECUTABLE_NAME)
+    for relative, _size, _digest_value in artifact.payload_files:
+        source = artifact.payload_root / Path(relative)
+        destination = output / Path(relative)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
     shutil.copyfile(artifact.manifest_path, output / NATIVE_ARTIFACT_MANIFEST)
     provenance_payload = {
         "schema": RUNTIME_PROVENANCE_SCHEMA,
@@ -453,6 +550,7 @@ __all__ = [
     "M11cArtifactError",
     "NATIVE_ARTIFACT_MANIFEST",
     "NATIVE_ARTIFACT_SCHEMA",
+    "NATIVE_ARTIFACT_SCHEMA_V1",
     "NATIVE_EXECUTABLE_NAME",
     "VerifiedNativeArtifact",
     "build_windows_native_artifact",
