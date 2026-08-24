@@ -602,6 +602,16 @@ function projectAnnounce(message, state = "neutral") {
   output.dataset.state = state;
 }
 
+function projectExactPromptHtml(prompt) {
+  return prompt
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;")
+    .replaceAll("\n", "<br>");
+}
+
 function projectInsertExact(composer, prompt) {
   if (!composer || projectComposerHasForeignState(composer)) return false;
   composer.focus();
@@ -615,7 +625,7 @@ function projectInsertExact(composer, prompt) {
   } else {
     let inserted = false;
     try {
-      inserted = document.execCommand("insertText", false, prompt);
+      inserted = document.execCommand("insertHTML", false, projectExactPromptHtml(prompt));
     } catch (_error) {
       inserted = false;
     }

@@ -950,6 +950,12 @@ def test_vnext_selected_project_launch_inserts_exact_multiline_prompt_without_se
             }
             const composer = new Element();
             composer.textContent = process.argv[3] || "";
+            let insertionMode = null;
+            composer.dispatchEvent = (event) => {
+              if (event instanceof context.InputEvent && insertionMode !== "insertHTML") {
+                composer.textContent = composer.textContent.replaceAll("\n", " ");
+              }
+            };
             const messages = [];
             const listeners = [];
             const store = {};
@@ -976,7 +982,24 @@ def test_vnext_selected_project_launch_inserts_exact_multiline_prompt_without_se
                 querySelector: () => null,
                 querySelectorAll: (selector) => selector === "pre code" ? [] : (selector.includes("contenteditable") ? [composer] : []),
                 createElement: () => new Element(),
-                execCommand: () => false
+                execCommand(command, _showUi, value) {
+                  insertionMode = command;
+                  if (command === "insertText") {
+                    composer.textContent = String(value).replaceAll("\n", " ");
+                    return true;
+                  }
+                  if (command === "insertHTML") {
+                    composer.textContent = String(value)
+                      .replaceAll("<br>", "\n")
+                      .replaceAll("&#39;", "'")
+                      .replaceAll("&quot;", '"')
+                      .replaceAll("&gt;", ">")
+                      .replaceAll("&lt;", "<")
+                      .replaceAll("&amp;", "&");
+                    return true;
+                  }
+                  return false;
+                }
               },
               MutationObserver: class { observe() {} },
               setInterval: (fn) => ({ unref() {}, fn }),
