@@ -1,0 +1,170 @@
+# BDB vNext — produkcyjny runtime Windows
+
+Status: **CURRENT**  
+Source baseline: `56994a1b6abbfb275a974781c752d106fb48e201`
+
+## 1. Canonical runtime root
+
+Domyślny vNext runtime root na Windows:
+
+```text
+%LOCALAPPDATA%\BartoszDevBridge-vNext
+```
+
+Legacy runtime jest osobny:
+
+```text
+%LOCALAPPDATA%\BartoszDevBridge
+```
+
+Te rooty nie mogą się nakładać.
+
+## 2. Produkcyjny client layout
+
+Current client staging/deployment primitives używają layoutu:
+
+```text
+%LOCALAPPDATA%\BartoszDevBridge-vNext\
+├─ clients\
+│  ├─ browser-extension\
+│  ├─ native-host\
+│  │  ├─ <native executable>
+│  │  └─ com.bartosz.dev_bridge.vnext.json
+│  └─ client-plan.json
+└─ config\
+   └─ native-host.json
+```
+
+Browser extension ładowana przez operatora powinna pochodzić z produkcyjnego `clients\browser-extension`, a nie z katalogu roboczego Codexa.
+
+## 3. Identity
+
+Canonical vNext identities:
+
+```text
+source branch: bdb-vnext
+generation: bdb-vnext-g1
+protocol: bdb-vnext-protocol-v1
+runtime id: devmaster.bdb.vnext.runtime
+native host: com.bartosz.dev_bridge.vnext
+browser extension id: mopnolkjddkmgojfjkenjobehhmmklll
+```
+
+Browser `manifest.json` zawiera pinned public key, z którego wynika stały extension ID.
+
+## 4. Source HEAD != installed runtime
+
+GitHub branch HEAD opisuje najnowsze źródło. Nie dowodzi, że identyczne bytes są już uruchomione na komputerze.
+
+Installed runtime należy weryfikować przez source identity i digests zapisane w client/runtime evidence, m.in. `client-plan.json`, manifestach i odpowiednich activation records.
+
+Dokumentacja nie powinna mówić „produkcja jest na HEAD X” tylko dlatego, że branch wskazuje X.
+
+## 5. Staging vs live production
+
+`stage_client_plan()` przygotowuje dokładne Browser/Native bytes, config i client plan. Sam staging nie jest aktywacją produktu.
+
+Katalogi takie jak:
+
+```text
+.codex\visualizations\...
+staging\clients\<sha>\...
+```
+
+mogą być tymczasowym build/recovery inputem, ale nie powinny być opisywane jako finalny live runtime produktu.
+
+Po świadomym deploymentcie docelowe live components powinny znajdować się pod canonical runtime root.
+
+## 6. Native Messaging route
+
+Dedicated vNext manifest:
+
+```text
+%LOCALAPPDATA%\BartoszDevBridge-vNext\clients\native-host\com.bartosz.dev_bridge.vnext.json
+```
+
+Na Windows należy weryfikować odpowiednie HKCU registry views używane przez Chrome. Route ma wskazywać dedicated vNext manifest i pinned extension origin.
+
+Legacy host `com.bartosz.dev_bridge` nie jest vNext hostem i nie powinien być fallbackiem dla vNext Project Execution.
+
+## 7. Native config
+
+`config\native-host.json` używa schema `bdb-vnext-native-host-config-v2` i wiąże:
+
+- `runtime_root`;
+- `legacy_runtime_root`;
+- zewnętrzny `bootstrap_authority_root`;
+- generation/protocol;
+- vNext native host name;
+- pinned browser extension ID.
+
+Config musi używać absolute paths i zachować izolację vNext/Legacy/Bootstrap.
+
+## 8. Produkcyjna aktywacja
+
+BDB vNext rozdziela zbudowanie klienta od production acceptance.
+
+Native Host opisuje trzy niezależne warunki admission:
+
+1. zewnętrzny M11c ProgramData Bootstrap jest `ACTIVE`;
+2. M9b Browser/Native client gate jest `ACTIVE`;
+3. canonical M3c intake/admission jest enabled.
+
+Dopiero zgodność authority może oznaczać produkcyjny acceptance. Sam poprawny handshake albo zarejestrowany Native route nie wystarcza.
+
+## 9. Control Center authority summary
+
+Technical Control Center potrafi read-only obserwować:
+
+- Bootstrap ACTIVE/source identity;
+- M9b state i writer/intake;
+- M3c admission;
+- Native route;
+- wyliczony production acceptance;
+- warnings.
+
+Projection nie ma Legacy fallback i nie powinna automatycznie naprawiać runtime podczas odczytu.
+
+## 10. Browser installation/update
+
+Bieżący model Browsera to operator-loaded unpacked extension. Po aktualizacji produkcyjnych bytes Chrome musi korzystać z:
+
+```text
+%LOCALAPPDATA%\BartoszDevBridge-vNext\clients\browser-extension
+```
+
+Po reload należy sprawdzić extension ID i real Browser smoke, ponieważ automated source tests nie dowodzą zgodności aktualnego DOM ChatGPT.
+
+## 11. Build i disk guard
+
+Build/deployment może mieć lokalne safety guards, np. minimalną ilość wolnego miejsca. Guard nie powinien być obchodzony przez obniżenie progu lub przypadkowe usuwanie danych użytkownika.
+
+Jeżeli build jest zablokowany, source commit może być poprawny i wypchnięty na GitHub, podczas gdy installed runtime pozostaje na wcześniejszej wersji. Te dwa statusy muszą być raportowane oddzielnie.
+
+## 12. Co sprawdzać po deploymentcie
+
+Minimalna checklista:
+
+```text
+source HEAD/tree
+browser bundle digest
+native executable digest
+native manifest digest
+native config digest
+client plan digest
+extension ID
+HKCU native route
+Native status/handshake
+Bootstrap state
+M9b writer/intake state
+M3c admission state
+production acceptance
+```
+
+Real ChatGPT Browser E2E jest osobnym testem po deploymentcie i nie powinien być deklarowany jako PASS wyłącznie na podstawie unit/integration tests.
+
+## 13. Project runtime state vs client deployment
+
+Aktualizacja Browser/Native/GUI nie może sama w sobie ręcznie przepisywać Project Memory. Project Memory i Project Execution są danymi runtime projektów, natomiast client package jest deploymentem aplikacji BDB.
+
+Recovery projektu powinno korzystać z canonical workflow/coordinator primitives, a nie z ręcznej edycji JSON state files.
