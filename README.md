@@ -1,240 +1,222 @@
-# Bartosz Dev Bridge
+# Bartosz Dev Bridge — BDB vNext
 
-Lokalny Bridge dla ChatGPT Plus i GitHuba, rozwinięty od POC-0 do trwałego runtime’u z bezpieczną pętlą lokalnego workspace.
+BDB vNext jest lokalnym systemem łączącym zwykły ChatGPT, planowanie w Work, canonical stan projektu, wykonanie zadań oraz Browser/Native transport na Windows.
 
-Aktualna faza:
+Branch bieżącego rozwoju: `bdb-vnext`.
 
-```text
-Local Workspace Loop — bounded context, tested edits, rollback repair and verified local promotion
-```
+> Repo zawiera również dużą ilość kodu i dokumentacji wcześniejszych generacji (POC, Local Workspace Loop, Browser 0.4.x, Control Center 0.2/0.3). Nie należy traktować ich jako opisu aktualnego BDB vNext. Zacznij od [`docs/DOCUMENTATION_STATUS.md`](docs/DOCUMENTATION_STATUS.md).
 
-## Działający zakres
+## Jak działa vNext
 
-- durable Git ingestion i immutable command identity;
-- single queue i jeden aktywny worker;
-- izolowane session worktree;
-- atomic exact-byte patching;
-- plan/effect recovery bez podwójnej revision;
-- immutable result staging i durable outbox;
-- fast-forward result publication i collision detection;
-- service lifecycle `RUNNING → STOPPING → OFFLINE`;
-- wspólny OS lock i heartbeat;
-- Windows foreground i background jako zwykły proces użytkownika;
-- siedmiosesyjna recovery gate A–G z rzeczywistymi restartami;
-- jawne session finalization;
-- persisted `preserve` jako polityka domyślna;
-- bezpieczny, opt-in i crash-recoverable cleanup wyłącznie sesji `COMPLETED`;
-- immutable repository snapshots, tracked files, Python symbols i outline;
-- statyczne importy, references, callers, dependency graph i deterministyczne search;
-- bounded context pack oraz large-repository gate;
-- canonical multi-file patch planning z exact before/after bytes;
-- trwały Journal v9, crash-recoverable batch apply/rollback i session-scoped recovery;
-- finalna bramka `multi_file_patch` z bounded profilem, commitem przy sukcesie i pełnym rollbackiem przy failure;
-- trwały Journal v10 dla immutable profile outcome;
-- osobny, walidowany wynik batchu publikowany przez wspólny durable outbox;
-- bounded lokalny snapshot dla Native Hosta bez ujawniania ścieżek absolutnych;
-- kompaktowe karty akcji oraz bounded, opt-in AUTO w rozszerzeniu;
-- automatyczna pętla naprawcza wyłącznie po potwierdzonym rollbacku;
-- idempotentny promoter: dokładny commit i wyłącznie `git merge --ff-only` do czystego checkoutu;
-- trwałe receipts promocji z commitem, plikami i hashami;
-- operator Windows `Prepare`, `Start`, `Status`, `Stop` dla trwałych aliasów projektów.
-
-## CLI
+Główny przepływ projektu:
 
 ```text
-bdb bridge start --config <path> --foreground
-bdb bridge start --config <path> --background   # Windows
-bdb bridge stop --config <path>
-bdb bridge status --config <path> [--json]
-
-bdb bridge session finalize --config <path> --session-id <uuid>
-
-bdb bridge workspace status --config <path> --session-id <uuid> [--json]
-bdb bridge workspace preserve --config <path> --session-id <uuid>
-bdb bridge workspace cleanup --config <path> --session-id <uuid> --confirm-session-id <uuid>
-
-bdb bridge edit status --config <path> --command-id <session-uuid:sequence> [--json]
-
-bdb bridge repo index --config <path> [--ref HEAD] [--json]
-bdb bridge repo status --config <path> [--ref HEAD] [--json]
-bdb bridge repo files --config <path> [--ref HEAD] [--json]
-bdb bridge repo outline --config <path> --path <posix-path> [--ref HEAD] [--json]
-bdb bridge repo analyze --config <path> [--ref HEAD] [--json]
-bdb bridge repo search --config <path> [--ref HEAD] --query <text> [--kind all|file|symbol] [--limit 50] [--json]
-bdb bridge repo references --config <path> [--ref HEAD] (--symbol-id <id> | --path <path> --qualified-name <name>) [--direction incoming|outgoing] [--kind <kind>] [--limit 100] [--json]
-bdb bridge repo callers --config <path> [--ref HEAD] (--symbol-id <id> | --path <path> --qualified-name <name>) [--limit 100] [--json]
-bdb bridge repo dependencies --config <path> [--ref HEAD] --path <path> [--direction incoming|outgoing] [--depth 1] [--edge-kind all|import|call|reference] [--max-nodes 200] [--json]
-bdb bridge repo context --config <path> [--ref HEAD] (--query <text> | --symbol-id <id> | --path <path> [--qualified-name <name>]) [--direction incoming|outgoing|both] [--depth 2] [--max-files 20] [--max-bytes 65536] [--max-excerpt-lines 80] [--json]
-bdb bridge repo gate --config <path> [--ref HEAD] [--max-files 200000] [--max-symbols 2000000] [--max-relationships 5000000] [--json]
+Project Center
+→ Project Brief
+→ zwykły ChatGPT: planning directive
+→ BDB: Przygotuj dla Work
+→ Work: project-plan.json
+→ BDB validation/import
+→ Project Memory: immutable plan history
+→ Start / Continue / AUTO milestone
+→ Project Execution binding
+→ ChatGPT wykonuje bieżący task
+→ bdb-project-execution-submission-v1
+→ acceptance / replay / recovery
+→ następny task lub stop
 ```
 
-Indeks repozytorium (GHB1-A) opisuje dokładny commit Git wskazany przez `--ref` w `fixture_repo_path`. Szczegóły: [docs/GHB1A_REPOSITORY_INDEX.md](docs/GHB1A_REPOSITORY_INDEX.md).
+### Podział odpowiedzialności
 
-Relacje kodu (GHB1-B) są budowane wyłącznie na immutable snapshotach GHB1-A. Szczegóły: [docs/GHB1B_CODE_RELATIONSHIPS.md](docs/GHB1B_CODE_RELATIONSHIPS.md).
+- **zwykły ChatGPT** — analiza, architektura, planning directive i praca nad bieżącym zadaniem;
+- **Work** — tworzenie lub aktualizacja kompletnego `project-plan.json`; nie jest execution authority;
+- **ProjectCatalog** — metadane projektu i summary;
+- **Project Memory** — canonical historia planów, decyzje, zdarzenia i execution subdocument;
+- **Project Execution** — bindingi, attempts, acceptance, task statuses, milestone AUTO, watchdog i durable launch handoff;
+- **Git** — authority dla rzeczywistych bytes/HEAD projektu;
+- **Browser Extension vNext** — wykrywanie resultów, bezpieczny submit, prompt handoff i AUTO Send;
+- **Native Host vNext** — pinned lokalny transport do canonical BDB runtime.
 
-Context pack i końcowa bramka większego repozytorium (GHB1-C) są opisane w [docs/GHB1C_CONTEXT_PACK.md](docs/GHB1C_CONTEXT_PACK.md).
+## Project Plan
 
-Trwały checkpoint, fizyczny batch apply, rollback, commit CAS i recovery są opisane w [docs/GHB2C_DURABLE_BATCH_RECOVERY.md](docs/GHB2C_DURABLE_BATCH_RECOVERY.md).
-
-Finalna aktywacja `multi_file_patch`, durable profile outcome, wynik batchu i operator status są opisane w [docs/GHB2D_FINAL_EDITING_GATE.md](docs/GHB2D_FINAL_EDITING_GATE.md).
-
-## Local Workspace Loop
-
-Jednorazowe podłączenie czystego lokalnego repo:
-
-```powershell
-.\scripts\Invoke-BDBWorkspaceLoop.ps1 `
-  -Action Prepare `
-  -Root "$env:LOCALAPPDATA\BartoszDevBridge\workspaces\calculator" `
-  -Repo "C:\Projekty\Kalkulator test" `
-  -Alias "calculator" `
-  -AllowedPath @("*.py", "tests/*.py", "README.md", ".gitignore")
-```
-
-Codzienny lifecycle:
-
-```powershell
-.\scripts\Invoke-BDBWorkspaceLoop.ps1 -Action Start  -Root <workspace-loop-root>
-.\scripts\Invoke-BDBWorkspaceLoop.ps1 -Action Status -Root <workspace-loop-root>
-.\scripts\Invoke-BDBWorkspaceLoop.ps1 -Action Stop   -Root <workspace-loop-root>
-```
-
-Po `READY` ChatGPT może w jednej bounded pętli pobrać lokalny kontekst, wykonać dokładny odczyt, zmienić kilka plików, uruchomić allowlistowany profil, przeanalizować bezpiecznie wycofaną porażkę, ponowić poprawkę i zakończyć dopiero po receipt potwierdzającym fast-forward właściwego lokalnego checkoutu.
-
-Pełny kontrakt, przykłady akcji, reguły AUTO, promocji i bezpieczeństwa: [docs/LOCAL_WORKSPACE_LOOP.md](docs/LOCAL_WORKSPACE_LOOP.md).
-
-## Lokalny end-to-end POC
-
-Na Windows pełny syntetyczny POC można uruchomić jedną komendą:
-
-```powershell
-.\scripts\Invoke-BDBLocalE2E.ps1
-```
-
-Bramka automatycznie używa `.venv\Scripts\python.exe`, tworzy wyłącznie tymczasowe repozytoria i sprawdza lokalny transport Git, finalny `multi_file_patch`, rollback, durable recovery oraz foreground lifecycle. Szczegóły: [docs/LOCAL_E2E_POC.md](docs/LOCAL_E2E_POC.md).
-
-## Trwały pilot operatorski
-
-Po zielonym lokalnym POC można uruchomić trwały, zachowywany przebieg poza checkoutem Bridge:
-
-```powershell
-.\scripts\Invoke-BDBPersistentPilot.ps1
-```
-
-Pilot uruchamia prawdziwy proces `bdb`, osobne repo źródłowe, osobny bare remote Git, finalny `multi_file_patch`, profil `poc_pytest`, publikację wyniku i graceful stop. Pozostawia worktree, Journal, logi i `pilot-report.json`; nie dotyka repozytoriów biznesowych ani `bartosz-dev-poc-control`. Szczegóły: [docs/PERSISTENT_OPERATOR_PILOT.md](docs/PERSISTENT_OPERATOR_PILOT.md).
-
-## Prywatny transport GitHub
-
-Po zielonym trwałym pilocie można uruchomić Bridge w tle przeciwko osobnemu prywatnemu repozytorium `commands/results`:
-
-```powershell
-.\scripts\Invoke-BDBGitHubPilot.ps1
-```
-
-Bootstrap tworzy wyłącznie sztuczne repo źródłowe, klonuje prywatny kanał GitHub, generuje kanoniczny manifest i `multi_file_patch`, zapisuje ich dokładne ścieżki oraz uruchamia zwykły proces użytkownika w stanie `RUNNING`. Komenda jest następnie dostarczana przez konektor GitHub, a wynik odczytywany z gałęzi `results`. Szczegóły: [docs/GITHUB_REMOTE_PILOT.md](docs/GITHUB_REMOTE_PILOT.md).
-
-Tryb background nie tworzy Windows Service, Scheduled Task ani procesu administracyjnego. Child sam zdobywa platformowy lock i prowadzi graceful lifecycle.
-
-## Kolejność service loop
+Canonical format planu to JSON schema:
 
 ```text
-recovery → pending outbox → ingestion → execution → wait
+bdb-project-plan-v1
 ```
 
-Pomiędzy bezpiecznymi fazami sprawdzany jest trwały stop. Żądanie zapisane podczas execution nie przerywa patcha ani profilu w połowie; faza kończy się bezpiecznie, a następnie service przechodzi do końcowego `OFFLINE` bez dodatkowego pełnego idle delay.
+Plan jest immutable planning baseline/history. Postęp wykonania nie jest księgowany przez ręczne przepisywanie planu — runtime progress należy do Project Memory / Project Execution.
 
-## Recovery gate
+Work dostaje canonical identity, Project Brief, bieżący plan (przy update), planning directive oraz dokładny schema contract. Ma zwrócić jeden kompletny JSON plan, bez implementacji kodu.
 
-Macierz wykonuje świeże, procesowe scenariusze:
+Szczegóły: [`docs/VNEXT_PROJECT_WORKFLOW.md`](docs/VNEXT_PROJECT_WORKFLOW.md).
+
+## Project Execution
+
+Każde wykonanie jest związane z dokładną identity, m.in.:
 
 ```text
-A  DISCOVERED przed validation
-B  CLAIMED
-C  temp write przed atomic replace
-D  atomic replace przed EFFECT_RECORDED
-E  EFFECT_RECORDED przed profile/result
-F  RESULT_STAGED przed publish
-G  remote push przed local publication ACK
+project_id
+plan_version
+task_id
+execution_binding_id
+launch_id
+correlation_id
+command_id
+repo_alias
+expected_repo_head_before
+conversation_id
 ```
 
-Każdy case korzysta z nowego syntetycznego fixture repo, bare/control repo, Journalu, worktree, session ID i procesu foreground. Po fault exit uruchamiany jest nowy proces, a po sukcesie kolejny restart sprawdza no-op. Bramka potwierdza pojedynczy patch, revision, plan, effect, result, outbox i publish oraz exact remote bytes/hash/path.
-
-GHB2-D rozszerza recovery o trwały batch checkpoint, profile outcome, rollback i staging wyniku. Profile nie jest wykonywany ponownie po zapisaniu Journal v10, a committed batch nie zwiększa revision drugi raz.
-
-Dodatkowe scenariusze obejmują persisted transport retry, command collision, result collision, divergent workspace i drugi proces blokowany przez OS lock.
-
-Windows gate:
-
-```powershell
-.\scripts\Invoke-GHB0RecoveryGate.ps1
-.\scripts\Invoke-GHB0RecoveryGate.ps1 -Python ".venv\Scripts\python.exe"
-```
-
-## Workspace lifecycle v6
-
-Journal v6 dodaje trwały rekord lifecycle z immutable identity: session, exact absolute path, base SHA, revision i state hash.
-
-Dyspozycje:
+ChatGPT kończy task jednym blokiem JSON:
 
 ```text
-preserve | cleanup
+bdb-project-execution-submission-v1
 ```
 
-Stany:
+BDB sprawdza identity, HEAD, result digest i acceptance criteria. Exact replay nie tworzy drugiego attemptu.
+
+## Milestone AUTO
+
+AUTO jest jawnie uruchamiane dla bieżącego milestone i działa sekwencyjnie — bez równoległego wykonywania tasków i bez automatycznego startu następnego milestone.
+
+Docelowy happy path:
 
 ```text
-preserved | cleanup_requested | removing | removed | blocked
+canonical result
+→ automatic result submit
+→ PASS acceptance
+→ ensure/recover one next launch
+→ exact prompt insertion
+→ composer/conversation/binding guard
+→ automatic Send
+→ durable handoff SENT / ACK
+→ kolejny task
 ```
 
-Domyślna polityka to `preserve`. Restart, stop, collision, transport error i manual reconciliation nie usuwają worktree.
+AUTO zatrzymuje się przy m.in. FAIL/blocked, review, NEEDS_USER, manual confirmation, gate/open question, stale state, policy stop, transport failure albo `STOP AUTO`.
 
-## Session finalization
+Nie ma globalnego limitu liczby iteracji ani całkowitego czasu milestone; bounded pozostają pojedyncze operacje techniczne.
 
-Finalizacja jest jawna i transakcyjna:
+Szczegóły: [`docs/VNEXT_AUTO_BROWSER_NATIVE.md`](docs/VNEXT_AUTO_BROWSER_NATIVE.md).
+
+## Browser vNext
+
+Źródło:
 
 ```text
-ACTIVE → COMPLETING → COMPLETED
+browser_extension_vnext/
 ```
 
-Wymaga service `OFFLINE`, wspólnego OS locka i braku unresolved command, pending/collision outbox, blocking ingestion issue oraz manual reconciliation. `RESULT_PUBLISHED` pozostaje bez protocol ACK. Finalizacja zapisuje `preserve` i nie usuwa worktree ani Journalu.
-
-## Safe cleanup
-
-Cleanup wymaga exact confirmation tego samego UUID, stanu `COMPLETED`, service `OFFLINE`, zdobytego wspólnego locka i pełnej eligibility. Sprawdzane są m.in. exact path, brak reparse points, source cleanliness, dokładnie jedna detached registration na exact base SHA, brak unauthorized/temp paths oraz zgodność physical state hash.
-
-Jedyna operacja fizyczna:
+Identity:
 
 ```text
-git -C <fixture_repo> worktree remove --force <exact_workspace_path>
+Bartosz Dev Bridge vNext
+Extension ID: mopnolkjddkmgojfjkenjobehhmmklll
+Manifest V3
 ```
 
-Bridge nie używa `shutil.rmtree`, `Remove-Item -Recurse`, `rmdir /s`, `git reset`, `git clean` ani `git worktree prune`. Cleanup jest odzyskiwany po awarii przed startem, po `removing` oraz po fizycznym remove przed local DB ACK.
+Rozszerzenie działa tylko na `https://chatgpt.com/*`, używa `nativeMessaging` i `storage` oraz nie traktuje DOM/local storage jako canonical Project authority.
 
-## Granice bezpieczeństwa
+Manual `Submit result` pozostaje fallbackiem; aktywny AUTO może wykonać tę samą canonical submission path automatycznie.
 
-Local Workspace Loop nadal nie dodaje:
+## Native Host vNext
 
-- protocol ACK ani automatycznego `ACKNOWLEDGED`;
-- automatycznego cleanupu lub retention;
-- cleanupu aktywnych albo manual sessions;
-- Windows Service, Scheduled Task, tray, installera ani autostartu;
-- arbitrary shell ani `shell=True` z rozmowy;
-- arbitralnego wyboru profilu testowego;
-- wielu workerów i równoległych mutacji tego samego checkoutu;
-- HTTP/WebSocket remote control;
-- wykonywania lub importowania kodu analizowanego repozytorium poza bounded profilem `poc_pytest`;
-- Hermesa, GicleeApp, Browser Lab, Playwright, LSP ani embeddings;
-- zależności runtime `bdb_bridge → bdb_poc`.
+Dedicated host:
 
-Legacy POC-0A i POC-0B pozostają regresjami przez `poc_bridge.py` oraz `bdb_poc.PocBridge`.
+```text
+com.bartosz.dev_bridge.vnext
+```
 
-Dokumentacja operatorska:
+Bieżący Native transport obsługuje m.in. status/handshake, canonical admission, project launch claim/ack oraz project execution status/submit.
 
-- `docs/GHB0_WINDOWS_RUNBOOK.md`;
-- `docs/GHB0_RECOVERY_GATE.md`;
-- `docs/GHB2C_DURABLE_BATCH_RECOVERY.md`;
-- `docs/GHB2D_FINAL_EDITING_GATE.md`;
-- `docs/LOCAL_E2E_POC.md`;
-- `docs/PERSISTENT_OPERATOR_PILOT.md`;
-- `docs/GITHUB_REMOTE_PILOT.md`;
-- `docs/LOCAL_WORKSPACE_LOOP.md`.
+Legacy host `com.bartosz.dev_bridge` nie jest hostem vNext Project Execution.
+
+## Produkcyjny runtime Windows
+
+Canonical vNext runtime root:
+
+```text
+%LOCALAPPDATA%\BartoszDevBridge-vNext
+```
+
+Docelowy client layout:
+
+```text
+BartoszDevBridge-vNext\
+├─ clients\
+│  ├─ browser-extension\
+│  ├─ native-host\
+│  └─ client-plan.json
+└─ config\
+   └─ native-host.json
+```
+
+Branch HEAD i aktualnie zainstalowany runtime są odrębnymi faktami. Wersję produkcyjną należy potwierdzać przez source identity/client plan/digests i aktywne authority, a nie przez założenie, że najnowszy commit jest już wdrożony.
+
+Production admission wymaga zgodności zewnętrznego Bootstrap ACTIVE, M9b Browser/Native gate oraz M3c intake/admission.
+
+Szczegóły: [`docs/VNEXT_PRODUCTION_RUNTIME.md`](docs/VNEXT_PRODUCTION_RUNTIME.md).
+
+## Control Center / Project Center
+
+`bdb-control-center` uruchamia project-centric GUI z widokami projektu i technicznym vNext Control Center.
+
+Project Center obsługuje m.in.:
+
+- tworzenie/otwieranie projektu;
+- import/update planu;
+- planning prompt i Work;
+- Start/Continue;
+- `AUTO: bieżący milestone` i `STOP AUTO`;
+- handoff;
+- review.
+
+Techniczny CC1 jest read-only projection nad canonical vNext state i nie ma Legacy fallback.
+
+## CLI / entrypoints
+
+Repo nadal zawiera wcześniejsze CLI oraz vNext entrypoints. Najważniejsze vNext entrypoints z pakietu to m.in.:
+
+```text
+bdb-control-center
+bdb-vnext-manifest
+bdb-vnext-bootstrap
+bdb-vnext-bootstrap-admin
+bdb-vnext-native-host
+bdb-vnext-cutover
+bdb-vnext-artifact
+bdb-vnext-m9a-handoff
+bdb-vnext-final-prepare
+bdb-vnext-legacy-recovery
+bdb-vnext-m12a
+bdb-vnext-m12a-closure
+bdb-vnext-maintenance
+```
+
+Ich obecność nie oznacza, że każda activation/writer/intake gate jest aktualnie włączona.
+
+## Current documentation
+
+- [Status i klasyfikacja dokumentacji](docs/DOCUMENTATION_STATUS.md)
+- [Bieżąca architektura vNext](docs/VNEXT_CURRENT_ARCHITECTURE.md)
+- [Project workflow](docs/VNEXT_PROJECT_WORKFLOW.md)
+- [AUTO / Browser / Native](docs/VNEXT_AUTO_BROWSER_NATIVE.md)
+- [Production runtime Windows](docs/VNEXT_PRODUCTION_RUNTIME.md)
+- [Frozen governance packet](docs/governance/README.md)
+- [ADR index](docs/adr/README.md)
+
+## Historyczna dokumentacja
+
+Milestone records, closure assessments, GHB/Local Workspace Loop, wcześniejsze Browser pilots i Control Center docs pozostają w repo jako historical evidence. Ich obecność nie nadaje im statusu bieżącego kontraktu.
+
+Najbardziej mylące generyczne dokumenty legacy Browser/Native oraz root POC start guides zostały usunięte z aktywnego drzewa; ich treść pozostaje w historii Git. Zobacz [`docs/legacy/README.md`](docs/legacy/README.md).
+
+## Znane luki bieżącego source baseline
+
+Dokumenty CURRENT są oparte na baseline `56994a1b6abbfb275a974781c752d106fb48e201`. Na tym source istnieją znane rozjazdy wymagające naprawy implementacji:
+
+- Browser receipt UI może myląco nazwać poprawnie przetworzony FAIL jako `Result accepted`;
+- blocked/review milestone projection może niespójnie pokazać `RUNNABLE` lub przesunąć cursor.
+
+Nie są to zamierzone reguły produktu. Canonical FAIL/blocked/review ma zatrzymywać AUTO.
