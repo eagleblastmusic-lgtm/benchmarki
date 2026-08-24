@@ -360,6 +360,26 @@ class ProjectLaunchQueueAdapter:
             self._write_state_unlocked(None, None)
             return True
 
+    def claim_matches(self, *, launch_id: str, claim_id: str) -> bool:
+        """Return whether the caller currently owns the pending launch lease."""
+        try:
+            launch_id = _uuid_text(launch_id, "launch_id")
+            claim_id = _uuid_text(claim_id, "claim_id")
+        except ValueError as exc:
+            raise ProjectLaunchQueueError("claim_id_invalid", str(exc)) from exc
+        with self._lock():
+            raw_pending, raw_claim = self._read_state_unlocked()
+            pending, claim = self._normalize_expiry(raw_pending, raw_claim)
+            if (pending, claim) != (raw_pending, raw_claim):
+                self._write_state_unlocked(pending, claim)
+            return bool(
+                pending is not None
+                and claim is not None
+                and pending.launch_id == launch_id
+                and claim.launch_id == launch_id
+                and claim.claim_id == claim_id
+            )
+
     @contextmanager
     def _lock(self) -> Iterator[None]:
         self.path.parent.mkdir(parents=True, exist_ok=True)

@@ -23,6 +23,7 @@ from .project_memory import ProjectMemoryState, ProjectMemoryStore, available_pr
 PROJECT_EXECUTION_SCHEMA = "bdb-project-execution-v1"
 PROJECT_EXECUTION_SUBMISSION_SCHEMA = "bdb-project-execution-submission-v1"
 PROJECT_EXECUTION_CHECKPOINT_SCHEMA = "bdb-project-execution-checkpoint-v1"
+PROJECT_LAUNCH_HANDOFF_SCHEMA = "bdb-project-launch-handoff-v1"
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _HEAD_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _CONVERSATION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
@@ -261,7 +262,7 @@ def execution_result_digest(binding: "ProjectExecutionBinding", result: Mapping[
 def _execution_document(state: ProjectMemoryState) -> dict[str, Any]:
     raw = state.execution if isinstance(state.execution, Mapping) else {}
     if not raw:
-        return {"schema": PROJECT_EXECUTION_SCHEMA, "bindings": [], "attempts": [], "acceptance_results": [], "checkpoints": {}, "task_statuses": {}, "gate_statuses": {}, "open_question_statuses": {}, "milestones_completed": [], "milestone_runs": {}}
+        return {"schema": PROJECT_EXECUTION_SCHEMA, "bindings": [], "attempts": [], "acceptance_results": [], "checkpoints": {}, "task_statuses": {}, "gate_statuses": {}, "open_question_statuses": {}, "milestones_completed": [], "milestone_runs": {}, "launch_handoffs": {}}
     if raw.get("schema", PROJECT_EXECUTION_SCHEMA) != PROJECT_EXECUTION_SCHEMA:
         _fail("execution_schema_invalid", "project execution state schema differs")
     result = dict(raw)
@@ -270,8 +271,11 @@ def _execution_document(state: ProjectMemoryState) -> dict[str, Any]:
     result.setdefault("acceptance_results", [])
     result.setdefault("checkpoints", {})
     result.setdefault("task_statuses", {})
+    result.setdefault("gate_statuses", {})
+    result.setdefault("open_question_statuses", {})
     result.setdefault("milestones_completed", [])
     result.setdefault("milestone_runs", {})
+    result.setdefault("launch_handoffs", {})
     for key in ("bindings", "attempts", "acceptance_results"):
         if not isinstance(result[key], list) or len(result[key]) > 512 or any(not isinstance(item, Mapping) for item in result[key]):
             _fail("execution_shape_invalid", f"execution.{key} is invalid")
@@ -281,7 +285,7 @@ def _execution_document(state: ProjectMemoryState) -> dict[str, Any]:
         _fail("execution_shape_invalid", "execution.milestone_runs is invalid")
     if not isinstance(result["checkpoints"], Mapping) or len(result["checkpoints"]) > 512:
         _fail("execution_shape_invalid", "execution.checkpoints is invalid")
-    for key in ("gate_statuses", "open_question_statuses"):
+    for key in ("gate_statuses", "open_question_statuses", "launch_handoffs"):
         if not isinstance(result[key], Mapping) or len(result[key]) > 512:
             _fail("execution_shape_invalid", f"execution.{key} is invalid")
     return result
@@ -488,6 +492,157 @@ class ProjectExecutionCoordinator:
             updated = replace(state, execution=execution)
             updated = memory._append_event(updated, "EXECUTION_CONVERSATION_BOUND", f"Powiązano rozmowę z zadaniem {current.task_id}", task_id=current.task_id, plan_version=current.plan_version, correlation_id=current.correlation_id)
             return updated, updated_binding
+
+        return memory.execution_transaction(transition)
+
+    def current_task_binding(self, project_id: str, task_id: str) -> ProjectExecutionBinding | None:
+        """Return the one active binding for a task, or fail closed if ambiguous."""
+        task = _identifier(task_id, "task_id")
+        _project, plan, memory = self._project(project_id)
+        execution = _execution_document(memory.read_state())
+        matches = [
+            _binding_from_dict(item)
+            for item in execution.get("bindings", [])
+            if item.get("project_id") == project_id
+            and item.get("plan_version") == plan.plan_version
+            and item.get("task_id") == task
+            and item.get("status", "ACTIVE") == "ACTIVE"
+            and item.get("superseded") is not True
+        ]
+        if len(matches) > 1:
+            _fail("execution_binding_ambiguous", "more than one active binding matches the current task", details={"project_id": project_id, "task_id": task})
+        return matches[0] if matches else None
+
+    def restore_current_binding(self, project_id: str, execution_binding_id: str) -> ProjectExecutionBinding:
+        """Re-establish the canonical cursor for one already-recorded active binding."""
+        binding_id = _identifier(execution_binding_id, "execution_binding_id")
+        project, plan, memory = self._project(project_id)
+
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, ProjectExecutionBinding]:
+            execution = _execution_document(state)
+            raw = next((item for item in execution.get("bindings", []) if item.get("execution_binding_id") == binding_id), None)
+            if raw is None:
+                _fail("execution_binding_not_found", "execution binding does not exist")
+            binding = _binding_from_dict(raw)
+            if binding.project_id != project_id or binding.plan_version != plan.plan_version or binding.status != "ACTIVE" or binding.superseded:
+                _fail("execution_binding_stale", "execution binding is not active")
+            if execution.get("current_binding_id") not in (None, binding_id):
+                _fail("execution_binding_stale", "another binding is the current canonical binding")
+            task = next((item for item in plan.tasks if item.task_id == binding.task_id), None)
+            if task is None:
+                _fail("task_not_found", "execution task does not exist")
+            if execution.get("task_statuses", {}).get(binding.task_id, task.status) in {"completed", "skipped"}:
+                _fail("task_already_complete", "completed task cannot become the current binding")
+            execution["current_task_id"] = binding.task_id
+            execution["current_binding_id"] = binding_id
+            return replace(state, execution=execution), binding
+
+        return memory.execution_transaction(transition)
+
+    @staticmethod
+    def _launch_handoff_from_dict(value: Mapping[str, Any]) -> dict[str, Any]:
+        if value.get("schema") != PROJECT_LAUNCH_HANDOFF_SCHEMA:
+            _fail("launch_handoff_schema_invalid", "launch handoff schema differs")
+        status = _text(value.get("status"), "launch_handoff.status", max_length=16)
+        if status not in {"PENDING", "SENT"}:
+            _fail("launch_handoff_status_invalid", "launch handoff status is unsupported")
+        normalized = {
+            "schema": PROJECT_LAUNCH_HANDOFF_SCHEMA,
+            "project_id": _identifier(value.get("project_id"), "launch_handoff.project_id"),
+            "execution_binding_id": _identifier(value.get("execution_binding_id"), "launch_handoff.execution_binding_id"),
+            "task_id": _identifier(value.get("task_id"), "launch_handoff.task_id"),
+            "launch_id": _identifier(value.get("launch_id"), "launch_handoff.launch_id"),
+            "status": status,
+            "updated_at": _text(value.get("updated_at"), "launch_handoff.updated_at", max_length=64),
+        }
+        conversation = value.get("conversation_id")
+        if conversation is not None:
+            normalized["conversation_id"] = _conversation(conversation, "launch_handoff.conversation_id")
+        return normalized
+
+    def launch_handoff(self, project_id: str, execution_binding_id: str) -> dict[str, Any] | None:
+        binding_id = _identifier(execution_binding_id, "execution_binding_id")
+        _project, _plan, memory = self._project(project_id)
+        execution = _execution_document(memory.read_state())
+        raw = execution.get("launch_handoffs", {}).get(binding_id)
+        if raw is None:
+            return None
+        handoff = self._launch_handoff_from_dict(raw)
+        if handoff["project_id"] != project_id or handoff["execution_binding_id"] != binding_id:
+            _fail("launch_handoff_stale", "launch handoff is bound to another project or binding")
+        return handoff
+
+    def mark_launch_handoff_pending(self, project_id: str, binding: ProjectExecutionBinding) -> dict[str, Any]:
+        """Durably record that an AUTO launch exists and still needs Send."""
+        _project, plan, memory = self._project(project_id)
+        if binding.project_id != project_id or binding.plan_version != plan.plan_version:
+            _fail("launch_handoff_stale", "launch handoff binding is not current project authority")
+        now = _utc_now()
+
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, dict[str, Any]]:
+            execution = _execution_document(state)
+            handoffs = dict(execution.get("launch_handoffs", {}))
+            existing = handoffs.get(binding.execution_binding_id)
+            if existing is not None:
+                current = self._launch_handoff_from_dict(existing)
+                if any(current.get(key) != value for key, value in (("project_id", project_id), ("execution_binding_id", binding.execution_binding_id), ("task_id", binding.task_id), ("launch_id", binding.launch_id))):
+                    _fail("launch_handoff_conflict", "launch handoff identity already contains different bytes")
+                return state, current
+            handoff = {
+                "schema": PROJECT_LAUNCH_HANDOFF_SCHEMA,
+                "project_id": project_id,
+                "execution_binding_id": binding.execution_binding_id,
+                "task_id": binding.task_id,
+                "launch_id": binding.launch_id,
+                "status": "PENDING",
+                "updated_at": now,
+            }
+            handoffs[binding.execution_binding_id] = handoff
+            execution["launch_handoffs"] = handoffs
+            return replace(state, execution=execution), handoff
+
+        return memory.execution_transaction(transition)
+
+    def mark_launch_handoff_sent(self, project_id: str, *, execution_binding_id: str, launch_id: str, conversation_id: str) -> dict[str, Any]:
+        """Commit the post-Send handoff exactly once; never advances task state."""
+        binding_id = _identifier(execution_binding_id, "execution_binding_id")
+        conversation = _conversation(conversation_id)
+        _project, plan, memory = self._project(project_id)
+        now = _utc_now()
+
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, dict[str, Any]]:
+            execution = _execution_document(state)
+            handoffs = dict(execution.get("launch_handoffs", {}))
+            existing = handoffs.get(binding_id)
+            if existing is not None:
+                current = self._launch_handoff_from_dict(existing)
+                if current["project_id"] != project_id or current["execution_binding_id"] != binding_id or current["launch_id"] != launch_id or current.get("conversation_id") not in (None, conversation):
+                    _fail("launch_handoff_conflict", "launch handoff identity does not match the canonical request")
+                if current["status"] == "SENT":
+                    return state, current
+            raw = next((item for item in execution.get("bindings", []) if item.get("execution_binding_id") == binding_id), None)
+            if raw is None:
+                _fail("execution_binding_not_found", "launch handoff binding does not exist")
+            binding = _binding_from_dict(raw)
+            if binding.project_id != project_id or binding.plan_version != plan.plan_version or binding.launch_id != launch_id or binding.status != "ACTIVE" or binding.superseded:
+                _fail("execution_binding_stale", "launch handoff binding is not active")
+            if binding.conversation_id not in (None, conversation):
+                _fail("execution_conversation_mismatch", "launch handoff conversation differs")
+            if execution.get("current_binding_id") != binding_id:
+                _fail("execution_binding_stale", "launch handoff binding is not the current canonical binding")
+            handoff = {
+                "schema": PROJECT_LAUNCH_HANDOFF_SCHEMA,
+                "project_id": project_id,
+                "execution_binding_id": binding_id,
+                "task_id": binding.task_id,
+                "launch_id": launch_id,
+                "status": "SENT",
+                "conversation_id": conversation,
+                "updated_at": now,
+            }
+            handoffs[binding_id] = handoff
+            execution["launch_handoffs"] = handoffs
+            return replace(state, execution=execution), handoff
 
         return memory.execution_transaction(transition)
 
@@ -908,7 +1063,7 @@ class ProjectExecutionCoordinator:
         project, plan, memory = self._project(project_id); state = memory.read_state(); execution = _execution_document(state)
         active_run = execution.get("active_milestone_run") if isinstance(execution.get("active_milestone_run"), Mapping) else None
         auto_progress = milestone_auto_progress(plan, state, str(active_run.get("milestone_id"))) if active_run else None
-        return {"schema": PROJECT_EXECUTION_SCHEMA, "project_id": project_id, "plan_version": plan.plan_version, "task_statuses": dict(execution.get("task_statuses", {})), "gate_statuses": dict(execution.get("gate_statuses", {})), "open_question_statuses": dict(execution.get("open_question_statuses", {})), "bindings": list(execution["bindings"]), "attempts": list(execution["attempts"]), "acceptance_results": list(execution["acceptance_results"]), "checkpoints": dict(execution.get("checkpoints", {})), "current_binding_id": execution.get("current_binding_id"), "current_task_id": execution.get("current_task_id"), "available_tasks": [task.task_id for task in (available_project_tasks(plan, state, str(active_run.get("milestone_id"))) if active_run else available_project_tasks(plan, state))], "milestone_auto": {**(auto_progress or {}), "milestone_run_id": active_run.get("milestone_run_id")} if active_run and auto_progress else None, "watchdog": self.watchdog(project_id), "stale_result": bool(execution.get("stale_result", False))}
+        return {"schema": PROJECT_EXECUTION_SCHEMA, "project_id": project_id, "plan_version": plan.plan_version, "task_statuses": dict(execution.get("task_statuses", {})), "gate_statuses": dict(execution.get("gate_statuses", {})), "open_question_statuses": dict(execution.get("open_question_statuses", {})), "bindings": list(execution["bindings"]), "attempts": list(execution["attempts"]), "acceptance_results": list(execution["acceptance_results"]), "checkpoints": dict(execution.get("checkpoints", {})), "launch_handoffs": dict(execution.get("launch_handoffs", {})), "current_binding_id": execution.get("current_binding_id"), "current_task_id": execution.get("current_task_id"), "available_tasks": [task.task_id for task in (available_project_tasks(plan, state, str(active_run.get("milestone_id"))) if active_run else available_project_tasks(plan, state))], "milestone_auto": {**(auto_progress or {}), "milestone_run_id": active_run.get("milestone_run_id")} if active_run and auto_progress else None, "watchdog": self.watchdog(project_id), "stale_result": bool(execution.get("stale_result", False))}
 
 
-__all__ = ["PROJECT_EXECUTION_SCHEMA", "PROJECT_EXECUTION_SUBMISSION_SCHEMA", "PROJECT_EXECUTION_CHECKPOINT_SCHEMA", "ProjectExecutionAttempt", "ProjectExecutionBinding", "ProjectExecutionSubmission", "ProjectExecutionCoordinator", "ProjectExecutionError", "TaskAcceptanceResult", "execution_result_digest"]
+__all__ = ["PROJECT_EXECUTION_SCHEMA", "PROJECT_EXECUTION_SUBMISSION_SCHEMA", "PROJECT_EXECUTION_CHECKPOINT_SCHEMA", "PROJECT_LAUNCH_HANDOFF_SCHEMA", "ProjectExecutionAttempt", "ProjectExecutionBinding", "ProjectExecutionSubmission", "ProjectExecutionCoordinator", "ProjectExecutionError", "TaskAcceptanceResult", "execution_result_digest"]

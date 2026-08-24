@@ -323,10 +323,17 @@ async function projectLaunchClaim(launchId, claimId, conversationId) {
   return { ok: response.status === "claimed", response };
 }
 
-async function projectLaunchAck(launchId, claimId) {
+async function projectLaunchAck(launchId, claimId, handoff = null) {
+  const metadata = handoff && typeof handoff === "object" ? {
+    handoff_status: "SENT",
+    project_id: boundedId(handoff.project_id, "project_id"),
+    execution_binding_id: boundedId(handoff.execution_binding_id, "execution_binding_id"),
+    conversation_id: boundedId(handoff.conversation_id, "conversation_id")
+  } : {};
   const response = await sendNative(native("project_launch_ack", {
     launch_id: boundedId(launchId, "launch_id"),
-    claim_id: boundedId(claimId, "claim_id")
+    claim_id: boundedId(claimId, "claim_id"),
+    ...metadata
   }));
   return { ok: response.status === "acknowledged", response };
 }
@@ -370,7 +377,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     : message.type === "bdb-vnext-resume-outbox" ? resumeOutbox()
     : message.type === "bdb-vnext-project-launch-peek" ? projectLaunchPeek()
     : message.type === "bdb-vnext-project-launch-claim" ? projectLaunchClaim(message.launch_id, message.claim_id, message.conversation_id)
-    : message.type === "bdb-vnext-project-launch-ack" ? projectLaunchAck(message.launch_id, message.claim_id)
+    : message.type === "bdb-vnext-project-launch-ack" ? projectLaunchAck(message.launch_id, message.claim_id, message.handoff)
     : message.type === "bdb-vnext-project-execution-status" ? projectExecutionStatus(message.project_id, message.execution_binding_id, message.conversation_id)
     : projectExecutionSubmit(message.result, message.conversation_id, message.launch_id);
   operation.then(

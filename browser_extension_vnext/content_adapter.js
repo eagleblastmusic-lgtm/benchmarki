@@ -334,8 +334,10 @@ async function submitProjectExecutionResult(block, result, refs, { automatic = f
         if (receipt.milestone_status === "RUNNABLE" && nextLaunch && nextLaunch.project_id === result.project_id && nextLaunch.task_id && nextLaunch.execution_binding_id) {
           projectAutoState.phase = "awaiting_next_launch";
           void projectHandleLaunch(nextLaunch, { automatic: true }).catch(() => projectAutoStop("next_launch_failed"));
+        } else if (receipt.next_launch_status === "already_sent" || receipt.milestone_status === "MILESTONE_COMPLETED") {
+          projectAutoState.phase = receipt.milestone_status === "MILESTONE_COMPLETED" ? "stopped" : "sent";
         } else {
-          projectAutoState.phase = receipt.milestone_status === "MILESTONE_COMPLETED" ? "stopped" : "awaiting_next_launch";
+          projectAutoStop(receipt.milestone_status === "RUNNABLE" ? "next_launch_recovery_required" : "next_launch_not_runnable");
         }
       }
       return true;
@@ -682,11 +684,12 @@ async function projectClaim(launch, claimId, conversationId) {
   return projectValidLaunch(result.response.launch) ? result.response.launch : null;
 }
 
-async function projectAck(launchId, claimId) {
+async function projectAck(launchId, claimId, handoff = null) {
   const result = await chrome.runtime.sendMessage({
     type: "bdb-vnext-project-launch-ack",
     launch_id: launchId,
-    claim_id: claimId
+    claim_id: claimId,
+    ...(handoff ? { handoff } : {})
   });
   return Boolean(result && result.ok === true && result.response && result.response.status === "acknowledged");
 }
@@ -716,9 +719,10 @@ async function projectHandleLaunch(launch, { selectedByUser = false, automatic =
     ? projectConversationId() === conversationId
     : !projectConversationId() && projectBlankNewChat();
   if (!projectPageEligible({ selectedByUser }) || !sameSelection) return false;
+  let canonicalStatus = null;
   if (autoMode) {
-    const status = await projectExecutionStatusFor(claimed.project_id, claimed.execution_binding_id, conversationId);
-    if (!status || status.current_binding_id !== claimed.execution_binding_id || status.current_task_id !== claimed.task_id || !status.binding || status.binding.project_id !== claimed.project_id || status.binding.task_id !== claimed.task_id || status.binding.conversation_id !== conversationId || !status.milestone_auto || status.milestone_auto.status !== "RUNNABLE") {
+    canonicalStatus = await projectExecutionStatusFor(claimed.project_id, claimed.execution_binding_id, conversationId);
+    if (!canonicalStatus || canonicalStatus.current_binding_id !== claimed.execution_binding_id || canonicalStatus.current_task_id !== claimed.task_id || !canonicalStatus.binding || canonicalStatus.binding.project_id !== claimed.project_id || canonicalStatus.binding.task_id !== claimed.task_id || canonicalStatus.binding.conversation_id !== conversationId || !canonicalStatus.milestone_auto || canonicalStatus.milestone_auto.status !== "RUNNABLE") {
       projectAutoStop("canonical_launch_gate_rejected");
       return false;
     }
@@ -738,20 +742,27 @@ async function projectHandleLaunch(launch, { selectedByUser = false, automatic =
       ? projectConversationId() === conversationId
       : !projectConversationId() && projectBlankNewChat();
     if (!projectPageEligible({ selectedByUser }) || !finalSelection || projectComposerText(projectFindComposer()) !== claimed.prompt) return false;
-    const acknowledged = await projectAck(claimed.launch_id, claimId);
-    if (acknowledged) {
-      if (conversationId) await projectWriteBinding(claimed, claimId, conversationId, "ACKED");
-      if (autoMode) {
-        if (projectAutoState.phase === "stopped") return false;
-        const token = `${claimed.launch_id}:${claimed.execution_binding_id}:${Date.now()}`;
-        projectAutoState = { phase: "inserting_prompt", launch_id: claimed.launch_id, execution_binding_id: claimed.execution_binding_id, token };
-        await projectAutoSendInserted(claimed, claimId, claimed.prompt, projectFindComposer(), token);
-      } else {
-        projectAnnounce("BDB vNext: project prompt inserted (not sent).", "success");
+    if (autoMode) {
+      if (canonicalStatus?.launch_handoff?.status === "SENT") {
+        projectAutoState = { phase: "sent", launch_id: claimed.launch_id, execution_binding_id: claimed.execution_binding_id, token: "recovered-sent" };
+        const acknowledged = await projectAck(claimed.launch_id, claimId, { project_id: claimed.project_id, execution_binding_id: claimed.execution_binding_id, conversation_id: conversationId });
+        if (acknowledged && conversationId) await projectWriteBinding(claimed, claimId, conversationId, "ACKED");
+        return acknowledged;
       }
-      return true;
+      if (projectAutoState.phase === "stopped") return false;
+      const token = `${claimed.launch_id}:${claimed.execution_binding_id}:${Date.now()}`;
+      projectAutoState = { phase: "inserting_prompt", launch_id: claimed.launch_id, execution_binding_id: claimed.execution_binding_id, token };
+      const sent = await projectAutoSendInserted(claimed, claimId, claimed.prompt, projectFindComposer(), token);
+      if (!sent) return false;
+      const acknowledged = await projectAck(claimed.launch_id, claimId, { project_id: claimed.project_id, execution_binding_id: claimed.execution_binding_id, conversation_id: conversationId });
+      if (acknowledged && conversationId) await projectWriteBinding(claimed, claimId, conversationId, "ACKED");
+      return acknowledged;
     }
-    return false;
+    const acknowledged = await projectAck(claimed.launch_id, claimId);
+    if (!acknowledged) return false;
+    if (conversationId) await projectWriteBinding(claimed, claimId, conversationId, "ACKED");
+    projectAnnounce("BDB vNext: project prompt inserted (not sent).", "success");
+    return true;
   } finally {
     projectInsertionActive = false;
   }

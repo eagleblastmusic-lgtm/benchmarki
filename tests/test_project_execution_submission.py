@@ -38,6 +38,29 @@ def _result(project_id: str, binding, *, head_before: str = HEAD, head_after: st
     }
 
 
+def _auto_workflow(tmp_path: Path):
+    catalog, coordinator, project_id = _fixture(tmp_path, all_deterministic=True)
+    coordinator.begin_milestone_auto(project_id, milestone_id="m1", milestone_run_id="milestone-run-recovery")
+
+    class Runner:
+        def run(self, args, *, cwd=None, timeout_seconds=120.0):
+            return CommandResult(tuple(args), 0, HEAD + "\n", "")
+
+    from bdb_vnext.project_launch import ProjectLaunchQueueAdapter
+
+    queue = ProjectLaunchQueueAdapter(tmp_path / "launch.json")
+    workflow = ProjectWorkflow(catalog.runtime_root, catalog=catalog, command_runner=Runner(), queue=queue)
+    launch = workflow.queue_continue_prompt(project_id)
+    claim_id = str(uuid.uuid4())
+    assert queue.claim(launch_id=launch.launch_id, claim_id=claim_id) == launch
+    binding = coordinator.binding(project_id, launch.execution_binding_id)
+    conversation_id = "chatgpt-conversation-recovery"
+    coordinator.bind_conversation(project_id, binding.execution_binding_id, conversation_id)
+    coordinator.mark_launch_handoff_sent(project_id, execution_binding_id=binding.execution_binding_id, launch_id=launch.launch_id, conversation_id=conversation_id)
+    assert queue.acknowledge(launch_id=launch.launch_id, claim_id=claim_id) is True
+    return catalog, coordinator, workflow, queue, project_id, binding, conversation_id
+
+
 def test_project_execution_submission_is_strict_json_contract() -> None:
     binding = type("B", (), {"task_id": "t1", "execution_binding_id": "binding-1", "correlation_id": "corr-1", "command_id": "command-1"})()
     parsed = ProjectExecutionSubmission.from_mapping(_result("execution-fixture", binding))
@@ -91,6 +114,54 @@ def test_project_execution_auto_accepts_once_and_queues_next_task(tmp_path: Path
     assert len(coordinator.snapshot(project_id)["bindings"]) == 2
 
 
+def test_auto_replay_recovers_one_missing_next_launch_and_is_idempotent(tmp_path: Path) -> None:
+    _catalog, coordinator, workflow, queue, project_id, binding, conversation_id = _auto_workflow(tmp_path)
+    first = workflow.submit_project_execution_result(_result(project_id, binding), conversation_id=conversation_id, launch_id=binding.launch_id)
+    next_launch = first["next_launch"]
+    assert next_launch["task_id"] == "t2"
+    # Simulate the historical lost-handoff: the transport consumed the queue,
+    # while the canonical execution cursor already advanced to t2.
+    lost_claim = str(uuid.uuid4())
+    assert queue.claim(launch_id=next_launch["launch_id"], claim_id=lost_claim) is not None
+    assert queue.acknowledge(launch_id=next_launch["launch_id"], claim_id=lost_claim) is True
+
+    receipts = [workflow.submit_project_execution_result(_result(project_id, binding), conversation_id=conversation_id, launch_id=binding.launch_id) for _ in range(10)]
+    assert all(receipt["replayed"] is True for receipt in receipts)
+    assert all(receipt["next_launch"]["launch_id"] == next_launch["launch_id"] for receipt in receipts)
+    assert all(receipt["next_launch_status"] == "ready" for receipt in receipts)
+    snapshot = coordinator.snapshot(project_id)
+    assert len(snapshot["attempts"]) == 1
+    assert len(snapshot["bindings"]) == 2
+    assert len(snapshot["launch_handoffs"]) == 2
+    assert snapshot["launch_handoffs"][next_launch["execution_binding_id"]]["status"] == "PENDING"
+    assert queue.peek().launch_id == next_launch["launch_id"]
+
+
+def test_auto_launch_handoff_is_not_sent_or_consumed_until_canonical_sent_ack(tmp_path: Path) -> None:
+    _catalog, coordinator, workflow, queue, project_id, binding, conversation_id = _auto_workflow(tmp_path)
+    receipt = workflow.submit_project_execution_result(_result(project_id, binding), conversation_id=conversation_id, launch_id=binding.launch_id)
+    launch = receipt["next_launch"]
+    claim_id = str(uuid.uuid4())
+    assert queue.claim(launch_id=launch["launch_id"], claim_id=claim_id) is not None
+    assert coordinator.launch_handoff(project_id, launch["execution_binding_id"])["status"] == "PENDING"
+    assert queue.peek() is not None
+    sent = coordinator.mark_launch_handoff_sent(project_id, execution_binding_id=launch["execution_binding_id"], launch_id=launch["launch_id"], conversation_id=conversation_id)
+    replayed = coordinator.mark_launch_handoff_sent(project_id, execution_binding_id=launch["execution_binding_id"], launch_id=launch["launch_id"], conversation_id=conversation_id)
+    assert sent["status"] == replayed["status"] == "SENT"
+    assert queue.acknowledge(launch_id=launch["launch_id"], claim_id=claim_id) is True
+    assert queue.peek() is None
+
+
+def test_auto_recovery_stops_closed_when_milestone_is_no_longer_runnable(tmp_path: Path) -> None:
+    _catalog, coordinator, workflow, queue, project_id, binding, conversation_id = _auto_workflow(tmp_path)
+    coordinator.stop_milestone_auto(project_id, run_id="milestone-run-recovery", reason="user_stop")
+    receipt = workflow.submit_project_execution_result(_result(project_id, binding), conversation_id=conversation_id, launch_id=binding.launch_id)
+    assert receipt["next_launch"] is None
+    assert receipt["next_launch_status"] == "not_runnable"
+    assert queue.peek() is None
+    assert len(coordinator.snapshot(project_id)["bindings"]) == 1
+
+
 def test_native_project_execution_status_exposes_only_current_auto_gate(tmp_path: Path) -> None:
     catalog, coordinator, project_id = _fixture(tmp_path, all_deterministic=True)
     coordinator.begin_milestone_auto(project_id, milestone_id="m1", milestone_run_id="milestone-run-status")
@@ -135,6 +206,66 @@ def test_native_project_execution_status_exposes_only_current_auto_gate(tmp_path
         "execution_binding_id": binding.execution_binding_id,
     })
     assert stopped["milestone_auto"]["status"] == "STOPPED"
+
+
+def test_native_auto_ack_records_sent_handoff_once_and_replays_safely(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _catalog, coordinator, workflow, queue, project_id, binding, conversation_id = _auto_workflow(tmp_path)
+    receipt = workflow.submit_project_execution_result(_result(project_id, binding), conversation_id=conversation_id, launch_id=binding.launch_id)
+    launch = receipt["next_launch"]
+    claim_id = str(uuid.uuid4())
+    assert queue.claim(launch_id=launch["launch_id"], claim_id=claim_id) is not None
+    import bdb_vnext.m9b_native_host as native_module
+
+    monkeypatch.setattr(native_module, "_project_launch_queue", lambda: queue)
+    config = VNextNativeConfig(runtime_root=_catalog.runtime_root, legacy_runtime_root=tmp_path / "legacy", bootstrap_authority_root=tmp_path / "bootstrap")
+    message = {
+        "schema": M9B_NATIVE_REQUEST_SCHEMA,
+        "request_id": "native-auto-ack-1",
+        "action": "project_launch_ack",
+        "protocol_generation": PROTOCOL_GENERATION,
+        "browser_extension_id": BROWSER_EXTENSION_ID,
+        "launch_id": launch["launch_id"],
+        "claim_id": claim_id,
+        "handoff_status": "SENT",
+        "project_id": project_id,
+        "execution_binding_id": launch["execution_binding_id"],
+        "conversation_id": conversation_id,
+    }
+    first = handle_message(config, message)
+    assert first["status"] == "acknowledged"
+    assert coordinator.launch_handoff(project_id, launch["execution_binding_id"])["status"] == "SENT"
+    replay = handle_message(config, {**message, "request_id": "native-auto-ack-2"})
+    assert replay["status"] == "acknowledged"
+    assert queue.peek() is None
+
+
+def test_native_auto_ack_rejects_foreign_claim_before_marking_sent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _catalog, coordinator, workflow, queue, project_id, binding, conversation_id = _auto_workflow(tmp_path)
+    receipt = workflow.submit_project_execution_result(_result(project_id, binding), conversation_id=conversation_id, launch_id=binding.launch_id)
+    launch = receipt["next_launch"]
+    owner_claim = str(uuid.uuid4())
+    foreign_claim = str(uuid.uuid4())
+    assert queue.claim(launch_id=launch["launch_id"], claim_id=owner_claim) is not None
+    import bdb_vnext.m9b_native_host as native_module
+
+    monkeypatch.setattr(native_module, "_project_launch_queue", lambda: queue)
+    config = VNextNativeConfig(runtime_root=_catalog.runtime_root, legacy_runtime_root=tmp_path / "legacy", bootstrap_authority_root=tmp_path / "bootstrap")
+    response = handle_message(config, {
+        "schema": M9B_NATIVE_REQUEST_SCHEMA,
+        "request_id": "native-auto-ack-foreign",
+        "action": "project_launch_ack",
+        "protocol_generation": PROTOCOL_GENERATION,
+        "browser_extension_id": BROWSER_EXTENSION_ID,
+        "launch_id": launch["launch_id"],
+        "claim_id": foreign_claim,
+        "handoff_status": "SENT",
+        "project_id": project_id,
+        "execution_binding_id": launch["execution_binding_id"],
+        "conversation_id": conversation_id,
+    })
+    assert response["status"] == "not_found_or_not_owner"
+    assert coordinator.launch_handoff(project_id, launch["execution_binding_id"])["status"] == "PENDING"
+    assert queue.peek() is not None
 
 
 def test_project_execution_wrong_conversation_and_stale_binding_fail_closed(tmp_path: Path) -> None:

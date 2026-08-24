@@ -424,6 +424,60 @@ class ProjectWorkflow:
     def queue_continue_prompt(self, project_id: str) -> ProjectLaunch:
         return self._queue_execution_prompt(project_id, "continue")
 
+    def _ensure_auto_next_launch(self, project_id: str, *, completed_task_id: str | None = None) -> tuple[ProjectLaunch | None, str]:
+        """Reconcile one canonical AUTO handoff without using Browser state as authority."""
+        snapshot = self.execution.snapshot(project_id)
+        auto = snapshot.get("milestone_auto") or {}
+        state = self.memory(project_id).read_state()
+        active_run = state.execution.get("active_milestone_run") if isinstance(state.execution, Mapping) else None
+        if not isinstance(active_run, Mapping) or active_run.get("status") != "running" or auto.get("status") != "RUNNABLE":
+            return None, "not_runnable"
+        current_task_id = auto.get("current_task_id") or auto.get("next_task_id")
+        if not isinstance(current_task_id, str) or not current_task_id:
+            return None, "milestone_completed"
+        if snapshot.get("current_task_id") not in (None, current_task_id):
+            raise ProjectWorkflowError("execution_recovery_ambiguous", "AUTO current task disagrees with canonical execution cursor")
+        if completed_task_id is not None:
+            if snapshot.get("task_statuses", {}).get(completed_task_id) != "completed":
+                return None, "completed_task_not_accepted"
+            if current_task_id == completed_task_id:
+                return None, "current_task_not_advanced"
+        if snapshot.get("task_statuses", {}).get(current_task_id) in {"completed", "skipped"}:
+            return None, "milestone_completed"
+        if any(item.get("task_id") == current_task_id and item.get("result_status") not in {"STALE_RESULT"} for item in snapshot.get("attempts", [])):
+            return None, "attempt_exists"
+
+        pending = self.queue.peek()
+        if pending is not None:
+            if pending.project_id != project_id or pending.task_id != current_task_id:
+                raise ProjectWorkflowError("queue_pending", "project launch queue contains a different canonical task")
+            if pending.auto_send is not True or not pending.execution_binding_id:
+                raise ProjectWorkflowError("launch_recovery_required", "current AUTO launch is not a canonical AUTO handoff")
+            binding = self.execution.binding(project_id, pending.execution_binding_id)
+            if binding.task_id != current_task_id or snapshot.get("current_binding_id") != binding.execution_binding_id:
+                raise ProjectWorkflowError("execution_recovery_ambiguous", "pending launch does not match the current canonical binding")
+            handoff = self.execution.launch_handoff(project_id, binding.execution_binding_id)
+            if handoff is not None and handoff.get("status") == "SENT":
+                return None, "already_sent"
+            self.execution.mark_launch_handoff_pending(project_id, binding)
+            return pending, "ready"
+
+        binding_id = snapshot.get("current_binding_id")
+        binding = self.execution.binding(project_id, binding_id) if binding_id else self.execution.current_task_binding(project_id, current_task_id)
+        if binding is not None:
+            if binding.task_id != current_task_id:
+                raise ProjectWorkflowError("execution_recovery_ambiguous", "current binding does not match the AUTO task")
+            if snapshot.get("current_binding_id") is None:
+                try:
+                    binding = self.execution.restore_current_binding(project_id, binding.execution_binding_id)
+                except ProjectExecutionError as exc:
+                    raise ProjectWorkflowError(exc.code, str(exc)) from exc
+            handoff = self.execution.launch_handoff(project_id, binding.execution_binding_id)
+            if handoff is not None and handoff.get("status") == "SENT":
+                return None, "already_sent"
+        launch = self._queue_execution_prompt(project_id, "continue", binding_override=binding)
+        return launch, "ready"
+
     def submit_project_execution_result(self, result: Mapping[str, Any], *, conversation_id: str, launch_id: str) -> dict[str, Any]:
         """Record one Browser project result and, for AUTO, queue the next task."""
         from .project_execution import ProjectExecutionSubmission
@@ -441,8 +495,11 @@ class ProjectWorkflow:
         if replay_attempt is not None:
             snapshot = self.execution.snapshot(submission.project_id)
             milestone = snapshot.get("milestone_auto") or {}
-            pending = self.queue.peek()
-            next_launch = pending if pending is not None and pending.project_id == submission.project_id else None
+            next_launch, next_launch_status = (None, "not_runnable")
+            if replay_attempt.result_status == "PASS":
+                next_launch, next_launch_status = self._ensure_auto_next_launch(submission.project_id, completed_task_id=replay_attempt.task_id)
+                snapshot = self.execution.snapshot(submission.project_id)
+                milestone = snapshot.get("milestone_auto") or {}
             return {
                 "schema": "bdb-project-execution-receipt-v1",
                 "accepted": replay_attempt.result_status == "PASS",
@@ -458,6 +515,7 @@ class ProjectWorkflow:
                 "milestone_progress": {"completed_tasks": milestone.get("completed_tasks", 0), "total_tasks": milestone.get("total_tasks", 0)},
                 "result_status": replay_attempt.result_status,
                 "next_launch": next_launch.to_dict() if next_launch is not None else None,
+                "next_launch_status": next_launch_status,
             }
         current_snapshot = self.execution.snapshot(submission.project_id)
         if current_snapshot.get("current_binding_id") != binding.execution_binding_id:
@@ -472,17 +530,14 @@ class ProjectWorkflow:
         attempt = self.execution.record_result(submission.project_id, submission.to_dict())
         snapshot = self.execution.snapshot(submission.project_id)
         next_launch: ProjectLaunch | None = None
+        next_launch_status = "not_runnable"
         auto = snapshot.get("milestone_auto")
         if attempt.result_status == "PASS" and auto and auto.get("status") == "RUNNABLE" and snapshot.get("current_task_id"):
-            try:
-                next_launch = self.queue_continue_prompt(submission.project_id)
-            except ProjectWorkflowError as exc:
-                if exc.code != "queue_pending":
-                    raise
-                pending = self.queue.peek()
-                if pending is None or pending.project_id != submission.project_id or pending.task_id != snapshot.get("current_task_id"):
-                    raise
-                next_launch = pending
+            next_launch, next_launch_status = self._ensure_auto_next_launch(submission.project_id, completed_task_id=attempt.task_id)
+            snapshot = self.execution.snapshot(submission.project_id)
+            auto = snapshot.get("milestone_auto")
+        elif attempt.result_status == "PASS" and auto and auto.get("status") == "MILESTONE_COMPLETED":
+            next_launch_status = "milestone_completed"
         milestone = snapshot.get("milestone_auto") or {}
         return {
             "schema": "bdb-project-execution-receipt-v1",
@@ -499,6 +554,7 @@ class ProjectWorkflow:
             "milestone_progress": {"completed_tasks": milestone.get("completed_tasks", 0), "total_tasks": milestone.get("total_tasks", 0)},
             "result_status": attempt.result_status,
             "next_launch": next_launch.to_dict() if next_launch is not None else None,
+            "next_launch_status": next_launch_status,
         }
 
     def current_repo_head(self, project: ProjectRecord) -> str:
@@ -507,7 +563,7 @@ class ProjectWorkflow:
             raise ProjectWorkflowError("repo_head_unavailable", "registered project HEAD could not be read")
         return result.stdout.strip().lower()
 
-    def _queue_execution_prompt(self, project_id: str, kind: str) -> ProjectLaunch:
+    def _queue_execution_prompt(self, project_id: str, kind: str, *, binding_override: ProjectExecutionBinding | None = None) -> ProjectLaunch:
         project = self.catalog.get(project_id)
         if project is None:
             raise ProjectWorkflowError("project_not_found", "project is not in the canonical catalog")
@@ -516,7 +572,7 @@ class ProjectWorkflow:
             raise ProjectWorkflowError("project_plan_required", "Project Plan must be imported before Start/Continue")
         head = self.current_repo_head(project)
         try:
-            binding = self.execution.new_binding(project_id, expected_repo_head_before=head)
+            binding = binding_override or self.execution.new_binding(project_id, expected_repo_head_before=head)
             prompt = build_start_prompt(project, plan=plan, state=state, git_head=head, binding=binding) if kind == "start" else build_continue_prompt(project, plan=plan, state=state, git_head=head, binding=binding)
             auto = self.execution.milestone_auto_snapshot(project_id)
             auto_send = (
@@ -533,6 +589,8 @@ class ProjectWorkflow:
             else:
                 launch = self.queue.enqueue(repo_alias=project.repo_alias, prompt=prompt, auto_send=auto_send, ttl_minutes=10, launch_id=binding.launch_id, project_id=binding.project_id, plan_version=binding.plan_version, task_id=binding.task_id, execution_binding_id=binding.execution_binding_id, correlation_id=binding.correlation_id, command_id=binding.command_id, expected_repo_head_before=binding.expected_repo_head_before)
             self.execution.persist_binding(binding)
+            if auto_send:
+                self.execution.mark_launch_handoff_pending(project_id, binding)
         except (ProjectExecutionError, ProjectLaunchQueueError) as exc:
             raise ProjectWorkflowError(getattr(exc, "code", "project_execution_binding_failed"), str(exc)) from exc
         updated = ProjectRecord(**{**project.__dict__, "last_launch_id": launch.launch_id, "last_correlation_id": binding.correlation_id})

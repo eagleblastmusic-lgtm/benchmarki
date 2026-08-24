@@ -67,6 +67,7 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
             };
             const panels = [];
             const messages = [];
+            const events = [];
             let stopListener = null;
             let observerCallback = null;
             let sweepCallback = null;
@@ -121,7 +122,7 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
               }
               querySelector() { return null; }
               querySelectorAll(selector) {
-                if (this.kind === "form" && selector.startsWith("button")) return selector === "button[data-testid='send-button']" ? [sendButton] : [];
+                if (this.kind === "form" && selector.startsWith("button")) return selector === "button[data-testid='send-button']" && mode !== "nosend" ? [sendButton] : [];
                 const found = [];
                 const visit = (item) => {
                   for (const child of item.children || []) {
@@ -149,7 +150,7 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
             const form = new Element("form");
             const sendButton = new Element("button");
             sendButton.disabled = false;
-            sendButton.click = () => { sendClicks += 1; };
+            sendButton.click = () => { sendClicks += 1; events.push("send"); };
             pre.append(code);
             assistant.append(pre);
             code.textContent = codeText;
@@ -213,7 +214,8 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
                       return { ok: true, response: {
                         status: "project_execution_status", current_binding_id: next ? "binding-2" : bindingId, current_task_id: next ? "P0-02" : taskId,
                         binding: { project_id: projectId, execution_binding_id: next ? "binding-2" : bindingId, task_id: next ? "P0-02" : taskId, launch_id: next ? nextLaunchId : launchId, conversation_id: conversationId, status: "ACTIVE", superseded: false },
-                        milestone_auto: { status: "RUNNABLE", milestone_run_id: "run-1", current_task_id: next ? "P0-02" : taskId }
+                        milestone_auto: { status: "RUNNABLE", milestone_run_id: "run-1", current_task_id: next ? "P0-02" : taskId },
+                        launch_handoff: mode === "sent" && next ? { status: "SENT" } : { status: "PENDING" }
                       }};
                     }
                     if (message.type === "bdb-vnext-project-execution-submit") return { ok: true, receipt: {
@@ -221,7 +223,7 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
                       current_task_id: "P0-02", next_launch: mode === "completed" ? null : nextLaunch
                     }};
                     if (message.type === "bdb-vnext-project-launch-claim") return { ok: true, response: { status: "claimed", launch: nextLaunch } };
-                    if (message.type === "bdb-vnext-project-launch-ack") return { ok: true, response: { status: "acknowledged" } };
+                    if (message.type === "bdb-vnext-project-launch-ack") { events.push("ack"); return { ok: true, response: { status: "acknowledged" } }; }
                     return { ok: false, error: "unexpected message" };
                   }
                 }
@@ -247,6 +249,13 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
                 assert.equal(ackMessages.length, mode === "completed" ? 0 : 1);
                 assert.equal(sendClicks, mode === "happy" ? 1 : 0);
                 assert.equal(composer.value, mode === "happy" ? prompt : "");
+                if (mode === "happy") assert.deepEqual(events, ["send", "ack"]);
+              } else if (mode === "sent") {
+                assert.equal(submitMessages.length, 1);
+                assert.equal(claimMessages.length, 1);
+                assert.equal(ackMessages.length, 1);
+                assert.equal(sendClicks, 0, "already-sent handoff must not send twice");
+                assert.deepEqual(events, ["ack"]);
               } else if (mode === "nonempty") {
                 assert.equal(submitMessages.length, 1);
                 assert.equal(claimMessages.length, 0, "foreign composer must prevent claim");
@@ -259,6 +268,12 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
               } else if (mode === "stopped") {
                 assert.equal(submitMessages.length, 1);
                 assert.equal(sendClicks, 0, "STOP must cancel a pending auto-send");
+                assert.equal(ackMessages.length, 0);
+              } else if (mode === "nosend") {
+                assert.equal(submitMessages.length, 1);
+                assert.equal(claimMessages.length, 1);
+                assert.equal(ackMessages.length, 0, "missing Send must not ACK/consume");
+                assert.equal(sendClicks, 0);
               } else {
                 assert.equal(submitMessages.length, 0, "stale/wrong gate must not submit");
                 assert.equal(sendClicks, 0);
@@ -268,7 +283,7 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
         ),
         encoding="utf-8",
     )
-    for mode in ("happy", "completed", "nonempty", "edited", "stopped", "stale", "wrong"):
+    for mode in ("happy", "completed", "nonempty", "edited", "stopped", "nosend", "sent", "stale", "wrong"):
         completed = subprocess.run(
             [node, str(harness), str(ROOT / "browser_extension_vnext" / "content_adapter.js"), mode],
             capture_output=True,
@@ -293,3 +308,8 @@ def test_vnext_project_auto_contract_preserves_manual_fallback_and_stops_at_boun
     assert 'button.textContent = "BDB vNext: Result accepted"' in adapter
     assert 'button.textContent = "BDB vNext: Retry result"' in adapter
     assert 'projectAutoStop("canonical_launch_gate_rejected")' in adapter
+    assert 'const sent = await projectAutoSendInserted' in adapter
+    assert 'projectAck(claimed.launch_id, claimId, {' in adapter
+    assert adapter.index('const sent = await projectAutoSendInserted') < adapter.index('const acknowledged = await projectAck(claimed.launch_id, claimId, {')
+    assert 'handoff_status: "SENT"' in worker
+    assert 'launch_handoff' in native

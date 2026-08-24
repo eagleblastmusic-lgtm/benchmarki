@@ -354,6 +354,7 @@ def handle_message(
                     "status": binding.status,
                     "superseded": binding.superseded,
                 },
+                "launch_handoff": coordinator.launch_handoff(project_id, binding.execution_binding_id),
                 "milestone_auto": dict(auto) if isinstance(auto, Mapping) else None,
                 "legacy_fallback": False,
             })
@@ -416,7 +417,33 @@ def handle_message(
                     launch_id=launch_id,
                     claim_id=claim_id,
                 )
-            acknowledged = queue.acknowledge(launch_id=launch_id, claim_id=claim_id)
+            handoff_status = message.get("handoff_status")
+            if handoff_status is not None and handoff_status != "SENT":
+                _fail("invalid_payload", "handoff_status must be SENT when supplied")
+            if handoff_status == "SENT":
+                project_id = _bounded_text(message.get("project_id"), field="project_id", maximum=128)
+                binding_id = _bounded_text(message.get("execution_binding_id"), field="execution_binding_id", maximum=128)
+                conversation_id = _conversation_id(message.get("conversation_id"))
+                coordinator = ProjectExecutionCoordinator(config.runtime_root, catalog=ProjectCatalog(config.runtime_root))
+                try:
+                    binding = coordinator.binding(project_id, binding_id)
+                    if binding.launch_id != launch_id:
+                        _fail("execution_launch_mismatch", "handoff launch does not match the canonical binding")
+                    if binding.conversation_id not in (None, conversation_id):
+                        _fail("execution_conversation_mismatch", "handoff conversation does not match the canonical binding")
+                    handoff = coordinator.launch_handoff(project_id, binding_id)
+                    owns_claim = queue.claim_matches(launch_id=launch_id, claim_id=claim_id)
+                    if handoff is not None and handoff.get("status") == "SENT":
+                        acknowledged = queue.peek() is None or (owns_claim and queue.acknowledge(launch_id=launch_id, claim_id=claim_id))
+                    elif owns_claim:
+                        coordinator.mark_launch_handoff_sent(project_id, execution_binding_id=binding_id, launch_id=launch_id, conversation_id=conversation_id)
+                        acknowledged = queue.acknowledge(launch_id=launch_id, claim_id=claim_id)
+                    else:
+                        acknowledged = False
+                except ProjectExecutionError as exc:
+                    raise M9bNativeError(exc.code, str(exc)) from exc
+            else:
+                acknowledged = queue.acknowledge(launch_id=launch_id, claim_id=claim_id)
             return _project_launch_response(
                 config,
                 request_id,
