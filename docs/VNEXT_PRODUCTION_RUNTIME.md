@@ -62,6 +62,20 @@ GitHub branch HEAD opisuje najnowsze źródło. Nie dowodzi, że identyczne byte
 
 Installed runtime należy weryfikować przez source identity i digests zapisane w client/runtime evidence, m.in. `client-plan.json`, manifestach i odpowiednich activation records.
 
+Jednorazowe odejście od historycznego `%LOCALAPPDATA%\\BartoszDevBridge-vNext`
+używa `bdb-vnext-single-root`. Operator najpierw publikuje immutable plan pełnego
+source inventory, następnie replay-safe przenosi Control DB, Project Catalog,
+Project Memory, M3a/M9b state oraz immutable recovery evidence do repo-local
+`runtime`. Exact historyczny M3c v1 jest po skopiowaniu migrowany atomowo do
+jednoznacznego v2; usunięcie pola `production_intake` nie zmienia M9b writer/intake
+authority. Stare clients i `native-host.json` są klasyfikowane jako deployed copy,
+nie są kopiowane nad source-matched repo-local clients.
+
+Usunięcie starego rootu jest osobnym `retire` i fail-closed sprawdza: exact
+migration result, niezmieniony source subject, Browser verification, wyłączną
+HKCU route bez Legacy, Bootstrap ACTIVE/PREVIOUS, M9b ACTIVE oraz M3c v2. Samo
+kopiowanie nie aktywuje targetu i nie tworzy drugiej authority.
+
 Dokumentacja nie powinna mówić „produkcja jest na HEAD X” tylko dlatego, że branch wskazuje X.
 
 Implementation baseline dokumentacji może być starszym commitem kodowym niż branch HEAD, jeżeli późniejsze commity dotyczą wyłącznie dokumentacji. To nadal nie mówi nic o zainstalowanym runtime.
