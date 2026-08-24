@@ -245,6 +245,37 @@ def _m3c_state(runtime: Path) -> dict[str, Any]:
     return read_m3c_state(runtime)
 
 
+def _active_source_tree(active: Mapping[str, Any]) -> str:
+    """Read the exact ACTIVE tree from the immutable bundle provenance.
+
+    The external Bootstrap slot manifest intentionally carries the source
+    commit but not the Git tree.  Older test fixtures may expose a tree
+    directly, but production authority keeps it in the signed/hashed
+    ``source-provenance.json`` inside the known-good ACTIVE bundle.
+    """
+
+    supplied = active.get("source_tree")
+    if supplied is not None:
+        return _sha40(supplied, "active.source_tree")
+    root = active.get("bundle_root")
+    if not isinstance(root, str) or not root:
+        _fail("bootstrap_subject_invalid", "ACTIVE bundle provenance root is missing")
+    provenance_path = Path(root) / "source-provenance.json"
+    provenance = _stable_json(provenance_path, field="ACTIVE source provenance")
+    required = {"schema", "runtime_id", "generation_id", "source_head", "source_tree", "native_artifact_manifest_sha256", "native_executable_sha256", "production_activation_performed", "provenance_sha256"}
+    if set(provenance) != required or provenance.get("schema") != "bdb-vnext-runtime-bundle-provenance-v1" or provenance.get("production_activation_performed") is not False:
+        _fail("bootstrap_subject_invalid", "ACTIVE source provenance identity differs")
+    supplied_digest = _digest(provenance.get("provenance_sha256"), "active.provenance_sha256")
+    payload = dict(provenance)
+    payload.pop("provenance_sha256")
+    if _semantic_digest(payload) != supplied_digest:
+        _fail("bootstrap_subject_invalid", "ACTIVE source provenance digest differs")
+    source_head = _sha40(provenance.get("source_head"), "active.provenance.source_head")
+    if source_head != active.get("source_commit"):
+        _fail("bootstrap_subject_invalid", "ACTIVE source provenance commit differs")
+    return _sha40(provenance.get("source_tree"), "active.provenance.source_tree")
+
+
 def _subject(
     *,
     authority: Path,
@@ -271,7 +302,7 @@ def _subject(
         routes = observe_windows_native_routes(runtime_root=deployed)
     except (M11cClientError, KeyError) as exc:
         _fail(getattr(exc, "code", "client_subject_unavailable"), str(exc))
-    if active.get("source_commit") != client.get("source_head") or active.get("source_tree") != client.get("source_tree"):
+    if active.get("source_commit") != client.get("source_head") or _active_source_tree(active) != client.get("source_tree"):
         _fail("bootstrap_client_source_mismatch", "Bootstrap ACTIVE and verified client source differ")
     if routes.get("target_registered") is not True or routes.get("target_conflict") or routes.get("legacy_route_present"):
         _fail("native_route_not_exclusive", "verified client route is not exact and Legacy-free")

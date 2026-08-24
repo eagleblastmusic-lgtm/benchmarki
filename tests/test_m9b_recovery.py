@@ -130,6 +130,50 @@ def test_missing_m9b_prepare_and_recovery_binds_current_subject(monkeypatch: pyt
     assert record.writer_enabled is True and record.intake_enabled is True
 
 
+def test_recovery_reads_active_tree_from_bundle_provenance_when_slot_omits_tree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    authority, deployed = _fixture(monkeypatch, tmp_path)
+    provenance_root = tmp_path / "active-bundle"
+    provenance_root.mkdir()
+    payload = {
+        "schema": "bdb-vnext-runtime-bundle-provenance-v1",
+        "runtime_id": "devmaster.bdb.vnext.runtime",
+        "generation_id": "bdb-vnext-g1",
+        "source_head": HEAD,
+        "source_tree": TREE,
+        "native_artifact_manifest_sha256": NATIVE,
+        "native_executable_sha256": EXECUTABLE,
+        "production_activation_performed": False,
+    }
+    from bdb_shared.evidence import canonical_json_bytes, semantic_digest
+
+    provenance_root.joinpath("source-provenance.json").write_bytes(
+        canonical_json_bytes({**payload, "provenance_sha256": semantic_digest(payload)})
+    )
+    monkeypatch.setattr(
+        recovery,
+        "observe_bootstrap_activation",
+        lambda **_: {
+            "status": "ACTIVE",
+            "production_activation_performed": True,
+            "state": {"state_sha256": BOOT, "active_manifest_sha256": ACTIVE, "previous_manifest_sha256": PREVIOUS},
+            "slots": {
+                "ACTIVE": {"known_good": True, "source_commit": HEAD, "bundle_root": str(provenance_root)},
+                "PREVIOUS": {"known_good": True},
+            },
+        },
+    )
+    prepared = recovery.prepare_missing_m9b_recovery(
+        authority_root=authority,
+        deployed_runtime_root=deployed,
+        recovery_id="m9b-recover-provenance",
+        historical_reconciliation_id="m11c-history",
+        historical_reconciliation_plan_sha256=HIST,
+    )
+    assert prepared["status"] == "PREPARED"
+
+
 @pytest.mark.parametrize(
     "point",
     [
