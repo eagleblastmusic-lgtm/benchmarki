@@ -36,9 +36,11 @@ from bdb_vnext.m11c_windows_clients import (
     observe_windows_native_routes,
     query_client_plan,
 )
+from bdb_vnext.project_launch import PROJECT_LAUNCH_QUEUE_SCHEMA
 
 
 PROMOTION_SCHEMA = "bdb-vnext-m11c-client-promotion-v1"
+NATIVE_RUNTIME_RESIDUE_RECOVERY_SCHEMA = "bdb-vnext-native-runtime-residue-recovery-v1"
 PROMOTION_STATES = frozenset(
     {
         "PREPARED",
@@ -114,6 +116,117 @@ def _transaction_id(stage_plan_sha256: str) -> str:
 
 def _transaction_path(production: Path, transaction_id: str) -> Path:
     return _transaction_root(production) / transaction_id
+
+
+def _native_residue_recovery_root(production: Path) -> Path:
+    return _transaction_root(production) / "native-runtime-residue"
+
+
+def _native_runtime_residue(production: Path) -> Path:
+    return production / "clients" / "native-host" / "_internal" / "runtime"
+
+
+def _load_native_residue_queue(root: Path) -> tuple[Path, bytes]:
+    if root.is_symlink() or not root.is_dir():
+        _fail("promotion_native_residue_unsupported", "Native runtime residue is not a regular directory")
+    entries = sorted(path for path in root.rglob("*") if path.is_file() or path.is_symlink())
+    queue = root / "control" / "project-launch-queue.json"
+    if entries != [queue] or queue.is_symlink() or not queue.is_file():
+        _fail("promotion_native_residue_unsupported", "Native runtime residue contains unsupported state")
+    raw = queue.read_bytes()
+    document = _load_json(queue, field="native runtime residue queue")
+    if set(document) != {"schema", "pending", "claim"} or document.get("schema") != PROJECT_LAUNCH_QUEUE_SCHEMA:
+        _fail("promotion_native_residue_unsupported", "Native runtime residue queue identity differs")
+    return queue, raw
+
+
+def _native_residue_subject(production: Path, residue: Path, raw: bytes) -> dict[str, Any]:
+    plan = _load_json(production / "clients" / "client-plan.json", field="production client plan")
+    plan_sha = plan.get("client_plan_sha256")
+    if not isinstance(plan_sha, str) or _digest({key: value for key, value in plan.items() if key != "client_plan_sha256"}) != plan_sha:
+        _fail("promotion_native_residue_subject_invalid", "production client plan identity differs")
+    payload = {
+        "schema": NATIVE_RUNTIME_RESIDUE_RECOVERY_SCHEMA,
+        "production_root": str(production),
+        "source_head": plan.get("source_head"),
+        "source_tree": plan.get("source_tree"),
+        "client_plan_sha256": plan_sha,
+        "residue_path": str(residue),
+        "queue_sha256": _digest_bytes(raw),
+    }
+    return {**payload, "subject_sha256": _digest(payload)}
+
+
+def _load_native_residue_subject(path: Path, production: Path) -> dict[str, Any]:
+    subject = _load_json(path, field="native runtime residue recovery subject")
+    supplied = subject.get("subject_sha256")
+    payload = dict(subject)
+    payload.pop("subject_sha256", None)
+    if (
+        subject.get("schema") != NATIVE_RUNTIME_RESIDUE_RECOVERY_SCHEMA
+        or subject.get("production_root") != str(production)
+        or not isinstance(supplied, str)
+        or _digest(payload) != supplied
+    ):
+        _fail("promotion_native_residue_recovery_corrupt", "Native runtime residue recovery subject differs")
+    return subject
+
+
+def _complete_native_residue_recovery(production: Path, transaction: Path, subject: Mapping[str, Any]) -> None:
+    source = _absolute_path(subject["residue_path"], field="native residue source")
+    expected_source = _native_runtime_residue(production)
+    archive = transaction / "preserved-runtime"
+    if source != expected_source:
+        _fail("promotion_native_residue_recovery_corrupt", "Native runtime residue source differs")
+    if source.exists() and not archive.exists():
+        _queue, raw = _load_native_residue_queue(source)
+        if _digest_bytes(raw) != subject.get("queue_sha256"):
+            _fail("promotion_native_residue_recovery_corrupt", "Native runtime residue changed before preservation")
+        _move_exact(source, archive, field="preserve Native runtime residue")
+    elif source.exists() or not archive.is_dir() or archive.is_symlink():
+        _fail("promotion_native_residue_recovery_corrupt", "Native runtime residue recovery paths conflict")
+    _queue, archived = _load_native_residue_queue(archive)
+    if _digest_bytes(archived) != subject.get("queue_sha256"):
+        _fail("promotion_native_residue_recovery_corrupt", "preserved Native runtime residue differs")
+    query_client_plan(runtime_root=production)
+    completion_path = transaction / "completed.json"
+    completion_payload = {
+        "schema": NATIVE_RUNTIME_RESIDUE_RECOVERY_SCHEMA,
+        "subject_sha256": subject["subject_sha256"],
+        "queue_sha256": subject["queue_sha256"],
+        "status": "PRESERVED_NOT_AUTHORITY",
+    }
+    completion = {**completion_payload, "completion_sha256": _digest(completion_payload)}
+    if completion_path.exists():
+        if _load_json(completion_path, field="native runtime residue recovery completion") != completion:
+            _fail("promotion_native_residue_recovery_corrupt", "Native runtime residue completion differs")
+    else:
+        _atomic_json(completion_path, completion, immutable=True)
+
+
+def _recover_native_runtime_residue(production: Path) -> None:
+    recovery_root = _native_residue_recovery_root(production)
+    if recovery_root.exists():
+        if recovery_root.is_symlink() or not recovery_root.is_dir():
+            _fail("promotion_native_residue_recovery_corrupt", "Native runtime residue recovery root differs")
+        transactions = sorted(item for item in recovery_root.iterdir() if item.is_dir() and not item.is_symlink())
+        if len(transactions) > 8:
+            _fail("promotion_native_residue_recovery_corrupt", "too many Native runtime residue recoveries")
+        for transaction in transactions:
+            subject = _load_native_residue_subject(transaction / "subject.json", production)
+            _complete_native_residue_recovery(production, transaction, subject)
+
+    residue = _native_runtime_residue(production)
+    if not residue.exists():
+        return
+    _queue, raw = _load_native_residue_queue(residue)
+    subject = _native_residue_subject(production, residue, raw)
+    transaction = recovery_root / subject["subject_sha256"].split(":", 1)[1]
+    if transaction.exists():
+        _fail("promotion_native_residue_recovery_corrupt", "Native runtime residue transaction already exists")
+    transaction.mkdir(parents=True)
+    _atomic_json(transaction / "subject.json", subject, immutable=True)
+    _complete_native_residue_recovery(production, transaction, subject)
 
 
 def _state_path(transaction: Path) -> Path:
@@ -547,6 +660,14 @@ def promote_client_plan(
     # Production must be coherent before any transaction is created.
     try:
         previous_result = query_client_plan(runtime_root=production)
+    except M11cClientError as exc:
+        if exc.code != "native_payload_stale":
+            raise M11cClientError("production_preflight_failed", "existing production client set is not coherent") from exc
+        _recover_native_runtime_residue(production)
+        try:
+            previous_result = query_client_plan(runtime_root=production)
+        except Exception as recovered_exc:
+            raise M11cClientError("production_preflight_failed", "existing production client set is not coherent") from recovered_exc
     except Exception as exc:
         raise M11cClientError("production_preflight_failed", "existing production client set is not coherent") from exc
     _route_is_coherent(production)

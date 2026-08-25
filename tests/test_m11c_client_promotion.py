@@ -155,6 +155,50 @@ def test_registry_mismatch_fails_before_live_mutation(tmp_path: Path, monkeypatc
     assert query_client_plan(runtime_root=production)["plan"]["source_head"] == "a" * 40
 
 
+def test_known_native_runtime_queue_residue_is_preserved_before_promotion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage, production, _old_stage, _result = _fixture(tmp_path, monkeypatch)
+    residue = production / "clients" / "native-host" / "_internal" / "runtime"
+    queue = residue / "control" / "project-launch-queue.json"
+    queue.parent.mkdir(parents=True)
+    raw = b'{"schema":"bdb-project-launch-queue-v1","pending":null,"claim":null}'
+    queue.write_bytes(raw)
+    original_query = promotion.query_client_plan
+
+    def reject_residue(*, runtime_root: str | Path):
+        if Path(runtime_root) == production and residue.exists():
+            raise M11cClientError("native_payload_stale", "simulated frozen payload mutation")
+        return original_query(runtime_root=runtime_root)
+
+    monkeypatch.setattr(promotion, "query_client_plan", reject_residue)
+    promoted = promotion.promote_client_plan(staged_runtime_root=stage, production_runtime_root=production)
+
+    assert promoted["status"] == "COMMITTED"
+    recovery_root = production / "recovery" / "client-promotions" / "native-runtime-residue"
+    preserved = list(recovery_root.glob("*/preserved-runtime/control/project-launch-queue.json"))
+    assert len(preserved) == 1
+    assert preserved[0].read_bytes() == raw
+    assert not residue.exists()
+
+
+def test_unknown_native_runtime_residue_fails_closed_without_moving_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stage_root, production, _old_stage, _result = _fixture(tmp_path, monkeypatch)
+    residue = production / "clients" / "native-host" / "_internal" / "runtime"
+    queue = residue / "control" / "project-launch-queue.json"
+    queue.parent.mkdir(parents=True)
+    queue.write_text('{"schema":"bdb-project-launch-queue-v1","pending":null,"claim":null}', encoding="utf-8")
+    extra = residue / "foreign.bin"
+    extra.write_bytes(b"foreign")
+    with pytest.raises(M11cClientError) as exc:
+        promotion._recover_native_runtime_residue(production)
+    assert exc.value.code == "promotion_native_residue_unsupported"
+    assert extra.read_bytes() == b"foreign"
+    assert queue.is_file()
+
+
 @pytest.mark.parametrize("fault_point", ["after_install_clients", "after_install_config", "before_verify"])
 def test_live_fault_rolls_back_previous_coherent_generation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault_point: str
