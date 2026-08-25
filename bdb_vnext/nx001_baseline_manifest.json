@@ -1,0 +1,81 @@
+{
+  "schema": "bdb-vnext-nx001-baseline-manifest-v1",
+  "task_id": "NX-001",
+  "project_id": "bdb-vnext-next-iteration",
+  "created_at": "2026-08-25T23:00:00Z",
+  "source_git": {
+    "branch": "bdb-vnext",
+    "head": "abb55690fcd583cfd9b2f1cd922e71709165b999",
+    "tree": "9ffc7cec9a2f131965ef12063ac892e7e63a0cae",
+    "upstream": "origin/bdb-vnext",
+    "clean_worktree_required": true
+  },
+  "single_root": {
+    "canonical_source_root": "C:\\Projekty\\DevMaster\\bartosz-dev-bridge-vnext",
+    "canonical_runtime_root": "C:\\Projekty\\DevMaster\\bartosz-dev-bridge-vnext\\runtime",
+    "shared_environment_root": "C:\\Projekty\\_Shared",
+    "disallow_appdata_runtime": true
+  },
+  "runtime_identity": {
+    "generation_id": "bdb-vnext-g1",
+    "protocol_generation": "bdb-vnext-protocol-v1",
+    "browser_extension_id": "mopnolkjddkmgojfjkenjobehhmmklll",
+    "browser_bundle_digest": "sha256:a9a8ed3b05908ea35f999c4716ddada7d44527f01f16b700170bc754a381d784",
+    "native_host_name": "com.bartosz.dev_bridge.vnext",
+    "native_executable_sha256": "sha256:fd19e6b77b1955f32c4b6ed83047c34c1337e6da6688cb1c0b434839e7a1c00e",
+    "native_manifest_sha256": "sha256:2576f8987ee7bfeea3fdef81edbdd0f93553b3ae5b72c4cb77193afa63bb258f",
+    "client_plan_sha256": "sha256:f2103ee2c304ebc6196607ec1c8cac17c8b37bab87e07c7fbb5ce968111d08bb",
+    "native_artifact_kind": "pyinstaller-onedir"
+  },
+  "control_state": {
+    "m3c_mode": "INTERNAL_CANONICAL_ONLY",
+    "m3c_schema": "bdb-vnext-m3c-control-v2",
+    "m9b_state": "ACTIVE",
+    "m9b_schema": "bdb-vnext-m9b-activation-v1",
+    "writer_enabled": true,
+    "intake_enabled": true
+  },
+  "relevant_schemas": [
+    {
+      "schema_name": "bdb-project-plan-v1.schema.json",
+      "category": "project_planning",
+      "description": "Immutable baseline project plan schema"
+    },
+    {
+      "schema_name": "bdb-project-execution-submission-v1.schema.json",
+      "category": "project_execution",
+      "description": "Canonical machine-readable task execution result schema"
+    },
+    {
+      "schema_name": "bdb-vnext-m11c-client-plan-v1.schema.json",
+      "category": "deployment",
+      "description": "Client staging and promotion deployment plan schema"
+    },
+    {
+      "schema_name": "bdb-vnext-m9b-activation-v1.schema.json",
+      "category": "runtime_control",
+      "description": "M9b dynamic writer and intake activation schema"
+    },
+    {
+      "schema_name": "bdb-vnext-m3c-admission-v1.schema.json",
+      "category": "runtime_control",
+      "description": "M3c static admission and kill-switch control schema"
+    },
+    {
+      "schema_name": "bdb-vnext-backup-manifest-v2.schema.json",
+      "category": "recovery",
+      "description": "Coordinated backup and recovery manifest schema"
+    },
+    {
+      "schema_name": "bdb-vnext-candidate-repo-view-v2.schema.json",
+      "category": "engineering_loop",
+      "description": "Candidate repository view and mutation authority schema"
+    },
+    {
+      "schema_name": "bdb-vnext-nx001-baseline-manifest-v1.schema.json",
+      "category": "baseline",
+      "description": "NX-001 source-bound implementation baseline manifest schema"
+    }
+  ],
+  "manifest_digest": "sha256:e0b82c827fe08c8aec308d7087e77cbbd9f98df20cca1af5b34499330d798c09"
+}

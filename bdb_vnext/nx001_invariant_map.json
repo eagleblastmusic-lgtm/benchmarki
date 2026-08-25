@@ -1,0 +1,157 @@
+{
+  "schema": "bdb-vnext-nx001-invariant-map-v1",
+  "invariants": [
+    {
+      "invariant_id": "INV-SR-001",
+      "invariant_class": "single_root",
+      "title": "Single-Root Repository and Runtime",
+      "statement": "C:\\Projekty\\DevMaster\\bartosz-dev-bridge-vnext and its runtime\\ subdirectory are the sole canonical root; no dual long-lived AppData production copy exists.",
+      "target_authority": "Single-Root Governance / Filesystem",
+      "existing_tests": [
+        "tests/test_single_root_migration.py",
+        "tests/test_m11c_single_authority_audit.py"
+      ],
+      "coverage_status": "VERIFIED_COVERED",
+      "notes": "AppData retired; preserved bytes under recovery are non-authoritative evidence."
+    },
+    {
+      "invariant_id": "INV-SR-002",
+      "invariant_class": "single_root",
+      "title": "Repo-Local Native Messaging Manifest",
+      "statement": "HKCU Native Messaging registry routes (both 32-bit and 64-bit) point to repo-local runtime manifest.",
+      "target_authority": "Windows Registry / Native Messaging",
+      "existing_tests": [
+        "tests/test_m11c_native_route_policy.py",
+        "tests/test_m11c_client_route_rebind.py"
+      ],
+      "coverage_status": "VERIFIED_COVERED",
+      "notes": ""
+    },
+    {
+      "invariant_id": "INV-SBR-001",
+      "invariant_class": "source_bound_runtime",
+      "title": "Client Promotion Source Binding",
+      "statement": "Client promotion requires exact matching source_head and source_tree; promotion artifact is PyInstaller onedir windowless.",
+      "target_authority": "m11c_client_promotion / Artifact Manifest",
+      "existing_tests": [
+        "tests/test_m11c_client_promotion.py",
+        "tests/test_m11c_native_artifact_windows.py"
+      ],
+      "coverage_status": "VERIFIED_COVERED",
+      "notes": ""
+    },
+    {
+      "invariant_id": "INV-SBR-002",
+      "invariant_class": "source_bound_runtime",
+      "title": "Post-Active Maintenance Fresh Verification",
+      "statement": "Maintenance mutation requires fresh m11c_client_verification matching active source HEAD before mutation.",
+      "target_authority": "m11c_post_active_maintenance",
+      "existing_tests": [
+        "tests/test_m11c_post_active_maintenance.py",
+        "tests/test_m11c_post_active_maintenance_client_binding.py"
+      ],
+      "coverage_status": "VERIFIED_COVERED",
+      "notes": ""
+    },
+    {
+      "invariant_id": "INV-SEP-001",
+      "invariant_class": "bootstrap_m9b_m3c_separation",
+      "title": "Static Admission Kill-Switch (M3c)",
+      "statement": "M3c control v2 maintains static mode/kill-switch (INTERNAL_CANONICAL_ONLY) without dynamic intake projection.",
+      "target_authority": "m3c_admission",
+      "existing_tests": [
+        "tests/test_vnext_m3c_admission.py"
+      ],
+      "coverage_status": "VERIFIED_COVERED",
+      "notes": ""
+    },
+    {
+      "invariant_id": "INV-SEP-002",
+      "invariant_class": "bootstrap_m9b_m3c_separation",
+      "title": "Dynamic Writer/Intake Authority (M9b)",
+      "statement": "M9b is the sole authority for active writer and intake state in production runtime.",
+      "target_authority": "m9b_activation",
+      "existing_tests": [
+        "tests/test_m11c_cutover.py",
+        "tests/test_m11c_m9a_production_boundary.py"
+      ],
+      "coverage_status": "VERIFIED_COVERED",
+      "notes": ""
+    },
+    {
+      "invariant_id": "INV-PEA-001",
+      "invariant_class": "project_execution_authority",
+      "title": "Project Memory and Execution Authority Separation",
+      "statement": "project-plan.json is immutable baseline history; runtime progress, cursors, and bindings belong strictly to Project Execution.",
+      "target_authority": "project_execution / project_memory",
+      "existing_tests": [
+        "tests/test_vnext_project_launch_browser_bridge.py",
+        "tests/test_project_launch_queue.py"
+      ],
+      "coverage_status": "VERIFIED_COVERED",
+      "notes": "Binding lifecycle uniqueness to be further hardened in NX-003."
+    },
+    {
+      "invariant_id": "INV-PEA-002",
+      "invariant_class": "project_execution_authority",
+      "title": "Deterministic Acceptance Pipeline",
+      "statement": "Canonical submission requires strict bdb-project-execution-submission-v1 schema and exact binding identity match.",
+      "target_authority": "project_workflow / acceptance",
+      "existing_tests": [
+        "tests/test_vnext_m3a_submission.py"
+      ],
+      "coverage_status": "VERIFIED_COVERED",
+      "notes": "Full result identity versioning to be extended in NX-004."
+    },
+    {
+      "invariant_id": "INV-BNP-001",
+      "invariant_class": "browser_native_protocol",
+      "title": "Durable Launch Handoff & Exactly-Once",
+      "statement": "Prompt handoff follows PENDING -> CLAIMED -> SENT/ACKED states to prevent duplicate sends across reloads.",
+      "target_authority": "project_launch / transport_worker",
+      "existing_tests": [
+        "tests/test_vnext_project_launch_browser_bridge.py",
+        "tests/test_browser_auto_send_confirmation_runtime.py"
+      ],
+      "coverage_status": "VERIFIED_COVERED",
+      "notes": ""
+    },
+    {
+      "invariant_id": "INV-BNP-002",
+      "invariant_class": "browser_native_protocol",
+      "title": "Physical Send Confirmation & Focus Resilience",
+      "statement": "AUTO send confirmation relies on physically observed DOM prompt submission (SEND_ATTEMPTED -> SEND_CONFIRMED -> ACKED), not window focus.",
+      "target_authority": "browser_extension_vnext / content_adapter.js",
+      "existing_tests": [
+        "tests/test_vnext_project_auto_browser.py",
+        "tests/test_browser_auto_send_confirmation_runtime.py"
+      ],
+      "coverage_status": "VERIFIED_COVERED",
+      "notes": ""
+    },
+    {
+      "invariant_id": "INV-FCI-001",
+      "invariant_class": "fail_closed_identity",
+      "title": "Fail-Closed on Identity / Correlation Mismatch",
+      "statement": "Any mismatch in project_id, task_id, execution_binding_id, correlation_id or repo HEAD rejects execution and halts AUTO.",
+      "target_authority": "project_workflow / project_execution",
+      "existing_tests": [
+        "tests/test_vnext_project_auto_browser.py"
+      ],
+      "coverage_status": "VERIFIED_COVERED",
+      "notes": ""
+    },
+    {
+      "invariant_id": "INV-FCI-002",
+      "invariant_class": "fail_closed_identity",
+      "title": "Replay Safety Without Duplicate Effects",
+      "statement": "Exact semantic replay of an already accepted submission returns idempotent receipt without creating duplicate attempts.",
+      "target_authority": "project_execution / project_workflow",
+      "existing_tests": [
+        "tests/test_browser_auto_replay_recovery_runtime.py"
+      ],
+      "coverage_status": "VERIFIED_COVERED",
+      "notes": ""
+    }
+  ]
+}

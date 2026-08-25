@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:bdb:schema:nx001-baseline-manifest:v1",
+  "title": "BDB vNext NX-001 Baseline Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "task_id",
+    "project_id",
+    "created_at",
+    "source_git",
+    "single_root",
+    "runtime_identity",
+    "control_state",
+    "relevant_schemas",
+    "manifest_digest"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "bdb-vnext-nx001-baseline-manifest-v1"
+    },
+    "task_id": {
+      "type": "string",
+      "const": "NX-001"
+    },
+    "project_id": {
+      "type": "string",
+      "const": "bdb-vnext-next-iteration"
+    },
+    "created_at": {
+      "type": "string"
+    },
+    "source_git": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["branch", "head", "tree", "upstream", "clean_worktree_required"],
+      "properties": {
+        "branch": { "type": "string" },
+        "head": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "upstream": { "type": "string" },
+        "clean_worktree_required": { "type": "boolean" }
+      }
+    },
+    "single_root": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonical_source_root",
+        "canonical_runtime_root",
+        "shared_environment_root",
+        "disallow_appdata_runtime"
+      ],
+      "properties": {
+        "canonical_source_root": { "type": "string" },
+        "canonical_runtime_root": { "type": "string" },
+        "shared_environment_root": { "type": "string" },
+        "disallow_appdata_runtime": { "type": "boolean" }
+      }
+    },
+    "runtime_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "generation_id",
+        "protocol_generation",
+        "browser_extension_id",
+        "browser_bundle_digest",
+        "native_host_name",
+        "native_executable_sha256",
+        "native_manifest_sha256",
+        "client_plan_sha256",
+        "native_artifact_kind"
+      ],
+      "properties": {
+        "generation_id": { "type": "string" },
+        "protocol_generation": { "type": "string" },
+        "browser_extension_id": { "type": "string" },
+        "browser_bundle_digest": { "type": "string" },
+        "native_host_name": { "type": "string" },
+        "native_executable_sha256": { "type": "string" },
+        "native_manifest_sha256": { "type": "string" },
+        "client_plan_sha256": { "type": "string" },
+        "native_artifact_kind": { "type": "string" }
+      }
+    },
+    "control_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "m3c_mode",
+        "m3c_schema",
+        "m9b_state",
+        "m9b_schema",
+        "writer_enabled",
+        "intake_enabled"
+      ],
+      "properties": {
+        "m3c_mode": { "type": "string" },
+        "m3c_schema": { "type": "string" },
+        "m9b_state": { "type": "string" },
+        "m9b_schema": { "type": "string" },
+        "writer_enabled": { "type": "boolean" },
+        "intake_enabled": { "type": "boolean" }
+      }
+    },
+    "relevant_schemas": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema_name", "category", "description"],
+        "properties": {
+          "schema_name": { "type": "string" },
+          "category": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "manifest_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}

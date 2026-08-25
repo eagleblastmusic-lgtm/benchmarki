@@ -1,0 +1,40 @@
+{
+  "schema": "bdb-vnext-nx001-stale-claims-v1",
+  "stale_claims": [
+    {
+      "claim_id": "STALE-001",
+      "category": "m2d_quality_gate",
+      "historical_assertion": "M2d Quality Gate 14 PASS",
+      "why_stale": "Historical benchmark M2d suite is pinned to frozen historical commit 4b724eda100345969eb236f877dd46f0bb91c0cb. Current active HEAD is abb5569.",
+      "qualification_requirement": "Cannot be cited as fresh PASS on active HEAD without running updated source-bound basis verification."
+    },
+    {
+      "claim_id": "STALE-002",
+      "category": "legacy_test_suite",
+      "historical_assertion": "Legacy CC 0.3 / 145 tests passed",
+      "why_stale": "Tests from legacy Control Center and command journal era reflect retired architectures with dual AppData roots and Promoter.",
+      "qualification_requirement": "Only vNext focused suite (65 focused tests) executed on current HEAD constitutes valid fresh test evidence."
+    },
+    {
+      "claim_id": "STALE-003",
+      "category": "appdata_runtime",
+      "historical_assertion": "%LOCALAPPDATA%\\BartoszDevBridge is active production runtime",
+      "why_stale": "Historical AppData production root was canonically retired under single-root migration. Repositories and runtime are exclusively under C:\\Projekty\\DevMaster.",
+      "qualification_requirement": "Any claim of AppData runtime authority is invalid and must be rejected."
+    },
+    {
+      "claim_id": "STALE-004",
+      "category": "historical_browser_witness",
+      "historical_assertion": "Browser verification PASS from earlier commits (e.g. eae9fee, 38cdd03)",
+      "why_stale": "Browser verification is strictly source-bound and valid only for the exact built bundle and source HEAD it was qualified against.",
+      "qualification_requirement": "Requires fresh m11c_client_verification matching HEAD abb5569."
+    },
+    {
+      "claim_id": "STALE-005",
+      "category": "bootstrap_candidate_slot",
+      "historical_assertion": "Bootstrap CANDIDATE slot ready for promotion",
+      "why_stale": "Previous candidate slots from earlier updates were either committed or discarded. Current state has CANDIDATE = null.",
+      "qualification_requirement": "New candidate slots require fresh creation and staging under M11a before promotion."
+    }
+  ]
+}
