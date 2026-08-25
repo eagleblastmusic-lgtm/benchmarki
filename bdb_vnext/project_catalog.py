@@ -19,25 +19,61 @@ from typing import Any, Iterable, Mapping
 
 from bdb_shared.evidence import canonical_json_bytes, semantic_digest
 
+from .project_plan_contract import (
+    DECISION_CLASSIFICATIONS,
+    DECISION_ALLOWED_KEYS,
+    DECISION_REQUIRED_KEYS,
+    GATE_ALLOWED_KEYS,
+    GATE_REQUIRED_KEYS,
+    ID_RE as _ID_RE,
+    MAX_ID_LENGTH,
+    MAX_ARCHITECTURE_SUMMARY_LENGTH,
+    MAX_CREATED_AT_LENGTH,
+    MAX_ID_LIST_64_ITEMS,
+    MAX_MILESTONE_DESCRIPTION_LENGTH,
+    MAX_MILESTONE_TITLE_LENGTH,
+    MAX_MILESTONES_COUNT,
+    MAX_PLANNING_OBJECTIVE_LENGTH,
+    MAX_PROJECT_ID_LENGTH,
+    MAX_PROJECT_NAME_LENGTH,
+    MAX_RECORD_STRING_LENGTH,
+    MAX_REVISION_REASON_LENGTH,
+    MAX_REVISION_SUMMARY_LENGTH,
+    MAX_RISK_SEVERITY_LENGTH,
+    MAX_TASK_DESCRIPTION_LENGTH,
+    MAX_TASK_TITLE_LENGTH,
+    MAX_TASKS_COUNT,
+    MAX_TEXT_LIST_128_ITEMS,
+    MAX_TEXT_LIST_128_STRING_LENGTH,
+    MAX_TEXT_LIST_64_ITEMS,
+    MAX_TEXT_LIST_64_STRING_LENGTH,
+    MILESTONE_ALLOWED_KEYS,
+    MILESTONE_REQUIRED_KEYS,
+    OPEN_QUESTION_ALLOWED_KEYS,
+    OPEN_QUESTION_REQUIRED_KEYS,
+    PLAN_STATUS_VALUES,
+    PLANNING_CONTEXT_KEYS,
+    PLANNING_SPECIFICATION_CATEGORIES,
+    PROJECT_PLAN_SCHEMA,
+    REQUIREMENTS_ALLOWED_KEYS,
+    RISK_ALLOWED_KEYS,
+    RISK_REQUIRED_KEYS,
+    SCOPE_ALLOWED_KEYS,
+    SPECIFICATION_ALLOWED_KEYS,
+    SPECIFICATION_REQUIRED_KEYS,
+    TASK_ALLOWED_KEYS,
+    TASK_OPTIONAL_KEYS,
+    TASK_REQUIRED_KEYS,
+    TEST_STRATEGY_ALLOWED_KEYS,
+    TOP_LEVEL_ALLOWED_KEYS,
+    TOP_LEVEL_REQUIRED_KEYS,
+)
 
 PROJECT_CATALOG_SCHEMA = "bdb-vnext-project-catalog-v1"
-PROJECT_PLAN_SCHEMA = "bdb-project-plan-v1"
 PROJECT_CATALOG_RELATIVE_PATH = Path("control") / "project-catalog.json"
 PROJECT_CATALOG_MAX_BYTES = 2 * 1024 * 1024
 PROJECT_PLAN_MAX_BYTES = 1024 * 1024
 PROJECT_STATUS_VALUES = frozenset({"new", "active", "paused", "blocked", "completed", "archived", "unknown"})
-PLAN_STATUS_VALUES = frozenset({"pending", "active", "review", "completed", "blocked", "skipped"})
-PLANNING_SPECIFICATION_CATEGORIES = frozenset({"domain", "data", "ui", "ux", "validation", "accessibility", "performance", "security", "testing", "release", "operations", "other"})
-DECISION_CLASSIFICATIONS = frozenset({
-    "architectural_decision", "product_decision", "scope_decision", "design_decision",
-    "architecture_requirement", "recommended_default", "domain_contract", "interaction_decision", "other",
-})
-PLANNING_CONTEXT_KEYS = frozenset({
-    "objective", "requirements", "scope", "assumptions", "decisions", "open_questions", "specifications",
-    "architecture", "test_strategy", "risks", "gates", "acceptance_scenarios", "definition_of_done",
-})
-TASK_OPTIONAL_KEYS = frozenset({"deliverables", "verification", "tests", "decision_ids", "specification_ids", "risk_ids"})
-_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$")
 _ALIAS_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 _GITHUB_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
 
@@ -113,8 +149,10 @@ def _record_list(value: object, field_name: str, *, required: set[str], optional
         for key in sorted(set(item) - {"id"}):
             if key == "interfaces":
                 normalized[key] = _bounded_text_list(item[key], f"{field_name}[{index}].interfaces", max_items=64, max_length=8_000)
+            elif key == "severity":
+                normalized[key] = _text(item[key], f"{field_name}[{index}].severity", max_length=MAX_RISK_SEVERITY_LENGTH)
             else:
-                normalized[key] = _text(item[key], f"{field_name}[{index}].{key}", max_length=4_000)
+                normalized[key] = _text(item[key], f"{field_name}[{index}].{key}", max_length=MAX_RECORD_STRING_LENGTH)
         records.append(normalized)
     return records
 
@@ -363,13 +401,13 @@ class ProjectPlan:
 def validate_project_plan(value: object, *, expected_project_id: str | None = None) -> ProjectPlan:
     if not isinstance(value, Mapping) or value.get("schema") != PROJECT_PLAN_SCHEMA:
         _fail("plan_schema_invalid", "project plan schema must be bdb-project-plan-v1")
-    _reject_unknown_keys(value, {"schema", "project_id", "project_name", "plan_version", "supersedes_version", "created_at", "revision_reason", "revision_summary", "milestones", "tasks", "current_task_id", "planning_context"}, "project plan")
-    project_id = _text(value.get("project_id"), "project_id", max_length=96)
+    _reject_unknown_keys(value, set(TOP_LEVEL_ALLOWED_KEYS), "project plan")
+    project_id = _text(value.get("project_id"), "project_id", max_length=MAX_PROJECT_ID_LENGTH)
     if not _ID_RE.fullmatch(project_id):
         _fail("plan_project_id_invalid", "project_id has an unsafe format")
     if expected_project_id is not None and project_id != expected_project_id:
         _fail("plan_project_mismatch", "plan project_id does not match the selected project")
-    project_name = _text(value.get("project_name"), "project_name", max_length=200)
+    project_name = _text(value.get("project_name"), "project_name", max_length=MAX_PROJECT_NAME_LENGTH)
     raw_version = value.get("plan_version")
     if isinstance(raw_version, bool) or not isinstance(raw_version, (str, int)):
         _fail("plan_version_invalid", "plan_version must be an integer version")
@@ -388,27 +426,28 @@ def validate_project_plan(value: object, *, expected_project_id: str | None = No
         created_at = _timestamp(created_at, "created_at")
     revision_reason = value.get("revision_reason")
     if revision_reason is not None:
-        revision_reason = _text(revision_reason, "revision_reason", max_length=1_000)
+        revision_reason = _text(revision_reason, "revision_reason", max_length=MAX_REVISION_REASON_LENGTH)
     revision_summary = value.get("revision_summary")
     if revision_summary is not None:
-        revision_summary = _text(revision_summary, "revision_summary", max_length=4_000)
+        revision_summary = _text(revision_summary, "revision_summary", max_length=MAX_REVISION_SUMMARY_LENGTH)
     milestones_raw = value.get("milestones")
     tasks_raw = value.get("tasks")
-    if not isinstance(milestones_raw, list) or not isinstance(tasks_raw, list) or len(milestones_raw) > 512 or len(tasks_raw) > 2_048:
+    if not isinstance(milestones_raw, list) or not isinstance(tasks_raw, list) or len(milestones_raw) > MAX_MILESTONES_COUNT or len(tasks_raw) > MAX_TASKS_COUNT:
         _fail("plan_size_invalid", "milestones/tasks exceed bounded limits")
     milestones: list[ProjectMilestone] = []
     milestone_ids: set[str] = set()
     for raw in milestones_raw:
         if not isinstance(raw, Mapping):
             _fail("plan_milestone_invalid", "milestone must be an object")
-        identifier = _text(raw.get("id"), "milestone.id", max_length=96)
+        _reject_unknown_keys(raw, set(MILESTONE_ALLOWED_KEYS), "milestone")
+        identifier = _text(raw.get("id"), "milestone.id", max_length=MAX_ID_LENGTH)
         if not _ID_RE.fullmatch(identifier) or identifier in milestone_ids:
             _fail("plan_milestone_invalid", "milestone IDs must be unique and bounded")
         status = _text(raw.get("status", "pending"), "milestone.status", max_length=16)
         if status not in PLAN_STATUS_VALUES:
             _fail("plan_status_invalid", "milestone status is unsupported")
         milestone_ids.add(identifier)
-        milestones.append(ProjectMilestone(identifier, _text(raw.get("title"), "milestone.title", max_length=300), _text(raw.get("description"), "milestone.description", max_length=4_000), status))
+        milestones.append(ProjectMilestone(identifier, _text(raw.get("title"), "milestone.title", max_length=MAX_MILESTONE_TITLE_LENGTH), _text(raw.get("description"), "milestone.description", max_length=MAX_MILESTONE_DESCRIPTION_LENGTH), status))
     planning_context = _planning_context(value.get("planning_context"))
     gate_ids = {item["id"] for item in (planning_context or {}).get("gates", [])}
     open_question_ids = {item["id"] for item in (planning_context or {}).get("open_questions", [])}
@@ -417,30 +456,30 @@ def validate_project_plan(value: object, *, expected_project_id: str | None = No
     for raw in tasks_raw:
         if not isinstance(raw, Mapping):
             _fail("plan_task_invalid", "task must be an object")
-        _reject_unknown_keys(raw, {"id", "milestone_id", "title", "description", "status", "dependencies", "acceptance_criteria", *TASK_OPTIONAL_KEYS}, "task")
-        identifier = _text(raw.get("id"), "task.id", max_length=96)
-        milestone_id = _text(raw.get("milestone_id"), "task.milestone_id", max_length=96)
+        _reject_unknown_keys(raw, set(TASK_ALLOWED_KEYS), "task")
+        identifier = _text(raw.get("id"), "task.id", max_length=MAX_ID_LENGTH)
+        milestone_id = _text(raw.get("milestone_id"), "task.milestone_id", max_length=MAX_ID_LENGTH)
         if not _ID_RE.fullmatch(identifier) or identifier in task_ids or milestone_id not in milestone_ids:
             _fail("plan_task_invalid", "task IDs and milestone references must be valid")
         status = _text(raw.get("status", "pending"), "task.status", max_length=16)
         if status not in PLAN_STATUS_VALUES:
             _fail("plan_status_invalid", "task status is unsupported")
-        dependencies = _list_of_text(raw.get("dependencies"), "task.dependencies", max_items=64)
-        acceptance = _list_of_text(raw.get("acceptance_criteria"), "task.acceptance_criteria", max_items=64)
+        dependencies = _list_of_text(raw.get("dependencies"), "task.dependencies", max_items=MAX_ID_LIST_64_ITEMS)
+        acceptance = _bounded_text_list(raw.get("acceptance_criteria"), "task.acceptance_criteria", max_items=MAX_TEXT_LIST_64_ITEMS, max_length=MAX_TEXT_LIST_64_STRING_LENGTH)
         if any(not _ID_RE.fullmatch(item) for item in dependencies) or len(set(dependencies)) != len(dependencies):
             _fail("plan_dependency_invalid", "task dependency IDs must be safe and unique")
-        deliverables = _bounded_text_list(raw.get("deliverables"), "task.deliverables", max_items=64, max_length=8_000)
-        verification = _bounded_text_list(raw.get("verification"), "task.verification", max_items=64, max_length=8_000)
-        tests = _bounded_text_list(raw.get("tests"), "task.tests", max_items=64, max_length=8_000)
-        decision_ids = _list_of_text(raw.get("decision_ids"), "task.decision_ids", max_items=64)
-        specification_ids = _list_of_text(raw.get("specification_ids"), "task.specification_ids", max_items=64)
-        risk_ids = _list_of_text(raw.get("risk_ids"), "task.risk_ids", max_items=64)
+        deliverables = _bounded_text_list(raw.get("deliverables"), "task.deliverables", max_items=MAX_TEXT_LIST_64_ITEMS, max_length=MAX_TEXT_LIST_64_STRING_LENGTH)
+        verification = _bounded_text_list(raw.get("verification"), "task.verification", max_items=MAX_TEXT_LIST_64_ITEMS, max_length=MAX_TEXT_LIST_64_STRING_LENGTH)
+        tests = _bounded_text_list(raw.get("tests"), "task.tests", max_items=MAX_TEXT_LIST_64_ITEMS, max_length=MAX_TEXT_LIST_64_STRING_LENGTH)
+        decision_ids = _list_of_text(raw.get("decision_ids"), "task.decision_ids", max_items=MAX_ID_LIST_64_ITEMS)
+        specification_ids = _list_of_text(raw.get("specification_ids"), "task.specification_ids", max_items=MAX_ID_LIST_64_ITEMS)
+        risk_ids = _list_of_text(raw.get("risk_ids"), "task.risk_ids", max_items=MAX_ID_LIST_64_ITEMS)
         optional_fields = frozenset(key for key in TASK_OPTIONAL_KEYS if key in raw)
         for field_name, identifiers in (("decision_ids", decision_ids), ("specification_ids", specification_ids), ("risk_ids", risk_ids)):
             if any(not _ID_RE.fullmatch(item) for item in identifiers) or len(set(identifiers)) != len(identifiers):
                 _fail("plan_reference_invalid", f"task.{field_name} contains unsafe or duplicate IDs")
         task_ids.add(identifier)
-        tasks.append(ProjectTask(identifier, milestone_id, _text(raw.get("title"), "task.title", max_length=300), _text(raw.get("description"), "task.description", max_length=4_000), status, dependencies, acceptance, tuple(deliverables), tuple(verification), tuple(tests), tuple(decision_ids), tuple(specification_ids), tuple(risk_ids), optional_fields))
+        tasks.append(ProjectTask(identifier, milestone_id, _text(raw.get("title"), "task.title", max_length=MAX_TASK_TITLE_LENGTH), _text(raw.get("description"), "task.description", max_length=MAX_TASK_DESCRIPTION_LENGTH), status, tuple(dependencies), tuple(acceptance), tuple(deliverables), tuple(verification), tuple(tests), tuple(decision_ids), tuple(specification_ids), tuple(risk_ids), optional_fields))
     dependency_kinds: dict[str, set[str]] = {}
     for task in tasks:
         for dependency in task.dependencies:
