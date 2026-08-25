@@ -436,6 +436,7 @@ def handle_message(
                         acknowledged = queue.peek() is None or (owns_claim and queue.acknowledge(launch_id=launch_id, claim_id=claim_id))
                     elif owns_claim:
                         coordinator.mark_launch_handoff_sent(project_id, execution_binding_id=binding_id, launch_id=launch_id, conversation_id=conversation_id)
+                        coordinator.mark_outbox_acknowledged(project_id, launch_id, conversation_id=conversation_id)
                         acknowledged = queue.acknowledge(launch_id=launch_id, claim_id=claim_id)
                     else:
                         acknowledged = False

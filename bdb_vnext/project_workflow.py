@@ -18,7 +18,7 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 from .project_catalog import PROJECT_PLAN_MAX_BYTES, ProjectBrief, ProjectCatalog, ProjectCatalogError, ProjectPlan, ProjectRecord, new_project_record, validate_project_plan
 from .project_launch import ProjectLaunch, ProjectLaunchQueueAdapter, ProjectLaunchQueueError
 from .project_memory import HANDOFF_MODES, PlanUpdatePreview, ProjectMemoryError, ProjectMemoryState, ProjectMemoryStore, available_project_tasks, build_handoff_prompt
-from .project_execution import ProjectExecutionBinding, ProjectExecutionCoordinator, ProjectExecutionError
+from .project_execution import ProjectExecutionBinding, ProjectExecutionCoordinator, ProjectExecutionError, ProjectLaunchOutboxRecord
 from .work_planning import WorkPlanningPrompt, WorkPlanningPromptBuilder, WorkPlanningPromptError
 
 
@@ -563,6 +563,95 @@ class ProjectWorkflow:
             raise ProjectWorkflowError("repo_head_unavailable", "registered project HEAD could not be read")
         return result.stdout.strip().lower()
 
+    def publish_outbox_launch(self, project_id: str, launch_id: str) -> ProjectLaunch:
+        """Project a prepared canonical outbox launch into the project launch queue."""
+        outbox_rec = self.execution.launch_outbox_record(project_id, launch_id)
+        if outbox_rec is None:
+            raise ProjectWorkflowError("launch_outbox_not_found", f"outbox launch '{launch_id}' does not exist in canonical memory")
+
+        pending = self.queue.peek()
+        if pending is not None:
+            if pending.launch_id == launch_id:
+                self.execution.mark_outbox_published(project_id, launch_id)
+                return pending
+            # Check if existing queue item is an orphan
+            is_orphan = True
+            if pending.project_id and pending.execution_binding_id:
+                try:
+                    q_outbox = self.execution.launch_outbox_record(pending.project_id, pending.launch_id)
+                    if q_outbox is not None and q_outbox.status in {"PENDING", "PUBLISHED"}:
+                        is_orphan = False
+                except Exception:
+                    pass
+            if is_orphan:
+                # Clear orphan projection fail-closed
+                with self.queue._lock():
+                    self.queue._write_state_unlocked(None, None)
+            else:
+                raise ProjectWorkflowError("queue_pending", "project launch queue already contains another canonical binding")
+
+        launch = self.queue.enqueue(
+            repo_alias=outbox_rec.repo_alias,
+            prompt=outbox_rec.prompt,
+            auto_send=outbox_rec.auto_send,
+            ttl_minutes=10,
+            launch_id=outbox_rec.launch_id,
+            project_id=outbox_rec.project_id,
+            plan_version=outbox_rec.plan_version,
+            task_id=outbox_rec.task_id,
+            execution_binding_id=outbox_rec.execution_binding_id,
+            correlation_id=outbox_rec.correlation_id,
+            command_id=outbox_rec.command_id,
+            expected_repo_head_before=outbox_rec.expected_repo_head_before,
+        )
+        self.execution.mark_outbox_published(project_id, launch_id)
+        return launch
+
+    def reconcile_launch_outbox(self, project_id: str | None = None) -> dict[str, Any]:
+        """Reconcile canonical launch outbox records against downstream queue projection.
+
+        - Rebuilds/republishes any PENDING outbox records.
+        - Identifies and clears orphan queue entries that lack canonical outbox authority.
+        """
+        projects = [self.catalog.get(project_id)] if project_id else self.catalog.read()
+        reconciled_count = 0
+        orphans_cleared = 0
+
+        for project in projects:
+            if project is None or not project.plan_imported:
+                continue
+            pending_records = self.execution.pending_outbox_records(project.project_id)
+            for rec in pending_records:
+                q_pending = self.queue.peek()
+                if q_pending is None:
+                    self.publish_outbox_launch(project.project_id, rec.launch_id)
+                    reconciled_count += 1
+                elif q_pending.launch_id == rec.launch_id:
+                    self.execution.mark_outbox_published(project.project_id, rec.launch_id)
+                    reconciled_count += 1
+
+        # Check for orphan queue projection
+        q_pending = self.queue.peek()
+        if q_pending is not None:
+            orphan = True
+            if q_pending.project_id and q_pending.execution_binding_id:
+                try:
+                    outbox = self.execution.launch_outbox_record(q_pending.project_id, q_pending.launch_id)
+                    if outbox is not None:
+                        orphan = False
+                except Exception:
+                    orphan = True
+            if orphan:
+                with self.queue._lock():
+                    self.queue._write_state_unlocked(None, None)
+                orphans_cleared += 1
+
+        return {
+            "status": "reconciled",
+            "reconciled_count": reconciled_count,
+            "orphans_cleared": orphans_cleared,
+        }
+
     def _queue_execution_prompt(self, project_id: str, kind: str, *, binding_override: ProjectExecutionBinding | None = None) -> ProjectLaunch:
         project = self.catalog.get(project_id)
         if project is None:
@@ -581,16 +670,16 @@ class ProjectWorkflow:
                 isinstance(auto.get("milestone_run_id"), str) and
                 bool(auto.get("milestone_run_id"))
             )
-            pending = self.queue.peek()
-            if pending is not None:
-                if pending.launch_id != binding.launch_id or pending.execution_binding_id != binding.execution_binding_id:
-                    raise ProjectWorkflowError("queue_pending", "project launch queue already contains another canonical binding")
-                launch = pending
-            else:
-                launch = self.queue.enqueue(repo_alias=project.repo_alias, prompt=prompt, auto_send=auto_send, ttl_minutes=10, launch_id=binding.launch_id, project_id=binding.project_id, plan_version=binding.plan_version, task_id=binding.task_id, execution_binding_id=binding.execution_binding_id, correlation_id=binding.correlation_id, command_id=binding.command_id, expected_repo_head_before=binding.expected_repo_head_before)
-            self.execution.persist_binding(binding)
-            if auto_send:
-                self.execution.mark_launch_handoff_pending(project_id, binding)
+            # Step 1: ATOMIC PREPARE (binding + PENDING outbox) in Project Memory
+            persisted_binding, outbox_rec = self.execution.prepare_launch(
+                project_id,
+                binding=binding,
+                prompt=prompt,
+                auto_send=auto_send,
+                ttl_minutes=10,
+            )
+            # Step 2: QUEUE PROJECTION
+            launch = self.publish_outbox_launch(project_id, outbox_rec.launch_id)
         except (ProjectExecutionError, ProjectLaunchQueueError) as exc:
             raise ProjectWorkflowError(getattr(exc, "code", "project_execution_binding_failed"), str(exc)) from exc
         updated = ProjectRecord(**{**project.__dict__, "last_launch_id": launch.launch_id, "last_correlation_id": binding.correlation_id})
@@ -629,6 +718,7 @@ __all__ = [
     "ProjectExecutionBinding",
     "ProjectExecutionCoordinator",
     "ProjectExecutionError",
+    "ProjectLaunchOutboxRecord",
     "ProjectWorkflow",
     "ProjectWorkflowError",
     "SubprocessCommandRunner",

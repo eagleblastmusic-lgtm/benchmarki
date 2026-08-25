@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping
 
 from bdb_shared.evidence import semantic_digest
@@ -46,6 +46,11 @@ PROJECT_EXECUTION_SCHEMA = "bdb-project-execution-v1"
 PROJECT_EXECUTION_SUBMISSION_SCHEMA = "bdb-project-execution-submission-v1"
 PROJECT_EXECUTION_CHECKPOINT_SCHEMA = "bdb-project-execution-checkpoint-v1"
 PROJECT_LAUNCH_HANDOFF_SCHEMA = "bdb-project-launch-handoff-v1"
+PROJECT_LAUNCH_OUTBOX_SCHEMA = "bdb-project-launch-outbox-v1"
+OUTBOX_STATUS_PENDING = "PENDING"
+OUTBOX_STATUS_PUBLISHED = "PUBLISHED"
+OUTBOX_STATUS_ACKNOWLEDGED = "ACKNOWLEDGED"
+OUTBOX_STATUS_VALUES = frozenset({OUTBOX_STATUS_PENDING, OUTBOX_STATUS_PUBLISHED, OUTBOX_STATUS_ACKNOWLEDGED})
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _HEAD_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _CONVERSATION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
@@ -260,7 +265,7 @@ def _result_identity(binding: "ProjectExecutionBinding", result: Mapping[str, An
 def _execution_document(state: ProjectMemoryState) -> dict[str, Any]:
     raw = state.execution if isinstance(state.execution, Mapping) else {}
     if not raw:
-        return {"schema": PROJECT_EXECUTION_SCHEMA, "bindings": [], "attempts": [], "acceptance_results": [], "checkpoints": {}, "task_statuses": {}, "gate_statuses": {}, "open_question_statuses": {}, "milestones_completed": [], "milestone_runs": {}, "launch_handoffs": {}}
+        return {"schema": PROJECT_EXECUTION_SCHEMA, "bindings": [], "attempts": [], "acceptance_results": [], "checkpoints": {}, "task_statuses": {}, "gate_statuses": {}, "open_question_statuses": {}, "milestones_completed": [], "milestone_runs": {}, "launch_handoffs": {}, "launch_outbox": {}}
     if raw.get("schema", PROJECT_EXECUTION_SCHEMA) != PROJECT_EXECUTION_SCHEMA:
         _fail("execution_schema_invalid", "project execution state schema differs")
     result = dict(raw)
@@ -274,6 +279,7 @@ def _execution_document(state: ProjectMemoryState) -> dict[str, Any]:
     result.setdefault("milestones_completed", [])
     result.setdefault("milestone_runs", {})
     result.setdefault("launch_handoffs", {})
+    result.setdefault("launch_outbox", {})
     for key in ("bindings", "attempts", "acceptance_results"):
         if not isinstance(result[key], list) or len(result[key]) > 512 or any(not isinstance(item, Mapping) for item in result[key]):
             _fail("execution_shape_invalid", f"execution.{key} is invalid")
@@ -283,7 +289,7 @@ def _execution_document(state: ProjectMemoryState) -> dict[str, Any]:
         _fail("execution_shape_invalid", "execution.milestone_runs is invalid")
     if not isinstance(result["checkpoints"], Mapping) or len(result["checkpoints"]) > 512:
         _fail("execution_shape_invalid", "execution.checkpoints is invalid")
-    for key in ("gate_statuses", "open_question_statuses", "launch_handoffs"):
+    for key in ("gate_statuses", "open_question_statuses", "launch_handoffs", "launch_outbox"):
         if not isinstance(result[key], Mapping) or len(result[key]) > 512:
             _fail("execution_shape_invalid", f"execution.{key} is invalid")
     return result
@@ -291,8 +297,6 @@ def _execution_document(state: ProjectMemoryState) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class ProjectExecutionBinding:
-    execution_binding_id: str
-    project_id: str
     execution_binding_id: str
     project_id: str
     plan_version: str
@@ -345,6 +349,74 @@ class TaskAcceptanceResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {"schema": "bdb-task-acceptance-result-v1", "project_id": self.project_id, "plan_version": self.plan_version, "task_id": self.task_id, "attempt_id": self.attempt_id, "criteria": [dict(item) for item in self.criteria], "overall": self.overall, "created_at": self.created_at}
+
+
+@dataclass(frozen=True)
+class ProjectLaunchOutboxRecord:
+    launch_id: str
+    execution_binding_id: str
+    project_id: str
+    plan_version: str
+    task_id: str
+    correlation_id: str
+    command_id: str
+    repo_alias: str
+    prompt: str
+    auto_send: bool
+    status: str
+    created_at: str
+    updated_at: str
+    expires_at: str
+    expected_repo_head_before: str | None = None
+    schema: str = PROJECT_LAUNCH_OUTBOX_SCHEMA
+
+    def to_dict(self) -> dict[str, Any]:
+        value: dict[str, Any] = {
+            "schema": self.schema,
+            "launch_id": self.launch_id,
+            "execution_binding_id": self.execution_binding_id,
+            "project_id": self.project_id,
+            "plan_version": self.plan_version,
+            "task_id": self.task_id,
+            "correlation_id": self.correlation_id,
+            "command_id": self.command_id,
+            "repo_alias": self.repo_alias,
+            "prompt": self.prompt,
+            "auto_send": self.auto_send,
+            "status": self.status,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "expires_at": self.expires_at,
+        }
+        if self.expected_repo_head_before is not None:
+            value["expected_repo_head_before"] = self.expected_repo_head_before
+        return value
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "ProjectLaunchOutboxRecord":
+        if not isinstance(value, Mapping) or value.get("schema") != PROJECT_LAUNCH_OUTBOX_SCHEMA:
+            _fail("launch_outbox_schema_invalid", "launch outbox schema differs")
+        status = _text(value.get("status"), "launch_outbox.status", max_length=16)
+        if status not in OUTBOX_STATUS_VALUES:
+            _fail("launch_outbox_status_invalid", f"launch outbox status '{status}' is unsupported")
+        return cls(
+            launch_id=_identifier(value.get("launch_id"), "launch_id"),
+            execution_binding_id=_identifier(value.get("execution_binding_id"), "execution_binding_id"),
+            project_id=_identifier(value.get("project_id"), "project_id"),
+            plan_version=_text(value.get("plan_version"), "plan_version", max_length=32),
+            task_id=_identifier(value.get("task_id"), "task_id"),
+            correlation_id=_identifier(value.get("correlation_id"), "correlation_id"),
+            command_id=_identifier(value.get("command_id"), "command_id"),
+            repo_alias=_text(value.get("repo_alias"), "repo_alias", max_length=64),
+            prompt=_text(value.get("prompt"), "prompt", max_length=100_000),
+            auto_send=bool(value.get("auto_send", False)),
+            status=status,
+            created_at=_text(value.get("created_at"), "created_at", max_length=64),
+            updated_at=_text(value.get("updated_at"), "updated_at", max_length=64),
+            expires_at=_text(value.get("expires_at"), "expires_at", max_length=64),
+            expected_repo_head_before=value.get("expected_repo_head_before"),
+            schema=PROJECT_LAUNCH_OUTBOX_SCHEMA,
+        )
 
 
 @dataclass(frozen=True)
@@ -789,6 +861,197 @@ class ProjectExecutionCoordinator:
             return replace(state, execution=execution), handoff
 
         return memory.execution_transaction(transition)
+
+    def prepare_launch(
+        self,
+        project_id: str,
+        *,
+        binding: ProjectExecutionBinding,
+        prompt: str,
+        auto_send: bool = False,
+        ttl_minutes: int = 10,
+    ) -> tuple[ProjectExecutionBinding, ProjectLaunchOutboxRecord]:
+        """Atomically commit the execution binding and PENDING launch outbox record in one transaction.
+
+        No downstream projection or queue write occurs before this transaction commits.
+        """
+        _identifier(binding.project_id, "project_id")
+        project, plan, memory = self._project(binding.project_id)
+        if binding.plan_version != plan.plan_version or binding.repo_alias != project.repo_alias:
+            _fail("execution_binding_stale", "binding no longer matches current project authority")
+
+        normalized_prompt = _text(prompt, "prompt", max_length=100_000)
+        now_dt = datetime.now(timezone.utc)
+        now_iso = _utc_now()
+        expires_iso = (now_dt + timedelta(minutes=ttl_minutes)).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, tuple[ProjectExecutionBinding, ProjectLaunchOutboxRecord]]:
+            execution = _execution_document(state)
+            task = next((item for item in plan.tasks if item.task_id == binding.task_id), None)
+            if task is None:
+                _fail("task_not_found", "execution task does not exist")
+
+            # Check existing binding
+            existing = next((item for item in execution["bindings"] if item.get("execution_binding_id") == binding.execution_binding_id), None)
+            if existing is not None:
+                if semantic_digest(existing) != semantic_digest(binding.to_dict()):
+                    _fail("execution_binding_conflict", "binding identity already contains different bytes")
+                persisted_binding = _binding_from_dict(existing)
+            else:
+                blockers = task_prerequisite_blockers(plan, state, task)
+                if blockers:
+                    _fail(
+                        "execution_prerequisites_blocked",
+                        "task prerequisites are not satisfied",
+                        details={"task_id": task.task_id, "blocking_dependencies": [dict(item) for item in blockers]},
+                    )
+                task_bindings = [
+                    b for b in execution["bindings"]
+                    if b.get("task_id") == binding.task_id and str(b.get("plan_version")) == str(binding.plan_version)
+                ]
+                max_existing_gen = max((int(b.get("generation", 1)) for b in task_bindings), default=0)
+                effective_gen = max(binding.generation, max_existing_gen + 1)
+
+                for b in execution["bindings"]:
+                    if b.get("task_id") == binding.task_id and str(b.get("plan_version")) == str(binding.plan_version):
+                        if b.get("status") == STATUS_ACTIVE and not b.get("superseded"):
+                            validate_binding_transition(STATUS_ACTIVE, STATUS_SUPERSEDED)
+                            b["status"] = STATUS_SUPERSEDED
+                            b["superseded"] = True
+                            if not b.get("finished_at"):
+                                b["finished_at"] = now_iso
+
+                persisted_binding = replace(binding, generation=effective_gen, status=STATUS_ACTIVE, superseded=False)
+                execution["bindings"].append(persisted_binding.to_dict())
+                statuses = dict(execution.get("task_statuses", {}))
+                statuses.setdefault(binding.task_id, "active")
+                execution["task_statuses"] = statuses
+                execution["current_task_id"] = binding.task_id
+                execution["current_binding_id"] = binding.execution_binding_id
+
+            # Prepare Outbox Record (PENDING)
+            outbox_dict = dict(execution.get("launch_outbox", {}))
+            existing_outbox = outbox_dict.get(binding.launch_id)
+            if existing_outbox is not None:
+                outbox_rec = ProjectLaunchOutboxRecord.from_dict(existing_outbox)
+                if (outbox_rec.project_id != project_id or
+                    outbox_rec.execution_binding_id != binding.execution_binding_id or
+                    outbox_rec.task_id != binding.task_id):
+                    _fail("launch_outbox_conflict", "launch outbox identity already contains different bytes")
+            else:
+                outbox_rec = ProjectLaunchOutboxRecord(
+                    launch_id=binding.launch_id,
+                    execution_binding_id=binding.execution_binding_id,
+                    project_id=project.project_id,
+                    plan_version=str(plan.plan_version),
+                    task_id=binding.task_id,
+                    correlation_id=binding.correlation_id,
+                    command_id=binding.command_id,
+                    repo_alias=project.repo_alias,
+                    prompt=normalized_prompt,
+                    auto_send=auto_send,
+                    status=OUTBOX_STATUS_PENDING,
+                    created_at=now_iso,
+                    updated_at=now_iso,
+                    expires_at=expires_iso,
+                    expected_repo_head_before=binding.expected_repo_head_before,
+                )
+                outbox_dict[binding.launch_id] = outbox_rec.to_dict()
+                execution["launch_outbox"] = outbox_dict
+
+            # If auto_send, ensure handoffs record exists as well
+            if auto_send:
+                handoffs = dict(execution.get("launch_handoffs", {}))
+                if binding.execution_binding_id not in handoffs:
+                    handoffs[binding.execution_binding_id] = {
+                        "schema": PROJECT_LAUNCH_HANDOFF_SCHEMA,
+                        "project_id": project_id,
+                        "execution_binding_id": binding.execution_binding_id,
+                        "task_id": binding.task_id,
+                        "launch_id": binding.launch_id,
+                        "status": "PENDING",
+                        "updated_at": now_iso,
+                    }
+                    execution["launch_handoffs"] = handoffs
+
+            updated = replace(state, execution=execution)
+            updated = memory._append_event(
+                updated,
+                "EXECUTION_BOUND",
+                f"Powiązano wykonanie z zadaniem {binding.task_id} (gen={persisted_binding.generation})",
+                task_id=binding.task_id,
+                plan_version=binding.plan_version,
+                correlation_id=binding.correlation_id,
+            )
+            updated = memory._append_event(
+                updated,
+                "EXECUTION_STARTED",
+                f"Rozpoczęto próbę zadania {binding.task_id} (gen={persisted_binding.generation})",
+                task_id=binding.task_id,
+                plan_version=binding.plan_version,
+                correlation_id=binding.correlation_id,
+            )
+            return updated, (persisted_binding, outbox_rec)
+
+        return memory.execution_transaction(transition)
+
+    def mark_outbox_published(self, project_id: str, launch_id: str) -> ProjectLaunchOutboxRecord:
+        _project, _plan, memory = self._project(project_id)
+        now_iso = _utc_now()
+
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, ProjectLaunchOutboxRecord]:
+            execution = _execution_document(state)
+            outbox_dict = dict(execution.get("launch_outbox", {}))
+            raw = outbox_dict.get(launch_id)
+            if raw is None:
+                _fail("launch_outbox_not_found", f"launch outbox record '{launch_id}' does not exist")
+            current = ProjectLaunchOutboxRecord.from_dict(raw)
+            if current.status == OUTBOX_STATUS_PENDING:
+                updated_rec = replace(current, status=OUTBOX_STATUS_PUBLISHED, updated_at=now_iso)
+                outbox_dict[launch_id] = updated_rec.to_dict()
+                execution["launch_outbox"] = outbox_dict
+                return replace(state, execution=execution), updated_rec
+            return state, current
+
+        return memory.execution_transaction(transition)
+
+    def mark_outbox_acknowledged(self, project_id: str, launch_id: str, *, conversation_id: str | None = None) -> ProjectLaunchOutboxRecord:
+        _project, _plan, memory = self._project(project_id)
+        now_iso = _utc_now()
+
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, ProjectLaunchOutboxRecord]:
+            execution = _execution_document(state)
+            outbox_dict = dict(execution.get("launch_outbox", {}))
+            raw = outbox_dict.get(launch_id)
+            if raw is None:
+                _fail("launch_outbox_not_found", f"launch outbox record '{launch_id}' does not exist")
+            current = ProjectLaunchOutboxRecord.from_dict(raw)
+            if current.status != OUTBOX_STATUS_ACKNOWLEDGED:
+                updated_rec = replace(current, status=OUTBOX_STATUS_ACKNOWLEDGED, updated_at=now_iso)
+                outbox_dict[launch_id] = updated_rec.to_dict()
+                execution["launch_outbox"] = outbox_dict
+                return replace(state, execution=execution), updated_rec
+            return state, current
+
+        return memory.execution_transaction(transition)
+
+    def launch_outbox_record(self, project_id: str, launch_id: str) -> ProjectLaunchOutboxRecord | None:
+        _project, _plan, memory = self._project(project_id)
+        execution = _execution_document(memory.read_state())
+        raw = execution.get("launch_outbox", {}).get(launch_id)
+        if raw is None:
+            return None
+        return ProjectLaunchOutboxRecord.from_dict(raw)
+
+    def pending_outbox_records(self, project_id: str) -> list[ProjectLaunchOutboxRecord]:
+        _project, _plan, memory = self._project(project_id)
+        execution = _execution_document(memory.read_state())
+        results = []
+        for raw in execution.get("launch_outbox", {}).values():
+            rec = ProjectLaunchOutboxRecord.from_dict(raw)
+            if rec.status == OUTBOX_STATUS_PENDING:
+                results.append(rec)
+        return results
 
     def record_checkpoint(self, project_id: str, execution_binding_id: str, *, status: str, progress_summary: str = "", external_reference: str | None = None, last_progress_at: str | None = None) -> dict[str, Any]:
         binding = self.binding(project_id, execution_binding_id)
@@ -1361,7 +1624,25 @@ class ProjectExecutionCoordinator:
         project, plan, memory = self._project(project_id); state = memory.read_state(); execution = _execution_document(state)
         active_run = execution.get("active_milestone_run") if isinstance(execution.get("active_milestone_run"), Mapping) else None
         auto_progress = self._milestone_auto_projection(plan, state, active_run) if active_run else None
-        return {"schema": PROJECT_EXECUTION_SCHEMA, "project_id": project_id, "plan_version": plan.plan_version, "task_statuses": dict(execution.get("task_statuses", {})), "gate_statuses": dict(execution.get("gate_statuses", {})), "open_question_statuses": dict(execution.get("open_question_statuses", {})), "bindings": list(execution["bindings"]), "attempts": list(execution["attempts"]), "acceptance_results": list(execution["acceptance_results"]), "checkpoints": dict(execution.get("checkpoints", {})), "launch_handoffs": dict(execution.get("launch_handoffs", {})), "current_binding_id": execution.get("current_binding_id"), "current_task_id": execution.get("current_task_id"), "available_tasks": [task.task_id for task in (available_project_tasks(plan, state, str(active_run.get("milestone_id"))) if active_run else available_project_tasks(plan, state))], "milestone_auto": {**(auto_progress or {}), "milestone_run_id": active_run.get("milestone_run_id")} if active_run and auto_progress else None, "watchdog": self.watchdog(project_id), "stale_result": bool(execution.get("stale_result", False))}
+        return {"schema": PROJECT_EXECUTION_SCHEMA, "project_id": project_id, "plan_version": plan.plan_version, "task_statuses": dict(execution.get("task_statuses", {})), "gate_statuses": dict(execution.get("gate_statuses", {})), "open_question_statuses": dict(execution.get("open_question_statuses", {})), "bindings": list(execution["bindings"]), "attempts": list(execution["attempts"]), "acceptance_results": list(execution["acceptance_results"]), "checkpoints": dict(execution.get("checkpoints", {})), "launch_handoffs": dict(execution.get("launch_handoffs", {})), "launch_outbox": dict(execution.get("launch_outbox", {})), "current_binding_id": execution.get("current_binding_id"), "current_task_id": execution.get("current_task_id"), "available_tasks": [task.task_id for task in (available_project_tasks(plan, state, str(active_run.get("milestone_id"))) if active_run else available_project_tasks(plan, state))], "milestone_auto": {**(auto_progress or {}), "milestone_run_id": active_run.get("milestone_run_id")} if active_run and auto_progress else None, "watchdog": self.watchdog(project_id), "stale_result": bool(execution.get("stale_result", False))}
 
 
-__all__ = ["PROJECT_EXECUTION_SCHEMA", "PROJECT_EXECUTION_SUBMISSION_SCHEMA", "PROJECT_EXECUTION_CHECKPOINT_SCHEMA", "PROJECT_LAUNCH_HANDOFF_SCHEMA", "ProjectExecutionAttempt", "ProjectExecutionBinding", "ProjectExecutionSubmission", "ProjectExecutionCoordinator", "ProjectExecutionError", "TaskAcceptanceResult", "execution_result_digest"]
+__all__ = [
+    "PROJECT_EXECUTION_SCHEMA",
+    "PROJECT_EXECUTION_SUBMISSION_SCHEMA",
+    "PROJECT_EXECUTION_CHECKPOINT_SCHEMA",
+    "PROJECT_LAUNCH_HANDOFF_SCHEMA",
+    "PROJECT_LAUNCH_OUTBOX_SCHEMA",
+    "OUTBOX_STATUS_PENDING",
+    "OUTBOX_STATUS_PUBLISHED",
+    "OUTBOX_STATUS_ACKNOWLEDGED",
+    "OUTBOX_STATUS_VALUES",
+    "ProjectExecutionAttempt",
+    "ProjectExecutionBinding",
+    "ProjectExecutionSubmission",
+    "ProjectExecutionCoordinator",
+    "ProjectExecutionError",
+    "ProjectLaunchOutboxRecord",
+    "TaskAcceptanceResult",
+    "execution_result_digest",
+]
