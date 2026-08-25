@@ -12,6 +12,7 @@ import json
 import os
 import re
 import secrets
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -26,10 +27,11 @@ from bdb_vnext.composition import default_vnext_runtime_root
 PROJECT_LAUNCH_SCHEMA = "bdb-project-launch-v1"
 PROJECT_LAUNCH_QUEUE_SCHEMA = "bdb-project-launch-queue-v1"
 PROJECT_LAUNCH_CLAIM_SCHEMA = "bdb-project-launch-claim-v1"
+PROJECT_LAUNCH_LOCK_SCHEMA = "bdb-project-launch-lock-v1"
 MAX_PROJECT_PROMPT_CHARS = 50_000
 _ALIAS_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
-_LOCK_TIMEOUT_SECONDS = 3.0
-_STALE_LOCK_SECONDS = 30.0
+_LOCK_TIMEOUT_SECONDS = 5.0
+_STALE_LOCK_SECONDS = 10.0
 
 
 def _utc_now() -> datetime:
@@ -38,7 +40,6 @@ def _utc_now() -> datetime:
 
 def default_project_launch_queue_path() -> Path:
     """Return the one queue path shared by the canonical GUI and Native host."""
-
     return (default_vnext_runtime_root() / "control" / "project-launch-queue.json").absolute()
 
 
@@ -120,14 +121,14 @@ class ProjectLaunch:
         if not isinstance(value, Mapping) or value.get("schema") != PROJECT_LAUNCH_SCHEMA:
             raise ValueError("project launch schema is unsupported")
         launch_id = _uuid_text(value.get("launch_id"), "launch_id")
-        repo_alias = value.get("repo_alias")
-        prompt = value.get("prompt")
+        repo_alias = str(value.get("repo_alias") or "")
+        prompt = str(value.get("prompt") or "")
         auto_send = value.get("auto_send")
         created_at = value.get("created_at")
         expires_at = value.get("expires_at")
-        if not isinstance(repo_alias, str) or _ALIAS_RE.fullmatch(repo_alias) is None:
-            raise ValueError("repo_alias has an unsafe format")
-        if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > MAX_PROJECT_PROMPT_CHARS:
+        if _ALIAS_RE.fullmatch(repo_alias) is None:
+            raise ValueError("repo_alias must match repository alias format")
+        if not prompt or len(prompt) > MAX_PROJECT_PROMPT_CHARS:
             raise ValueError("prompt must be non-empty and bounded")
         if not isinstance(auto_send, bool):
             raise ValueError("project launch auto_send must be boolean")
@@ -189,6 +190,36 @@ class ProjectLaunchClaim:
         return cls(claim_id, launch_id, claimed_at, expires_at)
 
 
+@dataclass(frozen=True)
+class ProjectLaunchLockInfo:
+    owner_token: str
+    pid: int
+    acquired_at: str
+    stale_after_seconds: float
+    schema: str = PROJECT_LAUNCH_LOCK_SCHEMA
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "owner_token": self.owner_token,
+            "pid": self.pid,
+            "acquired_at": self.acquired_at,
+            "stale_after_seconds": self.stale_after_seconds,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "ProjectLaunchLockInfo":
+        if not isinstance(value, Mapping) or value.get("schema") != PROJECT_LAUNCH_LOCK_SCHEMA:
+            raise ValueError("invalid lock schema")
+        return cls(
+            owner_token=str(value["owner_token"]),
+            pid=int(value["pid"]),
+            acquired_at=str(value["acquired_at"]),
+            stale_after_seconds=float(value.get("stale_after_seconds", _STALE_LOCK_SECONDS)),
+            schema=PROJECT_LAUNCH_LOCK_SCHEMA,
+        )
+
+
 class ProjectLaunchQueueError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -202,6 +233,7 @@ class ProjectLaunchQueueAdapter:
         self.path = Path(path or default_project_launch_queue_path()).expanduser().absolute()
         self.lock_path = self.path.with_name(self.path.name + ".lock")
         self.now_fn = now_fn or _utc_now
+        self._thread_lock = threading.Lock()
 
     def _from_dict(self, value: Mapping[str, Any]) -> ProjectLaunch:
         try:
@@ -271,102 +303,97 @@ class ProjectLaunchQueueAdapter:
         command_id: str | None = None,
         expected_repo_head_before: str | None = None,
     ) -> ProjectLaunch:
-        if not isinstance(repo_alias, str) or _ALIAS_RE.fullmatch(repo_alias) is None:
-            raise ProjectLaunchQueueError("repo_alias_invalid", "repo_alias is not bounded")
-        normalized = prompt.strip()
-        if not normalized or len(normalized) > MAX_PROJECT_PROMPT_CHARS:
-            raise ProjectLaunchQueueError("prompt_invalid", "prompt is empty or exceeds its bound")
-        if not isinstance(auto_send, bool):
-            raise ProjectLaunchQueueError("auto_send_invalid", "auto_send must be boolean")
-        if isinstance(ttl_minutes, bool) or not isinstance(ttl_minutes, int) or not 1 <= ttl_minutes <= 60:
-            raise ProjectLaunchQueueError("ttl_invalid", "ttl_minutes must be between 1 and 60")
-        supplied_launch_id = launch_id or str(uuid.uuid4())
+        if ttl_minutes <= 0 or ttl_minutes > 60 * 24:
+            raise ProjectLaunchQueueError("queue_ttl_invalid", "ttl_minutes must be positive and bounded")
+        created_dt = self.now_fn().astimezone(timezone.utc)
+        expires_dt = created_dt + timedelta(minutes=ttl_minutes)
+        created_at = _utc_text(created_dt)
+        expires_at = _utc_text(expires_dt)
         try:
-            supplied_launch_id = _uuid_text(supplied_launch_id, "launch_id")
-        except ValueError as exc:
-            raise ProjectLaunchQueueError("launch_id_invalid", str(exc)) from exc
-        metadata = {
-            field: value
-            for field, value in {
-                "project_id": project_id,
-                "plan_version": plan_version,
-                "task_id": task_id,
-                "execution_binding_id": execution_binding_id,
-                "correlation_id": correlation_id,
-                "command_id": command_id,
-                "expected_repo_head_before": expected_repo_head_before,
-            }.items()
-            if value is not None
-        }
-        if any(not isinstance(value, str) or not value or len(value) > 256 for value in metadata.values()):
-            raise ProjectLaunchQueueError("metadata_invalid", "project launch metadata is invalid")
-        with self._lock():
-            pending, claim = self._normalize_expiry(*self._read_state_unlocked())
-            if pending is not None:
-                raise ProjectLaunchQueueError("queue_pending", "project launch queue already contains a pending prompt")
-            now = self.now_fn().astimezone(timezone.utc)
-            launch = ProjectLaunch(
-                launch_id=supplied_launch_id,
+            candidate = ProjectLaunch(
+                launch_id=launch_id or str(uuid.uuid4()),
                 repo_alias=repo_alias,
-                prompt=normalized,
+                prompt=prompt,
                 auto_send=auto_send,
-                created_at=_utc_text(now),
-                expires_at=_utc_text(now + timedelta(minutes=ttl_minutes)),
-                **metadata,
+                created_at=created_at,
+                expires_at=expires_at,
+                project_id=project_id,
+                plan_version=plan_version,
+                task_id=task_id,
+                execution_binding_id=execution_binding_id,
+                correlation_id=correlation_id,
+                command_id=command_id,
+                expected_repo_head_before=expected_repo_head_before,
             )
-            self._write_state_unlocked(launch, None)
-            return launch
-
-    def claim(self, *, launch_id: str, claim_id: str, lease_seconds: int = 30) -> ProjectLaunch | None:
-        try:
-            launch_id = _uuid_text(launch_id, "launch_id")
-            claim_id = _uuid_text(claim_id, "claim_id")
         except ValueError as exc:
-            raise ProjectLaunchQueueError("claim_id_invalid", str(exc)) from exc
-        if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int) or not 5 <= lease_seconds <= 120:
-            raise ProjectLaunchQueueError("lease_invalid", "lease_seconds must be between 5 and 120")
+            raise ProjectLaunchQueueError("queue_payload_invalid", str(exc)) from exc
+
         with self._lock():
             raw_pending, raw_claim = self._read_state_unlocked()
-            pending, current = self._normalize_expiry(raw_pending, raw_claim)
-            if pending is None or pending.launch_id != launch_id:
-                if (pending, current) != (raw_pending, raw_claim):
-                    self._write_state_unlocked(pending, current)
+            pending, _ = self._normalize_expiry(raw_pending, raw_claim)
+            if pending is not None:
+                raise ProjectLaunchQueueError("queue_pending", "queue already contains an unexpired launch")
+            self._write_state_unlocked(candidate, None)
+            return candidate
+
+    def claim(self, *, launch_id: str, claim_id: str, lease_seconds: int = 30) -> ProjectLaunchClaim | None:
+        if lease_seconds <= 0 or lease_seconds > 600:
+            raise ProjectLaunchQueueError("queue_lease_invalid", "lease_seconds must be positive and bounded")
+        try:
+            validated_launch = _uuid_text(launch_id, "launch_id")
+            validated_claim = _uuid_text(claim_id, "claim_id")
+        except ValueError as exc:
+            raise ProjectLaunchQueueError("queue_claim_invalid", str(exc)) from exc
+
+        now_dt = self.now_fn().astimezone(timezone.utc)
+        expires_dt = now_dt + timedelta(seconds=lease_seconds)
+        claimed_at = _utc_text(now_dt)
+        expires_at = _utc_text(expires_dt)
+
+        with self._lock():
+            raw_pending, raw_claim = self._read_state_unlocked()
+            pending, claim = self._normalize_expiry(raw_pending, raw_claim)
+            if pending is None or pending.launch_id != validated_launch:
+                if (pending, claim) != (raw_pending, raw_claim):
+                    self._write_state_unlocked(pending, claim)
                 return None
-            if current is not None:
-                if current.claim_id == claim_id:
+            if claim is not None:
+                if claim.claim_id == validated_claim and claim.launch_id == validated_launch:
                     return pending
                 return None
-            now = self.now_fn().astimezone(timezone.utc)
             new_claim = ProjectLaunchClaim(
-                claim_id=claim_id,
-                launch_id=launch_id,
-                claimed_at=_utc_text(now),
-                expires_at=_utc_text(now + timedelta(seconds=lease_seconds)),
+                claim_id=validated_claim,
+                launch_id=validated_launch,
+                claimed_at=claimed_at,
+                expires_at=expires_at,
             )
             self._write_state_unlocked(pending, new_claim)
             return pending
 
     def acknowledge(self, *, launch_id: str, claim_id: str) -> bool:
         try:
-            launch_id = _uuid_text(launch_id, "launch_id")
-            claim_id = _uuid_text(claim_id, "claim_id")
+            validated_launch = _uuid_text(launch_id, "launch_id")
+            validated_claim = _uuid_text(claim_id, "claim_id")
         except ValueError as exc:
-            raise ProjectLaunchQueueError("claim_id_invalid", str(exc)) from exc
+            raise ProjectLaunchQueueError("queue_ack_invalid", str(exc)) from exc
+
         with self._lock():
-            pending, claim = self._normalize_expiry(*self._read_state_unlocked())
-            if pending is None or claim is None or pending.launch_id != launch_id or claim.launch_id != launch_id or claim.claim_id != claim_id:
+            raw_pending, raw_claim = self._read_state_unlocked()
+            pending, claim = self._normalize_expiry(raw_pending, raw_claim)
+            if (
+                pending is not None
+                and claim is not None
+                and pending.launch_id == validated_launch
+                and claim.launch_id == validated_launch
+                and claim.claim_id == validated_claim
+            ):
+                self._write_state_unlocked(None, None)
+                return True
+            if (pending, claim) != (raw_pending, raw_claim):
                 self._write_state_unlocked(pending, claim)
-                return False
-            self._write_state_unlocked(None, None)
-            return True
+            return False
 
     def claim_matches(self, *, launch_id: str, claim_id: str) -> bool:
-        """Return whether the caller currently owns the pending launch lease."""
-        try:
-            launch_id = _uuid_text(launch_id, "launch_id")
-            claim_id = _uuid_text(claim_id, "claim_id")
-        except ValueError as exc:
-            raise ProjectLaunchQueueError("claim_id_invalid", str(exc)) from exc
         with self._lock():
             raw_pending, raw_claim = self._read_state_unlocked()
             pending, claim = self._normalize_expiry(raw_pending, raw_claim)
@@ -380,33 +407,94 @@ class ProjectLaunchQueueAdapter:
                 and claim.claim_id == claim_id
             )
 
-    @contextmanager
-    def _lock(self) -> Iterator[None]:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor: int | None = None
-        deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
-        while descriptor is None:
-            try:
-                descriptor = os.open(self.lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            except FileExistsError:
-                try:
-                    if time.time() - self.lock_path.stat().st_mtime >= _STALE_LOCK_SECONDS:
-                        self.lock_path.unlink()
-                        continue
-                except FileNotFoundError:
-                    continue
-                if time.monotonic() >= deadline:
-                    raise ProjectLaunchQueueError("queue_busy", "project launch queue is busy")
-                time.sleep(0.01)
+    def _read_lock_info_safe(self) -> tuple[ProjectLaunchLockInfo | None, float | None]:
+        """Safely read lock file and return (parsed_info, mtime)."""
         try:
-            os.write(descriptor, f"{os.getpid()}\n".encode("ascii"))
-            os.close(descriptor)
-            descriptor = None
-            yield
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
-            self.lock_path.unlink(missing_ok=True)
+            mtime = self.lock_path.stat().st_mtime
+            raw = self.lock_path.read_text(encoding="utf-8-sig")
+            try:
+                data = json.loads(raw)
+                return ProjectLaunchLockInfo.from_dict(data), mtime
+            except Exception:
+                return None, mtime
+        except (FileNotFoundError, PermissionError, OSError):
+            return None, None
+
+    def _is_lock_stale(self, info: ProjectLaunchLockInfo | None, mtime: float | None) -> bool:
+        now_ts = time.time()
+        if info is not None:
+            try:
+                acquired_dt = _parse_utc(info.acquired_at, "acquired_at")
+                if now_ts - acquired_dt.timestamp() >= info.stale_after_seconds:
+                    return True
+            except Exception:
+                pass
+        if mtime is not None and (now_ts - mtime >= _STALE_LOCK_SECONDS):
+            return True
+        return False
+
+    @contextmanager
+    def _lock(self) -> Iterator[str]:
+        """Ownership-aware, compare-before-release lock.
+
+        Yields owner_token. Safely handles Windows PermissionError during concurrency.
+        """
+        with self._thread_lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            owner_token = uuid.uuid4().hex
+            pid = os.getpid()
+            acquired = False
+            deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+            backoff = 0.002
+            acquired_ts = 0.0
+
+            while not acquired:
+                descriptor: int | None = None
+                try:
+                    descriptor = os.open(self.lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    now_str = _utc_text(self.now_fn())
+                    lock_info = ProjectLaunchLockInfo(
+                        owner_token=owner_token,
+                        pid=pid,
+                        acquired_at=now_str,
+                        stale_after_seconds=_STALE_LOCK_SECONDS,
+                    )
+                    payload = json.dumps(lock_info.to_dict(), ensure_ascii=False, indent=2).encode("utf-8")
+                    os.write(descriptor, payload)
+                    os.close(descriptor)
+                    descriptor = None
+                    acquired = True
+                    acquired_ts = time.time()
+                    break
+                except (FileExistsError, PermissionError):
+                    info, mtime = self._read_lock_info_safe()
+                    if self._is_lock_stale(info, mtime):
+                        try:
+                            self.lock_path.unlink()
+                        except (FileNotFoundError, PermissionError, OSError):
+                            pass
+                        continue
+
+                    if time.monotonic() >= deadline:
+                        raise ProjectLaunchQueueError("queue_busy", "project launch queue is busy") from None
+                    time.sleep(backoff)
+                    backoff = min(0.02, backoff * 1.5)
+                finally:
+                    if descriptor is not None:
+                        try:
+                            os.close(descriptor)
+                        except OSError:
+                            pass
+
+            try:
+                yield owner_token
+            finally:
+                try:
+                    info, _ = self._read_lock_info_safe()
+                    if info is not None and info.owner_token == owner_token:
+                        self.lock_path.unlink(missing_ok=True)
+                except (FileNotFoundError, PermissionError, OSError):
+                    pass
 
 
 __all__ = [
@@ -414,8 +502,10 @@ __all__ = [
     "PROJECT_LAUNCH_SCHEMA",
     "PROJECT_LAUNCH_QUEUE_SCHEMA",
     "PROJECT_LAUNCH_CLAIM_SCHEMA",
+    "PROJECT_LAUNCH_LOCK_SCHEMA",
     "ProjectLaunch",
     "ProjectLaunchClaim",
+    "ProjectLaunchLockInfo",
     "ProjectLaunchQueueAdapter",
     "ProjectLaunchQueueError",
     "default_project_launch_queue_path",
