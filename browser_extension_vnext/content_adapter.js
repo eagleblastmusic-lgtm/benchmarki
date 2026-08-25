@@ -663,8 +663,15 @@ function projectExactUserMessageCount(prompt) {
   for (const node of document.querySelectorAll("[data-message-author-role='user']")) {
     if (!(node instanceof HTMLElement)) continue;
     if (typeof node.closest === "function" && node.closest(".bdb-vnext-project-launch-status, .bdb-vnext-project-execution-panel")) continue;
-    const value = typeof node.innerText === "string" ? node.innerText : node.textContent || "";
-    if (value === prompt) count += 1;
+    const descendants = typeof node.querySelectorAll === "function" ? Array.from(node.querySelectorAll("*")) : [];
+    const candidates = [node, ...descendants];
+    const exact = candidates.some((candidate) => {
+      if (!(candidate instanceof HTMLElement) || !projectVisible(candidate)) return false;
+      if (typeof candidate.closest === "function" && candidate.closest("button, [role='button'], [role='group'], [role='toolbar'], textarea, input, select, [contenteditable='true'], .bdb-vnext-project-launch-status, .bdb-vnext-project-execution-panel")) return false;
+      const value = typeof candidate.innerText === "string" ? candidate.innerText : candidate.textContent || "";
+      return value === prompt;
+    });
+    if (exact) count += 1;
   }
   return count;
 }

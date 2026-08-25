@@ -124,6 +124,17 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
               }
               querySelector() { return null; }
               querySelectorAll(selector) {
+                if (selector === "*") {
+                  const found = [];
+                  const visit = (item) => {
+                    for (const child of item.children || []) {
+                      found.push(child);
+                      visit(child);
+                    }
+                  };
+                  visit(this);
+                  return found;
+                }
                 if (this.kind === "form" && selector.startsWith("button")) return selector === "button[data-testid='send-button']" && mode !== "nosend" ? [sendButton] : [];
                 const found = [];
                 const visit = (item) => {
@@ -157,7 +168,10 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
               events.push("send");
               if (mode !== "noeffect") setTimeout(() => {
                 composer.value = "";
-                const message = new Element("user", prompt);
+                const message = new Element("user", mode === "collapsed" ? "" : prompt);
+                if (mode === "collapsed") {
+                  message.append(new Element("content", prompt), new Element("button", "Pokaż więcej"));
+                }
                 userMessages.push(message);
                 documentElement.append(message);
               }, 0);
@@ -263,13 +277,13 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
               const submitMessages = messages.filter((message) => message.type === "bdb-vnext-project-execution-submit");
               const claimMessages = messages.filter((message) => message.type === "bdb-vnext-project-launch-claim");
               const ackMessages = messages.filter((message) => message.type === "bdb-vnext-project-launch-ack");
-              if (mode === "happy" || mode === "completed") {
+              if (mode === "happy" || mode === "collapsed" || mode === "completed") {
                 assert.equal(submitMessages.length, 1, "one result submit despite observer+sweep");
                 assert.equal(claimMessages.length, mode === "completed" ? 0 : 1);
                 assert.equal(ackMessages.length, mode === "completed" ? 0 : 1);
-                assert.equal(sendClicks, mode === "happy" ? 1 : 0);
+                assert.equal(sendClicks, mode === "happy" || mode === "collapsed" ? 1 : 0);
                 assert.equal(composer.value, "");
-                if (mode === "happy") assert.deepEqual(events, ["send", "ack"]);
+                if (mode === "happy" || mode === "collapsed") assert.deepEqual(events, ["send", "ack"]);
               } else if (mode === "sent") {
                 assert.equal(submitMessages.length, 1);
                 assert.equal(claimMessages.length, 1);
@@ -321,7 +335,7 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
         ),
         encoding="utf-8",
     )
-    for mode in ("happy", "completed", "nonempty", "edited", "stopped", "nosend", "noeffect", "sent", "fail", "replay-fail", "stale", "wrong"):
+    for mode in ("happy", "collapsed", "completed", "nonempty", "edited", "stopped", "nosend", "noeffect", "sent", "fail", "replay-fail", "stale", "wrong"):
         completed = subprocess.run(
             [node, str(harness), str(ROOT / "browser_extension_vnext" / "content_adapter.js"), mode],
             capture_output=True,
