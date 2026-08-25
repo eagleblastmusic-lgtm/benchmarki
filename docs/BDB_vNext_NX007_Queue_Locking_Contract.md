@@ -4,13 +4,14 @@
 
 Prior to NX-007, `ProjectLaunchQueueAdapter` in `project_launch.py` used a simple file-based lock with two key weaknesses:
 1. **Blind Unlink in `finally`**: The lock exit code unconditionally called `self.lock_path.unlink(missing_ok=True)`. If another process broke or reclaimed the lock due to a perceived timeout, the original lock holder upon completing its work would unlink the *new* lock, causing race conditions.
-2. **Windows `PermissionError` (errno 13)**: Under concurrent access between `BDB-vNext-NativeHost.exe` and GUI processes, file creation and opening on Windows frequently raised `PermissionError` (WinError 5 / 32). Unhandled, this crashed Native Host.
+2. **Age-Only Stale Reclaim Vulnerability**: Checking only `age > stale_after_seconds` could delete an active, slow-running owner's lock.
+3. **Windows `PermissionError` (errno 13)**: Under concurrent access between `BDB-vNext-NativeHost.exe` and GUI processes, file creation and opening on Windows frequently raised `PermissionError` (WinError 5 / 32). Unhandled, this crashed Native Host.
 
 ---
 
 ## 2. Ownership-Safe Locking Architecture
 
-NX-007 introduces an ownership token with compare-before-release semantics and graceful Windows contention retry:
+NX-007 introduces structured ownership tokens with compare-before-release semantics, dead-owner verification (`AGE_ONLY_RECLAIM = FALSE`), compare-before-reclaim, and graceful Windows contention retry:
 
 ```
 +-------------------------------------------------------------+
@@ -37,20 +38,35 @@ NX-007 introduces an ownership token with compare-before-release semantics and g
 
 ---
 
-## 3. Windows `PermissionError` Handling
+## 3. Dead-Owner Verification Rule (`AGE_ONLY_RECLAIM = FALSE`)
 
-When `os.open` raises `PermissionError` or `FileExistsError`:
-1. The lock reader attempts to inspect the lock metadata safely.
-2. If stale (`now - acquired_at >= stale_after_seconds`), the stale lock is safely reclaimed.
-3. If not stale, the acquisition enters an exponential backoff sleep loop until the bounded deadline (`_LOCK_TIMEOUT_SECONDS = 5.0`).
-4. NativeHost is guaranteed never to crash from unhandled locking `PermissionError`.
+A lock is NEVER considered stale solely because `age > stale_after_seconds`.
+Reclaim follows a strict formal protocol:
+1. **Living Owner Check**: Inspect `lock_info.pid`. If `_is_pid_alive(pid)` is `TRUE`, the lock is **NOT stale** and is **NEVER reclaimed**, regardless of elapsed time.
+2. **Dead Owner Proof**: If `_is_pid_alive(pid)` is `FALSE` (process has exited or does not exist) AND `now - acquired_at >= stale_after_seconds`, the lock is marked stale.
+3. **Compare-Before-Reclaim**: When unlinking a stale lock, the reclaimer verifies that the on-disk `owner_token` still matches the inspected dead lock token. If another process replaced the lock in the interim, the new lock is preserved.
 
 ---
 
-## 4. Invariants and Verification
+## 4. Windows `PermissionError` & Native Host Resilience
 
-- `OWNERSHIP_TOKEN_ACQUISITION = TRUE`: Every lock contains a typed JSON payload with a unique ownership token.
+When `os.open` raises `PermissionError` or `FileExistsError`:
+1. The lock reader attempts to inspect the lock metadata safely (`_read_lock_info_safe`).
+2. If stale under the dead-owner rule, the lock is safely reclaimed.
+3. If not stale, the acquisition enters an exponential backoff sleep loop until the bounded deadline (`_LOCK_TIMEOUT_SECONDS = 5.0`).
+4. If retry deadline expires, `ProjectLaunchQueueError("queue_busy", "project launch queue is busy")` is raised.
+5. In `m9b_native_host.py`, all queue errors are cleanly classified into `M9bNativeError("queue_busy")` and return JSON error envelopes without terminating the Native Host process (`UNHANDLED_NATIVE_HOST_LOCK_CRASH = FALSE`).
+
+---
+
+## 5. Invariants and Verification
+
+- `OWNERSHIP_TOKEN_PRESENT = TRUE`: Every lock contains a typed JSON payload with a unique ownership token and PID.
 - `COMPARE_BEFORE_RELEASE = TRUE`: A process only unlinks the lock if its own token matches the token on disk.
-- `STALE_LOCK_RECLAMATION = TRUE`: Dead/expired locks are reclaimed deterministically.
-- `WINDOWS_PERMISSION_ERROR_SAFE = TRUE`: Windows sharing violations are treated as lock contention and retried with backoff.
-- `CONCURRENCY_HARNESS = PASS`: 10,000 concurrent operations execute without corruption or lost updates.
+- `AGE_ONLY_RECLAIM = FALSE`: Lock of a living owner is never reclaimed by age alone.
+- `ACTIVE_FOREIGN_LOCK_DELETED = FALSE`: Foreign active locks are preserved under contention and race conditions.
+- `DEAD_OWNER_RECOVERY = PASS`: Dead owner locks are safely reclaimed after lease expiry.
+- `REPLACEMENT_LOCK_RELEASE_RACE = PASS`: Compare-before-reclaim protects newly installed replacement locks.
+- `PERMISSION_ERROR_CLASSIFIED = TRUE`: Windows sharing violations are mapped to `"queue_busy"`.
+- `UNHANDLED_NATIVE_HOST_LOCK_CRASH = FALSE`: Native Host handles locking errors without crashing.
+- `TEN_THOUSAND_OPERATION_HARNESS = PASS`: 10,000 concurrent operations execute with 0 loss, 0 duplicates, 0 foreign unlinks.

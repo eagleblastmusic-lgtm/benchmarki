@@ -66,6 +66,36 @@ def _uuid_text(value: object, field: str) -> str:
     return value
 
 
+def _is_pid_alive(pid: int) -> bool:
+    """Check if process with given PID is currently active and alive."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(0x1000, False, pid)
+            if not handle:
+                return kernel32.GetLastError() == 5
+            try:
+                exit_code = wintypes.DWORD()
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    STILL_ACTIVE = 259
+                    return bool(exit_code.value == STILL_ACTIVE)
+                return False
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return True
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except (ProcessLookupError, PermissionError):
+            return False
+
+
 def _atomic_json_write(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8")
@@ -421,14 +451,23 @@ class ProjectLaunchQueueAdapter:
             return None, None
 
     def _is_lock_stale(self, info: ProjectLaunchLockInfo | None, mtime: float | None) -> bool:
+        """Determine whether a lock can be safely reclaimed.
+
+        Invariant: AGE_ONLY_RECLAIM = FALSE.
+        If owner process is alive, the lock is NEVER stale, even if age > stale_after_seconds.
+        Only locks where the owner is confirmed dead (or unparseable legacy locks older than threshold) are reclaimed.
+        """
         now_ts = time.time()
         if info is not None:
+            if _is_pid_alive(info.pid):
+                return False
             try:
                 acquired_dt = _parse_utc(info.acquired_at, "acquired_at")
                 if now_ts - acquired_dt.timestamp() >= info.stale_after_seconds:
                     return True
             except Exception:
-                pass
+                return True
+            return False
         if mtime is not None and (now_ts - mtime >= _STALE_LOCK_SECONDS):
             return True
         return False
@@ -470,7 +509,12 @@ class ProjectLaunchQueueAdapter:
                     info, mtime = self._read_lock_info_safe()
                     if self._is_lock_stale(info, mtime):
                         try:
-                            self.lock_path.unlink()
+                            current_info, _ = self._read_lock_info_safe()
+                            if current_info is not None and info is not None:
+                                if current_info.owner_token == info.owner_token:
+                                    self.lock_path.unlink()
+                            elif current_info is None and info is None and self.lock_path.exists():
+                                self.lock_path.unlink()
                         except (FileNotFoundError, PermissionError, OSError):
                             pass
                         continue
