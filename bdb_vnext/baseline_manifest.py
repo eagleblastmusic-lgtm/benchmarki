@@ -398,14 +398,15 @@ def get_stale_historical_claims() -> list[StaleClaimItem]:
     ]
 
 
-def read_git_state(repo_root: Path) -> dict[str, Any]:
+def read_git_state(repo_root: Path, git_ref: str | None = None) -> dict[str, Any]:
     def _run(args: Sequence[str]) -> str:
         res = subprocess.run(args, cwd=repo_root, capture_output=True, text=True, check=True)
         return res.stdout.strip()
 
+    ref = git_ref if git_ref else "HEAD"
     branch = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
-    head = _run(["git", "rev-parse", "HEAD"])
-    tree = _run(["git", "rev-parse", "HEAD^{tree}"])
+    head = _run(["git", "rev-parse", ref])
+    tree = _run(["git", "rev-parse", f"{ref}^{{tree}}"])
     upstream = _run(["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
     status = _run(["git", "status", "--porcelain"])
 
@@ -422,6 +423,7 @@ def read_git_state(repo_root: Path) -> dict[str, Any]:
 def verify_baseline_source(
     repo_root: Path | str | None = None,
     expected_manifest: BaselineManifest | None = None,
+    git_ref: str | None = None,
 ) -> BaselineVerificationResult:
     if repo_root is None:
         repo_root = Path(CANONICAL_SOURCE_ROOT)
@@ -431,7 +433,7 @@ def verify_baseline_source(
     if expected_manifest is None:
         expected_manifest = build_accepted_baseline_manifest()
 
-    git_state = read_git_state(repo_root)
+    git_state = read_git_state(repo_root, git_ref=git_ref)
     mismatches: list[str] = []
 
     if git_state["head"] != expected_manifest.source_git.head:
@@ -451,7 +453,6 @@ def verify_baseline_source(
             f"upstream_mismatch: expected {expected_manifest.source_git.upstream}, got {git_state['upstream']}"
         )
     if expected_manifest.source_git.clean_worktree_required and not git_state["worktree_clean"]:
-        # Check if only untracked files are related to NX-001 implementation
         mismatches.append(f"dirty_worktree: {git_state['status_porcelain']}")
 
     passed = len(mismatches) == 0
@@ -548,9 +549,12 @@ def verify_single_root_smoke(
     return (len(errors) == 0, errors)
 
 
-def run_nx001_machine_gate(repo_root: Path | str | None = None) -> tuple[bool, dict[str, Any]]:
+def run_nx001_machine_gate(
+    repo_root: Path | str | None = None,
+    target_git_ref: str | None = ACCEPTED_HEAD,
+) -> tuple[bool, dict[str, Any]]:
     manifest = build_accepted_baseline_manifest()
-    source_verif = verify_baseline_source(repo_root, manifest)
+    source_verif = verify_baseline_source(repo_root, manifest, git_ref=target_git_ref)
     inv_passed, inv_errors = verify_invariant_map()
     sr_passed, sr_errors = verify_single_root_smoke(repo_root)
 

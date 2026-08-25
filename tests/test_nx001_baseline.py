@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -61,7 +60,7 @@ def test_nx001_rejects_stale_head_and_tree() -> None:
         manifest_digest=manifest.manifest_digest,
     )
 
-    result_stale_head = verify_baseline_source(CANONICAL_SOURCE_ROOT, stale_head_manifest)
+    result_stale_head = verify_baseline_source(CANONICAL_SOURCE_ROOT, stale_head_manifest, git_ref=ACCEPTED_HEAD)
     assert not result_stale_head.passed
     assert any("stale_head" in m for m in result_stale_head.mismatches)
 
@@ -84,7 +83,7 @@ def test_nx001_rejects_stale_head_and_tree() -> None:
         manifest_digest=manifest.manifest_digest,
     )
 
-    result_stale_tree = verify_baseline_source(CANONICAL_SOURCE_ROOT, stale_tree_manifest)
+    result_stale_tree = verify_baseline_source(CANONICAL_SOURCE_ROOT, stale_tree_manifest, git_ref=ACCEPTED_HEAD)
     assert not result_stale_tree.passed
     assert any("stale_tree" in m for m in result_stale_tree.mismatches)
 
@@ -146,9 +145,12 @@ def test_nx001_stale_claims_explicitly_registered() -> None:
 
 def test_nx001_machine_gate_execution() -> None:
     """Deterministic machine gate must return PASS on current accepted baseline."""
-    # When testing against the live repository, ignore newly created untracked test files in working tree check if present
-    passed, report = run_nx001_machine_gate(CANONICAL_SOURCE_ROOT)
+    passed, report = run_nx001_machine_gate(CANONICAL_SOURCE_ROOT, target_git_ref=ACCEPTED_HEAD)
+    assert passed is True
+    assert report["status"] == "PASS"
     assert report["task_id"] == "NX-001"
+    assert report["accepted_head"] == ACCEPTED_HEAD
+    assert report["accepted_tree"] == ACCEPTED_TREE
     assert report["source_head"] == ACCEPTED_HEAD
     assert report["source_tree"] == ACCEPTED_TREE
     assert report["branch"] == ACCEPTED_BRANCH
