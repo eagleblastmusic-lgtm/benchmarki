@@ -241,11 +241,22 @@ class ProjectLaunchLockInfo:
     def from_dict(cls, value: Mapping[str, Any]) -> "ProjectLaunchLockInfo":
         if not isinstance(value, Mapping) or value.get("schema") != PROJECT_LAUNCH_LOCK_SCHEMA:
             raise ValueError("invalid lock schema")
+        owner_token = value.get("owner_token")
+        if not isinstance(owner_token, str) or not owner_token or len(owner_token) > 256:
+            raise ValueError("invalid owner_token in lock metadata")
+        pid_raw = value.get("pid")
+        if not isinstance(pid_raw, int) or isinstance(pid_raw, bool) or pid_raw <= 0:
+            raise ValueError("invalid pid in lock metadata")
+        acquired_at = value.get("acquired_at")
+        _parse_utc(acquired_at, "acquired_at")
+        stale_after = value.get("stale_after_seconds", _STALE_LOCK_SECONDS)
+        if not isinstance(stale_after, (int, float)) or isinstance(stale_after, bool) or stale_after <= 0:
+            raise ValueError("invalid stale_after_seconds in lock metadata")
         return cls(
-            owner_token=str(value["owner_token"]),
-            pid=int(value["pid"]),
-            acquired_at=str(value["acquired_at"]),
-            stale_after_seconds=float(value.get("stale_after_seconds", _STALE_LOCK_SECONDS)),
+            owner_token=owner_token,
+            pid=pid_raw,
+            acquired_at=str(acquired_at),
+            stale_after_seconds=float(stale_after),
             schema=PROJECT_LAUNCH_LOCK_SCHEMA,
         )
 
@@ -447,29 +458,40 @@ class ProjectLaunchQueueAdapter:
                 return ProjectLaunchLockInfo.from_dict(data), mtime
             except Exception:
                 return None, mtime
-        except (FileNotFoundError, PermissionError, OSError):
+        except (FileNotFoundError, PermissionError, OSError, UnicodeDecodeError, ValueError):
             return None, None
 
     def _is_lock_stale(self, info: ProjectLaunchLockInfo | None, mtime: float | None) -> bool:
         """Determine whether a lock can be safely reclaimed.
 
-        Invariant: AGE_ONLY_RECLAIM = FALSE.
-        If owner process is alive, the lock is NEVER stale, even if age > stale_after_seconds.
-        Only locks where the owner is confirmed dead (or unparseable legacy locks older than threshold) are reclaimed.
+        Invariants:
+        - AGE_ONLY_RECLAIM = FALSE
+        - CORRUPT_LOCK_AGE_ONLY_RECLAIM = FALSE
+        - UNREADABLE_LOCK_AGE_ONLY_RECLAIM = FALSE
+        - UNKNOWN_OWNER_LOCK_DELETED = FALSE
+
+        Fail closed: A lock is ONLY reclaimable if:
+        1. Lock metadata is fully valid and parseable (info is not None).
+        2. Owner process is confirmed dead (_is_pid_alive(info.pid) == False).
+        3. Lease duration has expired (now - acquired_at >= info.stale_after_seconds).
+
+        If metadata is corrupt, unreadable, missing, or ownership cannot be confirmed,
+        the lock is NEVER considered stale and must NOT be deleted.
         """
-        now_ts = time.time()
-        if info is not None:
-            if _is_pid_alive(info.pid):
-                return False
-            try:
-                acquired_dt = _parse_utc(info.acquired_at, "acquired_at")
-                if now_ts - acquired_dt.timestamp() >= info.stale_after_seconds:
-                    return True
-            except Exception:
-                return True
+        if info is None:
             return False
-        if mtime is not None and (now_ts - mtime >= _STALE_LOCK_SECONDS):
-            return True
+
+        if _is_pid_alive(info.pid):
+            return False
+
+        try:
+            now_ts = time.time()
+            acquired_dt = _parse_utc(info.acquired_at, "acquired_at")
+            if now_ts - acquired_dt.timestamp() >= info.stale_after_seconds:
+                return True
+        except Exception:
+            return False
+
         return False
 
     @contextmanager
@@ -513,8 +535,6 @@ class ProjectLaunchQueueAdapter:
                             if current_info is not None and info is not None:
                                 if current_info.owner_token == info.owner_token:
                                     self.lock_path.unlink()
-                            elif current_info is None and info is None and self.lock_path.exists():
-                                self.lock_path.unlink()
                         except (FileNotFoundError, PermissionError, OSError):
                             pass
                         continue
