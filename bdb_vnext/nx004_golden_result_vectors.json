@@ -1,0 +1,301 @@
+[
+  {
+    "vector_id": "GV-01-STANDARD-PASS",
+    "description": "Standard PASS result v2",
+    "binding": {
+      "schema": "bdb-project-execution-v1",
+      "execution_binding_id": "binding-gv-1",
+      "project_id": "proj-gv",
+      "plan_version": "1",
+      "task_id": "task-gv-1",
+      "launch_id": "launch-gv-1",
+      "correlation_id": "corr-gv-1",
+      "command_id": "cmd-gv-1",
+      "repo_alias": "repo-gv",
+      "expected_repo_head_before": "1111111111111111111111111111111111111111",
+      "created_at": "2026-08-25T12:00:00.000000Z",
+      "status": "ACTIVE",
+      "superseded": false,
+      "generation": 1
+    },
+    "result": {
+      "execution_binding_id": "binding-gv-1",
+      "command_id": "cmd-gv-1",
+      "correlation_id": "corr-gv-1",
+      "project_id": "proj-gv",
+      "task_id": "task-gv-1",
+      "plan_version": "1",
+      "repo_alias": "repo-gv",
+      "head_before": "1111111111111111111111111111111111111111",
+      "head_after": "2222222222222222222222222222222222222222",
+      "execution_status": "PASS",
+      "validation_status": "PASS",
+      "promotion_status": "NOT_RUN",
+      "result_summary": "Task 1 completed successfully",
+      "evidence_refs": [
+        "ev-1",
+        "ev-2"
+      ],
+      "criteria": [
+        {
+          "criterion": "test_criterion",
+          "status": "PASS",
+          "type": "DETERMINISTIC"
+        }
+      ],
+      "canonical_refs": {
+        "candidate_id": "cand-1"
+      }
+    },
+    "expected_digest_v2": "sha256:1617e9e742a4412c9b49c949a2b7e127b23fba44a39658a7cfb370abc712da55",
+    "expected_digest_v1": "sha256:33809863678c84fe71f063c155a8c464f26106e0395df5d5194e59fc748e5958"
+  },
+  {
+    "vector_id": "GV-02-FORMATTING-PERMUTATION",
+    "description": "Key permutation and reordering producing identical v2 digest as GV-01",
+    "binding": {
+      "schema": "bdb-project-execution-v1",
+      "execution_binding_id": "binding-gv-1",
+      "project_id": "proj-gv",
+      "plan_version": "1",
+      "task_id": "task-gv-1",
+      "launch_id": "launch-gv-1",
+      "correlation_id": "corr-gv-1",
+      "command_id": "cmd-gv-1",
+      "repo_alias": "repo-gv",
+      "expected_repo_head_before": "1111111111111111111111111111111111111111",
+      "created_at": "2026-08-25T12:00:00.000000Z",
+      "status": "ACTIVE",
+      "superseded": false,
+      "generation": 1
+    },
+    "result": {
+      "canonical_refs": {
+        "candidate_id": "cand-1"
+      },
+      "evidence_refs": [
+        "ev-2",
+        "ev-1"
+      ],
+      "result_summary": "Task 1 completed successfully",
+      "criteria": [
+        {
+          "type": "DETERMINISTIC",
+          "criterion": "test_criterion",
+          "status": "PASS"
+        }
+      ],
+      "promotion_status": "NOT_RUN",
+      "validation_status": "PASS",
+      "execution_status": "PASS",
+      "head_after": "2222222222222222222222222222222222222222",
+      "head_before": "1111111111111111111111111111111111111111",
+      "repo_alias": "repo-gv",
+      "plan_version": "1",
+      "task_id": "task-gv-1",
+      "project_id": "proj-gv",
+      "correlation_id": "corr-gv-1",
+      "command_id": "cmd-gv-1",
+      "execution_binding_id": "binding-gv-1"
+    },
+    "expected_digest_v2": "sha256:1617e9e742a4412c9b49c949a2b7e127b23fba44a39658a7cfb370abc712da55",
+    "expected_digest_v1": "sha256:9f02c5e663590a7f7d0b5e6be71264d16cd281f5462f4884bb9829f2abb0f872"
+  },
+  {
+    "vector_id": "GV-03-FAIL-COMPILATION",
+    "description": "Failure with failure_code=COMPILATION_ERROR",
+    "binding": {
+      "schema": "bdb-project-execution-v1",
+      "execution_binding_id": "binding-gv-1",
+      "project_id": "proj-gv",
+      "plan_version": "1",
+      "task_id": "task-gv-1",
+      "launch_id": "launch-gv-1",
+      "correlation_id": "corr-gv-1",
+      "command_id": "cmd-gv-1",
+      "repo_alias": "repo-gv",
+      "expected_repo_head_before": "1111111111111111111111111111111111111111",
+      "created_at": "2026-08-25T12:00:00.000000Z",
+      "status": "ACTIVE",
+      "superseded": false,
+      "generation": 1
+    },
+    "result": {
+      "execution_binding_id": "binding-gv-1",
+      "command_id": "cmd-gv-1",
+      "correlation_id": "corr-gv-1",
+      "project_id": "proj-gv",
+      "task_id": "task-gv-1",
+      "plan_version": "1",
+      "repo_alias": "repo-gv",
+      "head_before": "1111111111111111111111111111111111111111",
+      "head_after": "2222222222222222222222222222222222222222",
+      "execution_status": "FAIL",
+      "validation_status": "FAIL",
+      "promotion_status": "NOT_RUN",
+      "result_summary": "Compilation failed on syntax error",
+      "evidence_refs": [
+        "ev-1",
+        "ev-2"
+      ],
+      "criteria": [
+        {
+          "criterion": "test_criterion",
+          "status": "PASS",
+          "type": "DETERMINISTIC"
+        }
+      ],
+      "canonical_refs": {
+        "candidate_id": "cand-1"
+      },
+      "failure_code": "COMPILATION_ERROR"
+    },
+    "expected_digest_v2": "sha256:cf346cc7d3b5b6ab4d9937a338fda5d8d69874ca4a90637754d72d8e1da91123",
+    "expected_digest_v1": "sha256:14fe06861616f247b96aa4dfef6621aee07a4478a3923caaa0066c12d63087e5"
+  },
+  {
+    "vector_id": "GV-04-FAIL-TIMEOUT",
+    "description": "Failure with failure_code=TEST_TIMEOUT (distinct v2 digest from GV-03, colliding in v1)",
+    "binding": {
+      "schema": "bdb-project-execution-v1",
+      "execution_binding_id": "binding-gv-1",
+      "project_id": "proj-gv",
+      "plan_version": "1",
+      "task_id": "task-gv-1",
+      "launch_id": "launch-gv-1",
+      "correlation_id": "corr-gv-1",
+      "command_id": "cmd-gv-1",
+      "repo_alias": "repo-gv",
+      "expected_repo_head_before": "1111111111111111111111111111111111111111",
+      "created_at": "2026-08-25T12:00:00.000000Z",
+      "status": "ACTIVE",
+      "superseded": false,
+      "generation": 1
+    },
+    "result": {
+      "execution_binding_id": "binding-gv-1",
+      "command_id": "cmd-gv-1",
+      "correlation_id": "corr-gv-1",
+      "project_id": "proj-gv",
+      "task_id": "task-gv-1",
+      "plan_version": "1",
+      "repo_alias": "repo-gv",
+      "head_before": "1111111111111111111111111111111111111111",
+      "head_after": "2222222222222222222222222222222222222222",
+      "execution_status": "FAIL",
+      "validation_status": "FAIL",
+      "promotion_status": "NOT_RUN",
+      "result_summary": "Compilation failed on syntax error",
+      "evidence_refs": [
+        "ev-1",
+        "ev-2"
+      ],
+      "criteria": [
+        {
+          "criterion": "test_criterion",
+          "status": "PASS",
+          "type": "DETERMINISTIC"
+        }
+      ],
+      "canonical_refs": {
+        "candidate_id": "cand-1"
+      },
+      "failure_code": "TEST_TIMEOUT"
+    },
+    "expected_digest_v2": "sha256:23240ddd7f33db37899279a2e6974c27794ab58a8edefdb05e802bedce772d48",
+    "expected_digest_v1": "sha256:14fe06861616f247b96aa4dfef6621aee07a4478a3923caaa0066c12d63087e5"
+  },
+  {
+    "vector_id": "GV-05-UNICODE-CONTENT",
+    "description": "Unicode UTF-8 Polish characters serialization test",
+    "binding": {
+      "schema": "bdb-project-execution-v1",
+      "execution_binding_id": "binding-gv-1",
+      "project_id": "proj-gv",
+      "plan_version": "1",
+      "task_id": "task-gv-1",
+      "launch_id": "launch-gv-1",
+      "correlation_id": "corr-gv-1",
+      "command_id": "cmd-gv-1",
+      "repo_alias": "repo-gv",
+      "expected_repo_head_before": "1111111111111111111111111111111111111111",
+      "created_at": "2026-08-25T12:00:00.000000Z",
+      "status": "ACTIVE",
+      "superseded": false,
+      "generation": 1
+    },
+    "result": {
+      "execution_binding_id": "binding-gv-1",
+      "command_id": "cmd-gv-1",
+      "correlation_id": "corr-gv-1",
+      "project_id": "proj-gv",
+      "task_id": "task-gv-1",
+      "plan_version": "1",
+      "repo_alias": "repo-gv",
+      "head_before": "1111111111111111111111111111111111111111",
+      "head_after": "2222222222222222222222222222222222222222",
+      "execution_status": "PASS",
+      "validation_status": "PASS",
+      "promotion_status": "NOT_RUN",
+      "result_summary": "Zażółć gęślą jaźń: test z polskimi znakami diakrytycznymi",
+      "evidence_refs": [
+        "ev-1",
+        "ev-2"
+      ],
+      "criteria": [
+        {
+          "criterion": "test_criterion",
+          "status": "PASS",
+          "type": "DETERMINISTIC"
+        }
+      ],
+      "canonical_refs": {
+        "candidate_id": "cand-1"
+      }
+    },
+    "expected_digest_v2": "sha256:0d8306f83b1eaa929762c13ec1595ff8020945074f2fede8809ac80ce62b0269",
+    "expected_digest_v1": "sha256:a83c5e9ba3ffa19290a537ba61435a89c011cb846e4b91abd3e3f12c8b256557"
+  },
+  {
+    "vector_id": "GV-06-HISTORICAL-V1-FIXTURE",
+    "description": "Historical v1 fixture for dual-read replay validation",
+    "binding": {
+      "schema": "bdb-project-execution-v1",
+      "execution_binding_id": "binding-gv-1",
+      "project_id": "proj-gv",
+      "plan_version": "1",
+      "task_id": "task-gv-1",
+      "launch_id": "launch-gv-1",
+      "correlation_id": "corr-gv-1",
+      "command_id": "cmd-gv-1",
+      "repo_alias": "repo-gv",
+      "expected_repo_head_before": "1111111111111111111111111111111111111111",
+      "created_at": "2026-08-25T12:00:00.000000Z",
+      "status": "ACTIVE",
+      "superseded": false,
+      "generation": 1
+    },
+    "result": {
+      "execution_binding_id": "binding-gv-1",
+      "command_id": "cmd-gv-1",
+      "correlation_id": "corr-gv-1",
+      "project_id": "proj-gv",
+      "task_id": "task-gv-1",
+      "plan_version": "1",
+      "repo_alias": "repo-gv",
+      "head_before": "1111111111111111111111111111111111111111",
+      "head_after": "2222222222222222222222222222222222222222",
+      "execution_status": "PASS",
+      "validation_status": "PASS",
+      "promotion_status": "NOT_RUN",
+      "result_summary": "Historical v1 result",
+      "evidence_refs": [
+        "ev-1"
+      ],
+      "criteria": [],
+      "canonical_refs": {}
+    },
+    "expected_digest_v2": "sha256:e559a00a6e7012f4f6432259723c25f43b6ff63ce7ce0917183a185bde60ed48",
+    "expected_digest_v1": "sha256:e05cd173975ccd0e001666ec0e8c6cbe326b43f4e7b41e9922e024b5b9845932"
+  }
+]

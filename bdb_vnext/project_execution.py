@@ -29,6 +29,17 @@ from .binding_lifecycle import (
 )
 from .project_catalog import ProjectCatalog, ProjectPlan, ProjectRecord, ProjectTask
 from .project_memory import ProjectMemoryState, ProjectMemoryStore, available_project_tasks, milestone_auto_progress, task_prerequisite_blockers
+from .result_identity import (
+    CURRENT_IDENTITY_VERSION,
+    IDENTITY_VERSION_V1,
+    IDENTITY_VERSION_V2,
+    execution_result_digest,
+    execution_result_digest_v1,
+    execution_result_digest_v2,
+    result_identity_v1,
+    result_identity_v2,
+    verify_result_digest,
+)
 
 
 PROJECT_EXECUTION_SCHEMA = "bdb-project-execution-v1"
@@ -243,31 +254,7 @@ class ProjectExecutionSubmission:
 
 
 def _result_identity(binding: "ProjectExecutionBinding", result: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        "execution_binding_id": binding.execution_binding_id,
-        "command_id": binding.command_id,
-        "correlation_id": binding.correlation_id,
-        "project_id": binding.project_id,
-        "task_id": binding.task_id,
-        "plan_version": binding.plan_version,
-        "repo_alias": binding.repo_alias,
-        "result_project_id": result.get("project_id"),
-        "result_task_id": result.get("task_id"),
-        "result_plan_version": result.get("plan_version"),
-        "head_before": result.get("head_before"),
-        "head_after": result.get("head_after"),
-        "execution_status": result.get("execution_status"),
-        "validation_status": result.get("validation_status"),
-        "promotion_status": result.get("promotion_status"),
-        "summary": result.get("result_summary", ""),
-        "evidence_refs": list(result.get("evidence_refs", [])),
-        "criteria": result.get("criteria", []),
-        "canonical_refs": result.get("canonical_refs", {}),
-    }
-
-
-def execution_result_digest(binding: "ProjectExecutionBinding", result: Mapping[str, Any]) -> str:
-    return semantic_digest(_result_identity(binding, result))
+    return result_identity_v2(binding, result)
 
 
 def _execution_document(state: ProjectMemoryState) -> dict[str, Any]:
@@ -380,9 +367,31 @@ class ProjectExecutionAttempt:
     evidence_refs: tuple[str, ...]
     failure_code: str | None
     result_digest: str
+    identity_version: str = IDENTITY_VERSION_V2
 
     def to_dict(self) -> dict[str, Any]:
-        return {"schema": "bdb-project-execution-attempt-v1", "attempt_id": self.attempt_id, "project_id": self.project_id, "plan_version": self.plan_version, "task_id": self.task_id, "execution_binding_id": self.execution_binding_id, "command_id": self.command_id, "started_at": self.started_at, "finished_at": self.finished_at, "head_before": self.head_before, "head_after": self.head_after, "execution_status": self.execution_status, "validation_status": self.validation_status, "promotion_status": self.promotion_status, "result_status": self.result_status, "result_summary": self.result_summary, "evidence_refs": list(self.evidence_refs), "failure_code": self.failure_code, "result_digest": self.result_digest}
+        return {
+            "schema": "bdb-project-execution-attempt-v1",
+            "identity_version": self.identity_version,
+            "attempt_id": self.attempt_id,
+            "project_id": self.project_id,
+            "plan_version": self.plan_version,
+            "task_id": self.task_id,
+            "execution_binding_id": self.execution_binding_id,
+            "command_id": self.command_id,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "head_before": self.head_before,
+            "head_after": self.head_after,
+            "execution_status": self.execution_status,
+            "validation_status": self.validation_status,
+            "promotion_status": self.promotion_status,
+            "result_status": self.result_status,
+            "result_summary": self.result_summary,
+            "evidence_refs": list(self.evidence_refs),
+            "failure_code": self.failure_code,
+            "result_digest": self.result_digest,
+        }
 
 
 def _binding_from_dict(value: Mapping[str, Any]) -> ProjectExecutionBinding:
@@ -412,6 +421,7 @@ def _binding_from_dict(value: Mapping[str, Any]) -> ProjectExecutionBinding:
 
 
 def _attempt_from_dict(value: Mapping[str, Any]) -> ProjectExecutionAttempt:
+    identity_version = str(value.get("identity_version") or IDENTITY_VERSION_V1)
     return ProjectExecutionAttempt(
         _identifier(value.get("attempt_id"), "attempt_id"),
         _identifier(value.get("project_id"), "project_id"),
@@ -431,6 +441,7 @@ def _attempt_from_dict(value: Mapping[str, Any]) -> ProjectExecutionAttempt:
         tuple(_text(item, "evidence_ref", max_length=512) for item in value.get("evidence_refs", [])),
         value.get("failure_code"),
         _text(value.get("result_digest"), "result_digest", max_length=128),
+        identity_version=identity_version,
     )
 
 
@@ -852,9 +863,20 @@ class ProjectExecutionCoordinator:
     def existing_result(self, project_id: str, result: Mapping[str, Any]) -> ProjectExecutionAttempt | None:
         """Find an exact replay before mutation; used only to label receipts."""
         binding = self.binding(project_id, _identifier(result.get("execution_binding_id"), "execution_binding_id"))
-        digest = execution_result_digest(binding, result)
+        digest_v2 = execution_result_digest_v2(binding, result)
+        digest_v1 = execution_result_digest_v1(binding, result)
         execution = _execution_document(self._project(project_id)[2].read_state())
-        existing = next((item for item in execution["attempts"] if item.get("execution_binding_id") == binding.execution_binding_id and item.get("result_digest") == digest), None)
+        existing = next(
+            (
+                item for item in execution["attempts"]
+                if item.get("execution_binding_id") == binding.execution_binding_id and (
+                    item.get("result_digest") == digest_v2 or (
+                        item.get("result_digest") == digest_v1 and item.get("identity_version") in (None, IDENTITY_VERSION_V1)
+                    )
+                )
+            ),
+            None,
+        )
         return _attempt_from_dict(existing) if existing is not None else None
 
     def begin_milestone_auto(self, project_id: str, *, milestone_id: str | None = None, milestone_run_id: str | None = None) -> dict[str, Any]:
@@ -1023,14 +1045,26 @@ class ProjectExecutionCoordinator:
             if raw_binding is None:
                 _fail("execution_binding_not_found", "execution binding does not exist")
             binding = _binding_from_dict(raw_binding)
-            result_digest = execution_result_digest(binding, result)
-            existing = next((item for item in execution["attempts"] if item.get("execution_binding_id") == binding_id and item.get("result_digest") == result_digest), None)
+            digest_v2 = execution_result_digest_v2(binding, result)
+            digest_v1 = execution_result_digest_v1(binding, result)
+            existing = next(
+                (
+                    item for item in execution["attempts"]
+                    if item.get("execution_binding_id") == binding_id and (
+                        item.get("result_digest") == digest_v2 or (
+                            item.get("result_digest") == digest_v1 and item.get("identity_version") in (None, IDENTITY_VERSION_V1)
+                        )
+                    )
+                ),
+                None,
+            )
             if existing is not None:
                 replay = _attempt_from_dict(existing)
                 if replay.result_status == "STALE_RESULT":
                     stale["value"] = True
                     stale["code"] = replay.failure_code or "execution_binding_stale"
                 return state, replay
+            result_digest = digest_v2
 
             stale_code: str | None = None
             current_binding_id = execution.get("current_binding_id")
@@ -1077,6 +1111,7 @@ class ProjectExecutionCoordinator:
                     tuple(_text(item, "evidence_ref", max_length=512) for item in result.get("evidence_refs", [])),
                     stale_code,
                     result_digest,
+                    identity_version=IDENTITY_VERSION_V2,
                 )
                 attempt_document = attempt.to_dict()
                 attempt_document["canonical_refs"] = dict(result.get("canonical_refs", {})) if isinstance(result.get("canonical_refs", {}), Mapping) else {}
@@ -1118,6 +1153,7 @@ class ProjectExecutionCoordinator:
                 tuple(_text(item, "evidence_ref", max_length=512) for item in result.get("evidence_refs", [])),
                 result.get("failure_code"),
                 result_digest,
+                identity_version=IDENTITY_VERSION_V2,
             )
             attempt_document = attempt.to_dict()
             attempt_document["canonical_refs"] = dict(result.get("canonical_refs", {})) if isinstance(result.get("canonical_refs", {}), Mapping) else {}
