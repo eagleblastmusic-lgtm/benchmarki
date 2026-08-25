@@ -7,10 +7,6 @@ const CONTENT_ADAPTER_RUNTIME_FINGERPRINT = "bdb-vnext-content-adapter-live-swee
 const CANONICAL_RESULT_SWEEP_MS = 750;
 const MAX_CANONICAL_SWEEP_BLOCKS = 256;
 const PROJECT_EXECUTION_PANEL_KIND = "project-execution";
-const PROJECT_EXECUTION_RESULT_FIELDS = [
-  "schema", "project_id", "plan_version", "task_id", "execution_binding_id", "correlation_id", "command_id",
-  "repo_alias", "head_before", "head_after", "execution_status", "validation_status", "promotion_status", "failure_code", "result_summary"
-];
 const GENERIC_SUBMISSION_PANEL_KIND = "generic-submission";
 const decorated = new WeakSet();
 const executionDecorated = new WeakSet();
@@ -108,13 +104,39 @@ function panelMountOwner(block) {
   return owner instanceof HTMLElement ? owner : null;
 }
 
+function browserResultIdentityV2(value, binding = null) {
+  const b = binding || value;
+  return {
+    canonical_refs: value.canonical_refs && typeof value.canonical_refs === "object" ? value.canonical_refs : {},
+    command_id: b.command_id || null,
+    correlation_id: b.correlation_id || null,
+    criteria: canonicalCriteria(value.criteria),
+    evidence_refs: canonicalSortedEvidence(value.evidence_refs),
+    execution_binding_id: b.execution_binding_id || null,
+    execution_status: value.execution_status || null,
+    failure_code: value.failure_code !== undefined ? value.failure_code : null,
+    head_after: value.head_after !== undefined ? value.head_after : null,
+    head_before: value.head_before !== undefined ? value.head_before : null,
+    identity_version: "v2",
+    plan_version: b.plan_version !== undefined && b.plan_version !== null ? String(b.plan_version) : null,
+    project_id: b.project_id || null,
+    promotion_status: value.promotion_status || null,
+    repo_alias: b.repo_alias || null,
+    result_plan_version: value.plan_version !== undefined && value.plan_version !== null ? String(value.plan_version) : null,
+    result_project_id: value.project_id || null,
+    result_task_id: value.task_id || null,
+    summary: value.result_summary !== undefined && value.result_summary !== null ? String(value.result_summary) : "",
+    task_id: b.task_id || null,
+    validation_status: value.validation_status || null,
+  };
+}
+
 function semanticSubmissionKey(kind, value) {
   if (kind === PROJECT_EXECUTION_PANEL_KIND) {
-    const fields = PROJECT_EXECUTION_RESULT_FIELDS.map((field) => [field, value[field] !== undefined ? value[field] : null]);
-    fields.push(["evidence_refs", canonicalSortedEvidence(value.evidence_refs)]);
-    fields.push(["criteria", canonicalCriteria(value.criteria)]);
-    fields.push(["canonical_refs", value.canonical_refs && typeof value.canonical_refs === "object" ? value.canonical_refs : {}]);
-    return JSON.stringify(["bdb-project-execution-result-v2", fields]);
+    if (typeof value.result_digest === "string" && value.result_digest.startsWith("sha256:")) {
+      return JSON.stringify(["bdb-project-execution-result-v2", value.result_digest]);
+    }
+    return JSON.stringify(["bdb-project-execution-result-v2", browserResultIdentityV2(value)]);
   }
   return JSON.stringify([value.schema, value.submission_key]);
 }

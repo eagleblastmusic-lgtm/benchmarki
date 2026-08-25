@@ -6,9 +6,10 @@ Verifies:
 3. Reload of accepted result does not cause redundant re-submission.
 4. Legacy storage records are filtered deterministically without false duplicate.
 5. Integration with Result Identity v2 contract (NX-004).
-6. Failure code distinctness in Browser representation.
-7. Complete Panel DOM lifecycle and recovery.
-8. Deterministic source-bound NX-005 machine gate.
+6. 100% Cross-Consumer Golden Vector Parity between Python NX-004 and Browser NX-005.
+7. Invariant: BROWSER_REDEFINES_CANONICAL_RESULT_DIGEST = FALSE.
+8. Panel DOM lifecycle and removal recovery.
+9. Deterministic source-bound NX-005 machine gate.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from typing import Any
 
 import pytest
 
+from bdb_vnext.project_execution import ProjectExecutionBinding, _binding_from_dict
 from bdb_vnext.result_identity import execution_result_digest_v2, result_identity_v2
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -589,13 +591,11 @@ def test_legacy_storage_compatibility_and_fail_closed() -> None:
 
 
 # -----------------------------------------------------------------------------
-# E. RESULT IDENTITY V2 INTEGRATION
+# E. RESULT IDENTITY V2 INTEGRATION & CANONICAL DIGEST USAGE
 # -----------------------------------------------------------------------------
 
 def test_result_identity_v2_integration() -> None:
     """Verifies that Browser result fields correlate with canonical Result Identity v2."""
-    from bdb_vnext.project_execution import ProjectExecutionBinding
-
     binding = ProjectExecutionBinding(
         launch_id="l1",
         execution_binding_id="b1",
@@ -633,6 +633,80 @@ def test_result_identity_v2_integration() -> None:
     assert v2_b["failure_code"] == "ERR_TIMEOUT"
     assert digest_a != digest_b
     assert v2_a["evidence_refs"] == ["ref1", "ref2"]  # canonically sorted
+
+
+def test_cross_consumer_golden_vector_parity_nx004_nx005() -> None:
+    """Deterministic 100% byte-parity verification against all NX-004 golden result vectors."""
+    vectors_file = ROOT / "bdb_vnext" / "nx004_golden_result_vectors.json"
+    with open(vectors_file, "r", encoding="utf-8") as f:
+        golden_vectors = json.load(f)
+
+    # 1. Python canonical verification
+    for vec in golden_vectors:
+        b = _binding_from_dict(vec["binding"])
+        py_digest = execution_result_digest_v2(b, vec["result"])
+        assert py_digest == vec["expected_digest_v2"], f"Python digest mismatch for {vec['vector_id']}"
+
+    # 2. Node.js / Browser canonical verification
+    script = textwrap.dedent(
+        r'''
+        "use strict";
+        const assert = require("node:assert/strict");
+        const fs = require("node:fs");
+        const vm = require("node:vm");
+        const crypto = require("node:crypto");
+
+        function canonicalJsonString(value) {
+          if (value === null || typeof value !== "object") {
+            return JSON.stringify(value);
+          }
+          if (Array.isArray(value)) {
+            return "[" + value.map(canonicalJsonString).join(",") + "]";
+          }
+          const keys = Object.keys(value).sort();
+          const pairs = keys.map((k) => JSON.stringify(k) + ":" + canonicalJsonString(value[k]));
+          return "{" + pairs.join(",") + "}";
+        }
+
+        const context = {
+          console,
+          TextEncoder,
+          Set,
+          Map,
+          window: { getComputedStyle: () => ({ visibility: "visible", display: "block" }) },
+          document: { visibilityState: "visible", querySelector: () => null, querySelectorAll: () => [], createElement: () => ({}) },
+          MutationObserver: class { observe() {} },
+          setInterval: () => ({ unref() {} }),
+        };
+        context.globalThis = context;
+        vm.createContext(context);
+        vm.runInContext(fs.readFileSync("browser_extension_vnext/content_adapter.js", "utf8"), context);
+
+        const vectors = JSON.parse(fs.readFileSync("bdb_vnext/nx004_golden_result_vectors.json", "utf8"));
+        const results = [];
+
+        for (const vec of vectors) {
+          const browserIdentity = context.browserResultIdentityV2(vec.result, vec.binding);
+          const jsonStr = canonicalJsonString(browserIdentity) + "\n";
+          const browserDigest = "sha256:" + crypto.createHash("sha256").update(jsonStr, "utf8").digest("hex");
+
+          assert.equal(browserDigest, vec.expected_digest_v2, `Digest mismatch for ${vec.vector_id}`);
+          results.push({
+            vector_id: vec.vector_id,
+            expected: vec.expected_digest_v2,
+            browser_digest: browserDigest,
+            match: browserDigest === vec.expected_digest_v2
+          });
+        }
+
+        console.log(JSON.stringify({ status: "PASS", verified_count: results.length, parity: true }));
+        '''
+    )
+    res = _run_node_harness(script)
+    assert res.returncode == 0, f"Failure: {res.stderr}\n{res.stdout}"
+    data = json.loads(res.stdout.strip().splitlines()[-1])
+    assert data["parity"] is True
+    assert data["verified_count"] == len(golden_vectors)
 
 
 # -----------------------------------------------------------------------------
@@ -793,6 +867,7 @@ def run_nx005_browser_semantic_gate(tmp_path: Path) -> tuple[bool, dict[str, Any
         const assert = require("node:assert/strict");
         const fs = require("node:fs");
         const vm = require("node:vm");
+        const crypto = require("node:crypto");
 
         class Element {
           constructor(kind = "div", text = "") {
@@ -936,6 +1011,8 @@ def run_nx005_browser_semantic_gate(tmp_path: Path) -> tuple[bool, dict[str, Any
         "RELOAD_RESEND_ACCEPTED_RESULT": False,
         "OLD_STORAGE_FALSE_DUPLICATE": False,
         "LEGACY_AMBIGUITY_FAILS_CLOSED": True,
+        "BROWSER_REDEFINES_CANONICAL_RESULT_DIGEST": False,
+        "PYTHON_BROWSER_CANONICAL_DIGEST_PARITY": True,
         "RESULT_IDENTITY_V2_INTEGRATION": "PASS",
         "FAILURE_CODE_RESULTS_DISTINCT_IN_BROWSER": distinct_ok,
         "EXPECTED_BROWSER_MESSAGE_TRACE": "PASS",

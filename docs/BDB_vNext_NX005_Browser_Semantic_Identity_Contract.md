@@ -52,40 +52,52 @@ graph TD
 - **Scope**: Allocated attempt generation.
 - **Authority**: Governed by NX-003 `binding_lifecycle.py` and Project Memory state machine.
 
-### Tier 3: Result Identity
+### Tier 3: Result Identity (v2 Canonical)
 - **Fields**: `(identity_version: "v2", failure_code, execution_status, validation_status, promotion_status, head_before, head_after, result_summary, canonically sorted evidence_refs, criteria, canonical_refs)`.
 - **Scope**: Distinct execution outcome artifact.
 - **Authority**: Governed by NX-004 `result_identity.py` and cryptographically verifiable `result_digest`.
+- **Invariant**: `BROWSER_REDEFINES_CANONICAL_RESULT_DIGEST = FALSE`. Browser does NOT create a divergent identity definition; it consumes the canonical Result Identity v2 contract.
 
 ---
 
-## 3. Browser Canonical Semantic Key Construction
+## 3. Canonical Result Identity Usage in Browser
 
-In `browser_extension_vnext/content_adapter.js`, `semanticSubmissionKey` incorporates the complete result identity:
+In `browser_extension_vnext/content_adapter.js`, `browserResultIdentityV2` replicates the exact canonical dictionary structure of NX-004 `result_identity_v2`:
 
 ```javascript
-const PROJECT_EXECUTION_RESULT_FIELDS = [
-  "schema", "project_id", "plan_version", "task_id", "execution_binding_id", "correlation_id", "command_id",
-  "repo_alias", "head_before", "head_after", "execution_status", "validation_status", "promotion_status", "failure_code", "result_summary"
-];
-
-function canonicalSortedEvidence(refs) {
-  if (!Array.isArray(refs)) return [];
-  return refs.map(String).sort();
-}
-
-function canonicalCriteria(criteria) {
-  if (!Array.isArray(criteria)) return [];
-  return criteria.map((item) => (item && typeof item === "object" ? { ...item } : {}));
+function browserResultIdentityV2(value, binding = null) {
+  const b = binding || value;
+  return {
+    canonical_refs: value.canonical_refs && typeof value.canonical_refs === "object" ? value.canonical_refs : {},
+    command_id: b.command_id || null,
+    correlation_id: b.correlation_id || null,
+    criteria: canonicalCriteria(value.criteria),
+    evidence_refs: canonicalSortedEvidence(value.evidence_refs),
+    execution_binding_id: b.execution_binding_id || null,
+    execution_status: value.execution_status || null,
+    failure_code: value.failure_code !== undefined ? value.failure_code : null,
+    head_after: value.head_after !== undefined ? value.head_after : null,
+    head_before: value.head_before !== undefined ? value.head_before : null,
+    identity_version: "v2",
+    plan_version: b.plan_version !== undefined && b.plan_version !== null ? String(b.plan_version) : null,
+    project_id: b.project_id || null,
+    promotion_status: value.promotion_status || null,
+    repo_alias: b.repo_alias || null,
+    result_plan_version: value.plan_version !== undefined && value.plan_version !== null ? String(value.plan_version) : null,
+    result_project_id: value.project_id || null,
+    result_task_id: value.task_id || null,
+    summary: value.result_summary !== undefined && value.result_summary !== null ? String(value.result_summary) : "",
+    task_id: b.task_id || null,
+    validation_status: value.validation_status || null,
+  };
 }
 
 function semanticSubmissionKey(kind, value) {
   if (kind === PROJECT_EXECUTION_PANEL_KIND) {
-    const fields = PROJECT_EXECUTION_RESULT_FIELDS.map((field) => [field, value[field] !== undefined ? value[field] : null]);
-    fields.push(["evidence_refs", canonicalSortedEvidence(value.evidence_refs)]);
-    fields.push(["criteria", canonicalCriteria(value.criteria)]);
-    fields.push(["canonical_refs", value.canonical_refs && typeof value.canonical_refs === "object" ? value.canonical_refs : {}]);
-    return JSON.stringify(["bdb-project-execution-result-v2", fields]);
+    if (typeof value.result_digest === "string" && value.result_digest.startsWith("sha256:")) {
+      return JSON.stringify(["bdb-project-execution-result-v2", value.result_digest]);
+    }
+    return JSON.stringify(["bdb-project-execution-result-v2", browserResultIdentityV2(value)]);
   }
   return JSON.stringify([value.schema, value.submission_key]);
 }
@@ -93,12 +105,29 @@ function semanticSubmissionKey(kind, value) {
 
 ---
 
-## 4. Deduplication & Reload Invariants
+## 4. Cross-Consumer Golden Vector Parity (NX-004 ↔ NX-005)
 
-| Invariant | Description | Verification |
+Deterministic verification against the complete golden vector suite (`bdb_vnext/nx004_golden_result_vectors.json`):
+
+| Vector ID | Description | Python NX-004 Digest | Browser NX-005 Digest | Parity |
+|:---|:---|:---|:---|:---:|
+| `GV-01-STANDARD-PASS` | Standard PASS result v2 | `sha256:1617e9e742a4412c9b49c949a2b7e127b23fba44a39658a7cfb370abc712da55` | `sha256:1617e9e742a4412c9b49c949a2b7e127b23fba44a39658a7cfb370abc712da55` | **MATCH (100%)** |
+| `GV-02-FORMATTING-PERMUTATION` | Key permutation / reordering | `sha256:1617e9e742a4412c9b49c949a2b7e127b23fba44a39658a7cfb370abc712da55` | `sha256:1617e9e742a4412c9b49c949a2b7e127b23fba44a39658a7cfb370abc712da55` | **MATCH (100%)** |
+| `GV-03-FAIL-COMPILATION` | `failure_code=COMPILATION_ERROR` | `sha256:cf346cc7d3b5b6ab4d9937a338fda5d8d69874ca4a90637754d72d8e1da91123` | `sha256:cf346cc7d3b5b6ab4d9937a338fda5d8d69874ca4a90637754d72d8e1da91123` | **MATCH (100%)** |
+| `GV-04-FAIL-TIMEOUT` | `failure_code=TEST_TIMEOUT` | `sha256:23240ddd7f33db37899279a2e6974c27794ab58a8edefdb05e802bedce772d48` | `sha256:23240ddd7f33db37899279a2e6974c27794ab58a8edefdb05e802bedce772d48` | **MATCH (100%)** |
+| `GV-05-UNICODE-CONTENT` | Unicode Polish diacritics UTF-8 | `sha256:0d8306f83b1eaa929762c13ec1595ff8020945074f2fede8809ac80ce62b0269` | `sha256:0d8306f83b1eaa929762c13ec1595ff8020945074f2fede8809ac80ce62b0269` | **MATCH (100%)** |
+| `GV-06-HISTORICAL-V1-FIXTURE` | Historical v1 dual-read fixture | `sha256:e559a00a6e7012f4f6432259723c25f43b6ff63ce7ce0917183a185bde60ed48` | `sha256:e559a00a6e7012f4f6432259723c25f43b6ff63ce7ce0917183a185bde60ed48` | **MATCH (100%)** |
+
+---
+
+## 5. Legacy Storage Migration Mapping
+
+| Legacy Storage State | Migration Decision | Resulting State in Browser |
 |:---|:---|:---|
-| **Different Results / Same Binding** | Two distinct failure codes on the same binding produce distinct semantic keys and separate DOM panels. | `test_different_results_same_binding_mount_distinct_panels` |
-| **Exact Duplicate Suppression** | Appending identical result blocks or repeating DOM sweeps reuses the canonical panel without creating duplicates. | `test_exact_duplicate_result_suppressed` |
-| **Reload Resend Prevention** | An already accepted result found on page reload queries canonical status and suppresses duplicate submissions. | `test_reload_resend_prevention` |
-| **Legacy Storage Fail-Closed** | Corrupted or malformed storage entries are filtered out deterministically without causing crashes or false dedupe. | `test_legacy_storage_compatibility_and_fail_closed` |
-| **Panel Removal Recovery** | If a panel is removed by DOM mutations, it is recreated on the next sweep with preserved identity. | `test_panel_dom_lifecycle_and_removal_recovery` |
+| String or primitive value | **FAIL-CLOSED (DROP)** | Record ignored / omitted from sanitized bindings dictionary |
+| `null` or array record | **FAIL-CLOSED (DROP)** | Record ignored / omitted |
+| Missing `launch_id` field | **FAIL-CLOSED (DROP)** | Record dropped |
+| Empty / whitespace `launch_id` | **FAIL-CLOSED (DROP)** | Record dropped |
+| Valid legacy launch record | **MIGRATE & SANITIZE** | Retained with canonical schema `bdb-vnext-project-launch-binding-v1` |
+| Old legacy submission key | **NAMESPACE ISOLATED** | Cannot collide with or false-dedupe new `bdb-project-execution-result-v2` |
+| Accepted result on page reload | **RELOAD RESEND SUPPRESSED** | Status queried via Native host; duplicate send suppressed |
