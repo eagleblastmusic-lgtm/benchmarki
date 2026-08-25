@@ -16,6 +16,17 @@ from typing import Any, Iterable, Mapping
 
 from bdb_shared.evidence import semantic_digest
 
+from .binding_lifecycle import (
+    BINDING_STATUS_VALUES,
+    BindingLifecycleError,
+    STATUS_ACCEPTED,
+    STATUS_ACTIVE,
+    STATUS_FAILED,
+    STATUS_SUPERSEDED,
+    check_binding_lifecycle_invariants,
+    reconcile_execution_bindings,
+    validate_binding_transition,
+)
 from .project_catalog import ProjectCatalog, ProjectPlan, ProjectRecord, ProjectTask
 from .project_memory import ProjectMemoryState, ProjectMemoryStore, available_project_tasks, milestone_auto_progress, task_prerequisite_blockers
 
@@ -295,6 +306,8 @@ def _execution_document(state: ProjectMemoryState) -> dict[str, Any]:
 class ProjectExecutionBinding:
     execution_binding_id: str
     project_id: str
+    execution_binding_id: str
+    project_id: str
     plan_version: str
     task_id: str
     launch_id: str
@@ -305,12 +318,31 @@ class ProjectExecutionBinding:
     created_at: str
     status: str = "ACTIVE"
     superseded: bool = False
+    generation: int = 1
     conversation_id: str | None = None
+    finished_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        value = {"schema": PROJECT_EXECUTION_SCHEMA, "execution_binding_id": self.execution_binding_id, "project_id": self.project_id, "plan_version": self.plan_version, "task_id": self.task_id, "launch_id": self.launch_id, "correlation_id": self.correlation_id, "command_id": self.command_id, "repo_alias": self.repo_alias, "expected_repo_head_before": self.expected_repo_head_before, "created_at": self.created_at, "status": self.status, "superseded": self.superseded}
+        value: dict[str, Any] = {
+            "schema": PROJECT_EXECUTION_SCHEMA,
+            "execution_binding_id": self.execution_binding_id,
+            "project_id": self.project_id,
+            "plan_version": self.plan_version,
+            "task_id": self.task_id,
+            "launch_id": self.launch_id,
+            "correlation_id": self.correlation_id,
+            "command_id": self.command_id,
+            "repo_alias": self.repo_alias,
+            "expected_repo_head_before": self.expected_repo_head_before,
+            "created_at": self.created_at,
+            "status": self.status,
+            "superseded": self.superseded,
+            "generation": self.generation,
+        }
         if self.conversation_id is not None:
             value["conversation_id"] = self.conversation_id
+        if self.finished_at is not None:
+            value["finished_at"] = self.finished_at
         return value
 
 
@@ -355,11 +387,51 @@ class ProjectExecutionAttempt:
 
 def _binding_from_dict(value: Mapping[str, Any]) -> ProjectExecutionBinding:
     conversation_id = value.get("conversation_id")
-    return ProjectExecutionBinding(_identifier(value.get("execution_binding_id"), "execution_binding_id"), _identifier(value.get("project_id"), "project_id"), _text(value.get("plan_version"), "plan_version", max_length=32), _identifier(value.get("task_id"), "task_id"), _identifier(value.get("launch_id"), "launch_id"), _identifier(value.get("correlation_id"), "correlation_id"), _identifier(value.get("command_id"), "command_id"), _text(value.get("repo_alias"), "repo_alias", max_length=64), _text(value.get("expected_repo_head_before"), "expected_repo_head_before", max_length=128), _text(value.get("created_at"), "created_at", max_length=64), _text(value.get("status", "ACTIVE"), "status", max_length=32), bool(value.get("superseded", False)), _conversation(conversation_id) if conversation_id is not None else None)
+    raw_gen = value.get("generation", 1)
+    try:
+        generation = int(raw_gen)
+    except (ValueError, TypeError):
+        generation = 1
+    return ProjectExecutionBinding(
+        _identifier(value.get("execution_binding_id"), "execution_binding_id"),
+        _identifier(value.get("project_id"), "project_id"),
+        _text(value.get("plan_version"), "plan_version", max_length=32),
+        _identifier(value.get("task_id"), "task_id"),
+        _identifier(value.get("launch_id"), "launch_id"),
+        _identifier(value.get("correlation_id"), "correlation_id"),
+        _identifier(value.get("command_id"), "command_id"),
+        _text(value.get("repo_alias"), "repo_alias", max_length=64),
+        _text(value.get("expected_repo_head_before"), "expected_repo_head_before", max_length=128),
+        _text(value.get("created_at"), "created_at", max_length=64),
+        _status(value.get("status", STATUS_ACTIVE), "status"),
+        bool(value.get("superseded", False)),
+        generation=max(1, generation),
+        conversation_id=_conversation(conversation_id) if conversation_id is not None else None,
+        finished_at=_text(value.get("finished_at"), "finished_at", max_length=64, required=False) if value.get("finished_at") else None,
+    )
 
 
 def _attempt_from_dict(value: Mapping[str, Any]) -> ProjectExecutionAttempt:
-    return ProjectExecutionAttempt(_identifier(value.get("attempt_id"), "attempt_id"), _identifier(value.get("project_id"), "project_id"), _text(value.get("plan_version"), "plan_version", max_length=32), _identifier(value.get("task_id"), "task_id"), _identifier(value.get("execution_binding_id"), "execution_binding_id"), _identifier(value.get("command_id"), "command_id"), _text(value.get("started_at"), "started_at", max_length=64), value.get("finished_at"), _text(value.get("head_before"), "head_before", max_length=128), value.get("head_after"), _status(value.get("execution_status"), "execution_status"), _status(value.get("validation_status"), "validation_status"), _status(value.get("promotion_status"), "promotion_status"), _status(value.get("result_status"), "result_status"), _text(value.get("result_summary", ""), "result_summary", max_length=4_000, required=False), tuple(_text(item, "evidence_ref", max_length=512) for item in value.get("evidence_refs", [])), value.get("failure_code"), _text(value.get("result_digest"), "result_digest", max_length=128))
+    return ProjectExecutionAttempt(
+        _identifier(value.get("attempt_id"), "attempt_id"),
+        _identifier(value.get("project_id"), "project_id"),
+        _text(value.get("plan_version"), "plan_version", max_length=32),
+        _identifier(value.get("task_id"), "task_id"),
+        _identifier(value.get("execution_binding_id"), "execution_binding_id"),
+        _identifier(value.get("command_id"), "command_id"),
+        _text(value.get("started_at"), "started_at", max_length=64),
+        value.get("finished_at"),
+        _text(value.get("head_before"), "head_before", max_length=128),
+        value.get("head_after"),
+        _status(value.get("execution_status"), "execution_status"),
+        _status(value.get("validation_status"), "validation_status"),
+        _status(value.get("promotion_status"), "promotion_status"),
+        _status(value.get("result_status"), "result_status"),
+        _text(value.get("result_summary", ""), "result_summary", max_length=4_000, required=False),
+        tuple(_text(item, "evidence_ref", max_length=512) for item in value.get("evidence_refs", [])),
+        value.get("failure_code"),
+        _text(value.get("result_digest"), "result_digest", max_length=128),
+    )
 
 
 class ProjectExecutionCoordinator:
@@ -382,7 +454,8 @@ class ProjectExecutionCoordinator:
 
     def new_binding(self, project_id: str, *, task_id: str | None = None, expected_repo_head_before: str = "unknown", launch_id: str | None = None, correlation_id: str | None = None, command_id: str | None = None) -> ProjectExecutionBinding:
         project, plan, memory = self._project(project_id)
-        state = memory.read_state(); execution = _execution_document(state)
+        state = memory.read_state()
+        execution = _execution_document(state)
         selected = task_id or execution.get("current_task_id") or plan.current_task_id
         if selected is None:
             available = available_project_tasks(plan, state)
@@ -407,25 +480,47 @@ class ProjectExecutionCoordinator:
                 "task prerequisites are not satisfied",
                 details={"task_id": task.task_id, "blocking_dependencies": [dict(item) for item in blockers]},
             )
+
+        task_bindings = [
+            b for b in execution.get("bindings", [])
+            if b.get("task_id") == task.task_id and str(b.get("plan_version")) == str(plan.plan_version)
+        ]
+        active_for_task = [b for b in task_bindings if b.get("status") == STATUS_ACTIVE and not b.get("superseded")]
         current_binding_id = execution.get("current_binding_id")
-        if current_binding_id:
-            current = next((item for item in execution.get("bindings", []) if item.get("execution_binding_id") == current_binding_id), None)
-            if current is not None and current.get("status") == "ACTIVE" and current.get("task_id") == task.task_id and current.get("plan_version") == plan.plan_version:
+        if current_binding_id and active_for_task:
+            current = next((b for b in active_for_task if b.get("execution_binding_id") == current_binding_id), None)
+            if current is not None:
                 return _binding_from_dict(current)
+
+        max_existing_gen = max((int(b.get("generation", 1)) for b in task_bindings), default=0)
+        next_gen = max_existing_gen + 1
+
         head = _text(expected_repo_head_before, "expected_repo_head_before", max_length=128)
         if head != "unknown" and _HEAD_RE.fullmatch(head) is None:
             _fail("repo_head_invalid", "expected_repo_head_before is not a Git object identity")
         suffix = uuid.uuid4().hex
-        # The Browser/Native launch contract requires launch_id to be a UUID.
-        # Keep the vNext binding/correlation/command identifiers namespaced as
-        # before, but generate a browser-compatible launch identity by default.
-        return ProjectExecutionBinding(f"binding-{suffix}", project.project_id, plan.plan_version, task.task_id, launch_id or str(uuid.uuid4()), correlation_id or f"corr-{suffix}", command_id or f"command-{suffix}", project.repo_alias, head, _utc_now())
+        return ProjectExecutionBinding(
+            f"binding-{suffix}",
+            project.project_id,
+            plan.plan_version,
+            task.task_id,
+            launch_id or str(uuid.uuid4()),
+            correlation_id or f"corr-{suffix}",
+            command_id or f"command-{suffix}",
+            project.repo_alias,
+            head,
+            _utc_now(),
+            status=STATUS_ACTIVE,
+            superseded=False,
+            generation=next_gen,
+        )
 
     def persist_binding(self, binding: ProjectExecutionBinding) -> ProjectExecutionBinding:
         _identifier(binding.project_id, "project_id")
         project, plan, memory = self._project(binding.project_id)
         if binding.plan_version != plan.plan_version or binding.repo_alias != project.repo_alias:
             _fail("execution_binding_stale", "binding no longer matches current project authority")
+
         def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, ProjectExecutionBinding]:
             execution = _execution_document(state)
             task = next((item for item in plan.tasks if item.task_id == binding.task_id), None)
@@ -443,12 +538,50 @@ class ProjectExecutionCoordinator:
                     "task prerequisites are not satisfied",
                     details={"task_id": task.task_id, "blocking_dependencies": [dict(item) for item in blockers]},
                 )
-            execution["bindings"].append(binding.to_dict())
-            statuses = dict(execution.get("task_statuses", {})); statuses.setdefault(binding.task_id, "active"); execution["task_statuses"] = statuses; execution["current_task_id"] = binding.task_id; execution["current_binding_id"] = binding.execution_binding_id
+            # Monotonic generation enforcement and atomic supersede of existing active bindings for this task/run
+            task_bindings = [
+                b for b in execution["bindings"]
+                if b.get("task_id") == binding.task_id and str(b.get("plan_version")) == str(binding.plan_version)
+            ]
+            max_existing_gen = max((int(b.get("generation", 1)) for b in task_bindings), default=0)
+            effective_gen = max(binding.generation, max_existing_gen + 1)
+            now_iso = _utc_now()
+
+            for b in execution["bindings"]:
+                if b.get("task_id") == binding.task_id and str(b.get("plan_version")) == str(binding.plan_version):
+                    if b.get("status") == STATUS_ACTIVE and not b.get("superseded"):
+                        validate_binding_transition(STATUS_ACTIVE, STATUS_SUPERSEDED)
+                        b["status"] = STATUS_SUPERSEDED
+                        b["superseded"] = True
+                        if not b.get("finished_at"):
+                            b["finished_at"] = now_iso
+
+            persisted_binding = replace(binding, generation=effective_gen, status=STATUS_ACTIVE, superseded=False)
+            execution["bindings"].append(persisted_binding.to_dict())
+            statuses = dict(execution.get("task_statuses", {}))
+            statuses.setdefault(binding.task_id, "active")
+            execution["task_statuses"] = statuses
+            execution["current_task_id"] = binding.task_id
+            execution["current_binding_id"] = binding.execution_binding_id
+
             updated = replace(state, execution=execution)
-            updated = memory._append_event(updated, "EXECUTION_BOUND", f"Powiązano wykonanie z zadaniem {binding.task_id}", task_id=binding.task_id, plan_version=binding.plan_version, correlation_id=binding.correlation_id)
-            updated = memory._append_event(updated, "EXECUTION_STARTED", f"Rozpoczęto próbę zadania {binding.task_id}", task_id=binding.task_id, plan_version=binding.plan_version, correlation_id=binding.correlation_id)
-            return updated, binding
+            updated = memory._append_event(
+                updated,
+                "EXECUTION_BOUND",
+                f"Powiązano wykonanie z zadaniem {binding.task_id} (gen={effective_gen})",
+                task_id=binding.task_id,
+                plan_version=binding.plan_version,
+                correlation_id=binding.correlation_id,
+            )
+            updated = memory._append_event(
+                updated,
+                "EXECUTION_STARTED",
+                f"Rozpoczęto próbę zadania {binding.task_id} (gen={effective_gen})",
+                task_id=binding.task_id,
+                plan_version=binding.plan_version,
+                correlation_id=binding.correlation_id,
+            )
+            return updated, persisted_binding
         return memory.execution_transaction(transition)
 
     def start(self, project_id: str, **kwargs: Any) -> ProjectExecutionBinding:
@@ -882,6 +1015,7 @@ class ProjectExecutionCoordinator:
         binding_id = _identifier(result.get("execution_binding_id"), "execution_binding_id")
         binding: ProjectExecutionBinding | None = None
         stale = {"value": False, "code": None}
+
         def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, ProjectExecutionAttempt]:
             nonlocal binding
             execution = _execution_document(state)
@@ -897,8 +1031,17 @@ class ProjectExecutionCoordinator:
                     stale["value"] = True
                     stale["code"] = replay.failure_code or "execution_binding_stale"
                 return state, replay
+
             stale_code: str | None = None
-            if binding.project_id != project.project_id or binding.repo_alias != project.repo_alias or binding.plan_version != plan.plan_version or binding.superseded or binding.status != "ACTIVE":
+            current_binding_id = execution.get("current_binding_id")
+            if (
+                binding.project_id != project.project_id
+                or binding.repo_alias != project.repo_alias
+                or binding.plan_version != plan.plan_version
+                or binding.superseded
+                or binding.status != STATUS_ACTIVE
+                or (current_binding_id is not None and current_binding_id != binding.execution_binding_id)
+            ):
                 stale_code = "execution_binding_stale"
             if result.get("command_id") != binding.command_id or result.get("correlation_id") != binding.correlation_id:
                 stale_code = "execution_identity_mismatch"
@@ -913,34 +1056,99 @@ class ProjectExecutionCoordinator:
                 stale_code = "task_superseded"
             attempt_id = _identifier(result.get("attempt_id") or f"attempt-{uuid.uuid4().hex}", "attempt_id")
             if stale_code:
-                stale["value"] = True; stale["code"] = stale_code
-                attempt = ProjectExecutionAttempt(attempt_id, project.project_id, binding.plan_version, binding.task_id, binding_id, binding.command_id, binding.created_at, _utc_now(), str(result.get("head_before") or binding.expected_repo_head_before), result.get("head_after"), _status(result.get("execution_status", "UNKNOWN"), "execution_status"), _status(result.get("validation_status", "UNKNOWN"), "validation_status"), _status(result.get("promotion_status", "NOT_RUN"), "promotion_status"), "STALE_RESULT", _text(result.get("result_summary", "stale execution result"), "result_summary", max_length=4_000, required=False), tuple(_text(item, "evidence_ref", max_length=512) for item in result.get("evidence_refs", [])), stale_code, result_digest)
-                attempt_document = attempt.to_dict(); attempt_document["canonical_refs"] = dict(result.get("canonical_refs", {})) if isinstance(result.get("canonical_refs", {}), Mapping) else {}
-                execution["attempts"].append(attempt_document); execution["stale_result"] = True
-                updated = replace(state, execution=execution); updated = memory._append_event(updated, "EXECUTION_STALE_RESULT", f"Późny wynik zadania {binding.task_id} wymaga reconciliacji ({stale_code})", task_id=binding.task_id, plan_version=binding.plan_version, correlation_id=binding.correlation_id)
+                stale["value"] = True
+                stale["code"] = stale_code
+                attempt = ProjectExecutionAttempt(
+                    attempt_id,
+                    project.project_id,
+                    binding.plan_version,
+                    binding.task_id,
+                    binding_id,
+                    binding.command_id,
+                    binding.created_at,
+                    _utc_now(),
+                    str(result.get("head_before") or binding.expected_repo_head_before),
+                    result.get("head_after"),
+                    _status(result.get("execution_status", "UNKNOWN"), "execution_status"),
+                    _status(result.get("validation_status", "UNKNOWN"), "validation_status"),
+                    _status(result.get("promotion_status", "NOT_RUN"), "promotion_status"),
+                    "STALE_RESULT",
+                    _text(result.get("result_summary", "stale execution result"), "result_summary", max_length=4_000, required=False),
+                    tuple(_text(item, "evidence_ref", max_length=512) for item in result.get("evidence_refs", [])),
+                    stale_code,
+                    result_digest,
+                )
+                attempt_document = attempt.to_dict()
+                attempt_document["canonical_refs"] = dict(result.get("canonical_refs", {})) if isinstance(result.get("canonical_refs", {}), Mapping) else {}
+                execution["attempts"].append(attempt_document)
+                execution["stale_result"] = True
+                updated = replace(state, execution=execution)
+                updated = memory._append_event(
+                    updated,
+                    "EXECUTION_STALE_RESULT",
+                    f"Późny wynik zadania {binding.task_id} wymaga reconciliacji ({stale_code})",
+                    task_id=binding.task_id,
+                    plan_version=binding.plan_version,
+                    correlation_id=binding.correlation_id,
+                )
                 return updated, attempt
+
             if task is None:
                 _fail("task_not_found", "bound task does not exist")
             validation_ok = _status(result.get("validation_status", "UNKNOWN"), "validation_status") in {"PASS", "SUCCEEDED", "SUCCESS"}
             acceptance = self._evaluate_acceptance(task, project_id=project.project_id, plan_version=plan.plan_version, attempt_id=attempt_id, validation_ok=validation_ok, criteria=result.get("criteria"))
             execution_ok = _status(result.get("execution_status", "UNKNOWN"), "execution_status") in {"PASS", "SUCCEEDED", "SUCCESS"}
             overall = acceptance.overall if execution_ok else "FAIL"
-            attempt = ProjectExecutionAttempt(attempt_id, project.project_id, binding.plan_version, binding.task_id, binding_id, binding.command_id, binding.created_at, _utc_now(), str(result.get("head_before") or binding.expected_repo_head_before), result.get("head_after"), _status(result.get("execution_status", "UNKNOWN"), "execution_status"), _status(result.get("validation_status", "UNKNOWN"), "validation_status"), _status(result.get("promotion_status", "NOT_RUN"), "promotion_status"), overall, _text(result.get("result_summary", ""), "result_summary", max_length=4_000, required=False), tuple(_text(item, "evidence_ref", max_length=512) for item in result.get("evidence_refs", [])), result.get("failure_code"), result_digest)
-            attempt_document = attempt.to_dict(); attempt_document["canonical_refs"] = dict(result.get("canonical_refs", {})) if isinstance(result.get("canonical_refs", {}), Mapping) else {}
-            execution["attempts"].append(attempt_document); execution["acceptance_results"].append(acceptance.to_dict())
-            statuses = dict(execution.get("task_statuses", {})); previous = statuses.get(task.task_id, task.status)
+            attempt = ProjectExecutionAttempt(
+                attempt_id,
+                project.project_id,
+                binding.plan_version,
+                binding.task_id,
+                binding_id,
+                binding.command_id,
+                binding.created_at,
+                _utc_now(),
+                str(result.get("head_before") or binding.expected_repo_head_before),
+                result.get("head_after"),
+                _status(result.get("execution_status", "UNKNOWN"), "execution_status"),
+                _status(result.get("validation_status", "UNKNOWN"), "validation_status"),
+                _status(result.get("promotion_status", "NOT_RUN"), "promotion_status"),
+                overall,
+                _text(result.get("result_summary", ""), "result_summary", max_length=4_000, required=False),
+                tuple(_text(item, "evidence_ref", max_length=512) for item in result.get("evidence_refs", [])),
+                result.get("failure_code"),
+                result_digest,
+            )
+            attempt_document = attempt.to_dict()
+            attempt_document["canonical_refs"] = dict(result.get("canonical_refs", {})) if isinstance(result.get("canonical_refs", {}), Mapping) else {}
+            execution["attempts"].append(attempt_document)
+            execution["acceptance_results"].append(acceptance.to_dict())
+
+            # Terminalize the current binding (ACTIVE -> ACCEPTED if PASS, ACTIVE -> FAILED if not PASS)
+            terminal_status = STATUS_ACCEPTED if overall == "PASS" else STATUS_FAILED
+            validate_binding_transition(raw_binding.get("status", STATUS_ACTIVE), terminal_status)
+            raw_binding["status"] = terminal_status
+            raw_binding["finished_at"] = _utc_now()
+
+            statuses = dict(execution.get("task_statuses", {}))
+            previous = statuses.get(task.task_id, task.status)
             new_status = "completed" if overall == "PASS" else "review" if overall in {"REVIEW_REQUIRED", "UNKNOWN"} else "blocked" if result.get("failure_code") or not validation_ok else "active"
             if previous == "completed" and new_status != "completed":
                 _fail("task_completed_downgrade", "completed task cannot be downgraded by an execution result")
-            statuses[task.task_id] = new_status; execution["task_statuses"] = statuses
+            statuses[task.task_id] = new_status
+            execution["task_statuses"] = statuses
             if new_status == "completed":
-                updated = replace(state, execution=execution); updated = memory._append_event(updated, "TASK_COMPLETED", f"Zakończono zadanie {task.task_id}; acceptance {overall}", task_id=task.task_id, plan_version=plan.plan_version, correlation_id=binding.correlation_id)
+                updated = replace(state, execution=execution)
+                updated = memory._append_event(updated, "TASK_COMPLETED", f"Zakończono zadanie {task.task_id}; acceptance {overall}", task_id=task.task_id, plan_version=plan.plan_version, correlation_id=binding.correlation_id)
             elif new_status == "review":
-                updated = replace(state, execution=execution); updated = memory._append_event(updated, "TASK_REVIEW", f"Zadanie {task.task_id} gotowe do przeglądu", task_id=task.task_id, plan_version=plan.plan_version, correlation_id=binding.correlation_id)
+                updated = replace(state, execution=execution)
+                updated = memory._append_event(updated, "TASK_REVIEW", f"Zadanie {task.task_id} gotowe do przeglądu", task_id=task.task_id, plan_version=plan.plan_version, correlation_id=binding.correlation_id)
             elif new_status == "blocked":
-                updated = replace(state, execution=execution); updated = memory._append_event(updated, "TASK_BLOCKED", f"Zadanie {task.task_id} zablokowane: {result.get('failure_code') or 'validation_failed'}", task_id=task.task_id, plan_version=plan.plan_version, correlation_id=binding.correlation_id)
+                updated = replace(state, execution=execution)
+                updated = memory._append_event(updated, "TASK_BLOCKED", f"Zadanie {task.task_id} zablokowane: {result.get('failure_code') or 'validation_failed'}", task_id=task.task_id, plan_version=plan.plan_version, correlation_id=binding.correlation_id)
             else:
-                updated = replace(state, execution=execution); updated = memory._append_event(updated, "EXECUTION_COMPLETED", f"Próba zadania {task.task_id} zakończona: {overall}", task_id=task.task_id, plan_version=plan.plan_version, correlation_id=binding.correlation_id)
+                updated = replace(state, execution=execution)
+                updated = memory._append_event(updated, "EXECUTION_COMPLETED", f"Próba zadania {task.task_id} zakończona: {overall}", task_id=task.task_id, plan_version=plan.plan_version, correlation_id=binding.correlation_id)
             active_run = execution.get("active_milestone_run") if isinstance(execution.get("active_milestone_run"), Mapping) else None
             if active_run and active_run.get("status") in {"running", "review", "blocked"}:
                 progress = milestone_auto_progress(plan, updated, str(active_run.get("milestone_id")))
@@ -977,19 +1185,45 @@ class ProjectExecutionCoordinator:
                     updated = memory._append_event(updated, "MILESTONE_AUTO_COMPLETED", f"AUTO ukończył milestone {active_run.get('milestone_id')}", milestone_id=active_run.get("milestone_id"), plan_version=plan.plan_version, correlation_id=binding.correlation_id)
             else:
                 available = available_project_tasks(plan, updated)
-                execution = dict(updated.execution); execution["current_task_id"] = available[0].task_id if len(available) == 1 else None; execution["current_binding_id"] = None
+                execution = dict(updated.execution)
+                execution["current_task_id"] = available[0].task_id if len(available) == 1 else None
+                execution["current_binding_id"] = None
             completed_milestones = set(execution.get("milestones_completed", []))
             for milestone in plan.milestones:
                 required = [item for item in plan.tasks if item.milestone_id == milestone.milestone_id]
                 if required and all(statuses.get(item.task_id, item.status) in {"completed", "skipped"} for item in required) and milestone.milestone_id not in completed_milestones:
-                    completed_milestones.add(milestone.milestone_id); updated = memory._append_event(updated, "MILESTONE_COMPLETED", f"Zakończono milestone {milestone.milestone_id}", milestone_id=milestone.milestone_id, plan_version=plan.plan_version, correlation_id=binding.correlation_id)
-            execution["milestones_completed"] = sorted(completed_milestones); updated = replace(updated, execution=execution)
+                    completed_milestones.add(milestone.milestone_id)
+                    updated = memory._append_event(updated, "MILESTONE_COMPLETED", f"Zakończono milestone {milestone.milestone_id}", milestone_id=milestone.milestone_id, plan_version=plan.plan_version, correlation_id=binding.correlation_id)
+            execution["milestones_completed"] = sorted(completed_milestones)
+            updated = replace(updated, execution=execution)
             return updated, attempt
+
         attempt = memory.execution_transaction(transition)
         if stale["value"]:
             raise ProjectExecutionError("STALE_RESULT", "execution result is stale and requires reconciliation", details={"attempt_id": attempt.attempt_id, "reason": stale["code"]})
         self.reconcile(project_id)
         return attempt
+
+    def reconcile_project_bindings(self, project_id: str) -> None:
+        _project, _plan, memory = self._project(project_id)
+
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, None]:
+            execution = _execution_document(state)
+            reconciled = reconcile_execution_bindings(execution)
+            updated = replace(state, execution=reconciled)
+            updated = memory._append_event(
+                updated,
+                "BINDINGS_RECONCILED",
+                f"Zrekoncyliowano powiązania wykonania projektu {project_id}",
+            )
+            return updated, None
+
+        memory.execution_transaction(transition)
+
+    def check_invariants(self, project_id: str) -> tuple[bool, list[str]]:
+        _project, _plan, memory = self._project(project_id)
+        execution = _execution_document(memory.read_state())
+        return check_binding_lifecycle_invariants(execution)
 
     def record_bdb_finalization(self, project_id: str, binding: ProjectExecutionBinding, finalization: Any, *, criteria: Iterable[Mapping[str, Any]] | None = None, promotion_status: str = "NOT_RUN") -> ProjectExecutionAttempt:
         """Adapt an existing EngineeringLoop finalization into this binding.

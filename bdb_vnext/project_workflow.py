@@ -518,7 +518,7 @@ class ProjectWorkflow:
                 "next_launch_status": next_launch_status,
             }
         current_snapshot = self.execution.snapshot(submission.project_id)
-        if current_snapshot.get("current_binding_id") != binding.execution_binding_id:
+        if current_snapshot.get("current_binding_id") != binding.execution_binding_id or binding.status != "ACTIVE" or binding.superseded:
             raise ProjectWorkflowError("execution_binding_stale", "result binding is not the current canonical binding")
         if binding.conversation_id is None:
             # Legacy launch records predate canonical conversation binding. The
