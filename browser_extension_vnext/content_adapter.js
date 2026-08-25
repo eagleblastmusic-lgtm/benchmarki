@@ -7,10 +7,11 @@ const CONTENT_ADAPTER_RUNTIME_FINGERPRINT = "bdb-vnext-content-adapter-live-swee
 const CANONICAL_RESULT_SWEEP_MS = 750;
 const MAX_CANONICAL_SWEEP_BLOCKS = 256;
 const PROJECT_EXECUTION_PANEL_KIND = "project-execution";
-const GENERIC_SUBMISSION_PANEL_KIND = "generic-submission";
-const PROJECT_EXECUTION_IDENTITY_FIELDS = [
-  "schema", "project_id", "plan_version", "task_id", "execution_binding_id", "correlation_id", "command_id"
+const PROJECT_EXECUTION_RESULT_FIELDS = [
+  "schema", "project_id", "plan_version", "task_id", "execution_binding_id", "correlation_id", "command_id",
+  "repo_alias", "head_before", "head_after", "execution_status", "validation_status", "promotion_status", "failure_code", "result_summary"
 ];
+const GENERIC_SUBMISSION_PANEL_KIND = "generic-submission";
 const decorated = new WeakSet();
 const executionDecorated = new WeakSet();
 const decoratedPanels = new WeakMap();
@@ -20,6 +21,16 @@ let projectAutoEpoch = 0;
 let projectAutoState = { phase: "awaiting_next_launch", launch_id: null, execution_binding_id: null, token: null };
 const PROJECT_AUTO_STOP_MESSAGE = "bdb-vnext-project-auto-stop";
 const PROJECT_EXECUTION_STATUS_MESSAGE = "bdb-vnext-project-execution-status";
+
+function canonicalSortedEvidence(refs) {
+  if (!Array.isArray(refs)) return [];
+  return refs.map(String).sort();
+}
+
+function canonicalCriteria(criteria) {
+  if (!Array.isArray(criteria)) return [];
+  return criteria.map((item) => (item && typeof item === "object" ? { ...item } : {}));
+}
 
 function parseSubmission(block) {
   const text = typeof block.textContent === "string" ? block.textContent.trim() : "";
@@ -99,7 +110,11 @@ function panelMountOwner(block) {
 
 function semanticSubmissionKey(kind, value) {
   if (kind === PROJECT_EXECUTION_PANEL_KIND) {
-    return JSON.stringify(PROJECT_EXECUTION_IDENTITY_FIELDS.map((field) => [field, value[field]]));
+    const fields = PROJECT_EXECUTION_RESULT_FIELDS.map((field) => [field, value[field] !== undefined ? value[field] : null]);
+    fields.push(["evidence_refs", canonicalSortedEvidence(value.evidence_refs)]);
+    fields.push(["criteria", canonicalCriteria(value.criteria)]);
+    fields.push(["canonical_refs", value.canonical_refs && typeof value.canonical_refs === "object" ? value.canonical_refs : {}]);
+    return JSON.stringify(["bdb-project-execution-result-v2", fields]);
   }
   return JSON.stringify([value.schema, value.submission_key]);
 }
@@ -548,7 +563,20 @@ async function projectReadBindings() {
   try {
     const stored = await chrome.storage.local.get(PROJECT_BINDINGS_KEY);
     const value = stored[PROJECT_BINDINGS_KEY];
-    return value && typeof value === "object" && !Array.isArray(value) ? { ...value } : {};
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    const sanitized = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (
+        v &&
+        typeof v === "object" &&
+        !Array.isArray(v) &&
+        typeof v.launch_id === "string" &&
+        v.launch_id.trim() !== ""
+      ) {
+        sanitized[k] = v;
+      }
+    }
+    return sanitized;
   } catch (_error) {
     return {};
   }
