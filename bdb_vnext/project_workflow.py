@@ -236,7 +236,7 @@ class ProjectWorkflow:
         self.catalog = catalog or ProjectCatalog(runtime_root)
         self.runner = command_runner or SubprocessCommandRunner()
         self.github = github or GhRepositoryAdapter(self.runner)
-        self.queue = queue or ProjectLaunchQueueAdapter()
+        self.queue = queue or ProjectLaunchQueueAdapter(self.catalog.runtime_root / "control" / "project-launch-queue.json")
         self.execution = ProjectExecutionCoordinator(self.catalog.runtime_root, catalog=self.catalog)
         self.work_planning_builder = work_planning_builder or WorkPlanningPromptBuilder()
 

@@ -123,6 +123,12 @@ def test_queue_is_atomic_bounded_and_never_auto_sends(tmp_path: Path) -> None:
     assert document["pending"]["auto_send"] is False
 
 
+def test_workflow_default_queue_is_bound_to_its_explicit_runtime_root(tmp_path: Path) -> None:
+    runtime = (tmp_path / "canonical-runtime").absolute()
+    workflow = ProjectWorkflow(runtime, command_runner=FakeRunner(), github=FakeGitHub())
+    assert workflow.queue.path == runtime / "control" / "project-launch-queue.json"
+
+
 class FakeRunner:
     def run(self, args, *, cwd=None, timeout_seconds=120.0):
         return CommandResult(tuple(str(item) for item in args), 0, "", "")

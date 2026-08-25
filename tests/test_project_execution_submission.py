@@ -216,7 +216,7 @@ def test_native_auto_ack_records_sent_handoff_once_and_replays_safely(tmp_path: 
     assert queue.claim(launch_id=launch["launch_id"], claim_id=claim_id) is not None
     import bdb_vnext.m9b_native_host as native_module
 
-    monkeypatch.setattr(native_module, "_project_launch_queue", lambda: queue)
+    monkeypatch.setattr(native_module, "_project_launch_queue", lambda _runtime_root: queue)
     config = VNextNativeConfig(runtime_root=_catalog.runtime_root, legacy_runtime_root=tmp_path / "legacy", bootstrap_authority_root=tmp_path / "bootstrap")
     message = {
         "schema": M9B_NATIVE_REQUEST_SCHEMA,
@@ -248,7 +248,7 @@ def test_native_auto_ack_rejects_foreign_claim_before_marking_sent(tmp_path: Pat
     assert queue.claim(launch_id=launch["launch_id"], claim_id=owner_claim) is not None
     import bdb_vnext.m9b_native_host as native_module
 
-    monkeypatch.setattr(native_module, "_project_launch_queue", lambda: queue)
+    monkeypatch.setattr(native_module, "_project_launch_queue", lambda _runtime_root: queue)
     config = VNextNativeConfig(runtime_root=_catalog.runtime_root, legacy_runtime_root=tmp_path / "legacy", bootstrap_authority_root=tmp_path / "bootstrap")
     response = handle_message(config, {
         "schema": M9B_NATIVE_REQUEST_SCHEMA,
