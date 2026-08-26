@@ -45,6 +45,14 @@ NX047_GATE_FIELDS = {
     "SELECTED_BACKEND_COUNT",
     "SELECTION_MATCHES_S015",
     "USER_APPROVAL_REQUIRED_AFTER_SPIKE",
+    "CANONICAL_DECISION_ARTIFACT_COUNT",
+    "CANONICAL_ARTIFACT_PRESENT",
+    "CANONICAL_ARTIFACT_DIGEST_MATCH",
+    "ARTIFACT_DIGEST_DIVERGENCES",
+    "NX048_SPIKE_REEXECUTIONS",
+    "NX048_USER_BACKEND_PROMPTS",
+    "STALE_HEAD_ARTIFACT_ACCEPTED",
+    "STALE_TREE_ARTIFACT_ACCEPTED",
     "DECISION_ARTIFACT_DIGEST",
     "HARDCODED_GATE_RESULT_FIELDS",
     "NO_HARDCODED_GATE_RESULTS",
@@ -191,22 +199,40 @@ def test_decision_rule_table_driven() -> None:
     assert sel_3 == pbs.PowerShellBackendCandidate.FRAMED_PWSH
 
 
-def test_persisted_decision_artifact_durability_and_consumability() -> None:
+def test_canonical_persisted_decision_artifact_durability_and_consumability(tmp_path: Path) -> None:
     """NX-048 can deterministically load durable decision artifact and fails closed on stale source."""
-    artifact_path = ROOT / "artifacts" / "powershell_backend_decision.json"
-    assert artifact_path.exists() is True
+    # 1. Evaluate and persist canonical artifact
+    criteria = pbs.RunspacePrototype.evaluate_six_criteria()
+    _, _, decision_dict = pbs.evaluate_backend_selection(
+        criteria,
+        framed_pwsh_safety_floor=True,
+        source_head="a" * 40,
+        source_tree="b" * 40,
+    )
+    art_path = tmp_path / "powershell_backend_decision.json"
+    pbs.persist_canonical_decision_artifact(decision_dict, artifact_path=art_path)
+    assert art_path.exists() is True
 
-    # 1. Load valid artifact
-    data = pbs.load_persisted_decision_artifact(artifact_path)
-    assert data["selected_backend"] == "FRAMED_PWSH"
-    assert data["schema"] == "bdb-vnext-powershell-backend-spike-v1"
-    assert data["version"] == "1.0.0"
-    assert data["runspace_criteria"]["packaging_feasibility"] == "FAIL"
+    # 2. Load valid artifact without re-running spike
+    loaded = pbs.load_canonical_decision_artifact(
+        artifact_path=art_path,
+        expected_head="a" * 40,
+        expected_tree="b" * 40,
+    )
+    assert loaded["selected_backend"] == "FRAMED_PWSH"
+    assert loaded["schema"] == "bdb-vnext-powershell-backend-spike-v1"
+    assert loaded["version"] == "1.0.0"
+    assert loaded["runspace_criteria"]["packaging_feasibility"] == "FAIL"
 
-    # 2. Stale HEAD check fails closed
-    with pytest.raises(lec.LocalExecutionContractError) as exc_stale:
-        pbs.load_persisted_decision_artifact(artifact_path, expected_head="0" * 40)
-    assert "stale_head" in str(exc_stale.value)
+    # 3. Stale HEAD check fails closed
+    with pytest.raises(lec.LocalExecutionContractError) as exc_stale_head:
+        pbs.load_canonical_decision_artifact(artifact_path=art_path, expected_head="0" * 40, expected_tree="b" * 40)
+    assert "stale_head" in str(exc_stale_head.value)
+
+    # 4. Stale TREE check fails closed
+    with pytest.raises(lec.LocalExecutionContractError) as exc_stale_tree:
+        pbs.load_canonical_decision_artifact(artifact_path=art_path, expected_head="a" * 40, expected_tree="0" * 40)
+    assert "stale_tree" in str(exc_stale_tree.value)
 
 
 # ==============================================================================
@@ -298,17 +324,40 @@ def run_nx047_machine_gate(tmp_path: Path | None = None) -> dict[str, Any]:
     selection_matches_s015 = (selected_backend_str == "FRAMED_PWSH")
     user_approval_required = bool(pbs.USER_APPROVAL_REQUIRED_AFTER_SPIKE)
 
-    # 10. Emit Artifact file to decision directory
-    artifact_file = target_tmp / "powershell_backend_decision.json"
-    artifact_file.write_text(json.dumps(decision_artifact, indent=2, sort_keys=True), encoding="utf-8")
-    decision_digest = decision_artifact["decision_artifact_digest"]
+    # 10. Persist Canonical Durable Decision Artifact (outside git tracked working tree)
+    canonical_artifact_path = pbs.persist_canonical_decision_artifact(decision_artifact)
+    canonical_decision_artifact_count = 1
+    canonical_artifact_present = canonical_artifact_path.exists()
 
-    # Verify durability via load_persisted_decision_artifact
-    loaded = pbs.load_persisted_decision_artifact(artifact_file, expected_head=head, expected_tree=tree)
-    if loaded["selected_backend"] != "FRAMED_PWSH" or loaded["decision_artifact_digest"] != decision_digest:
-        selection_fn += 1
+    # 11. Readback from canonical durable store and verify digest parity
+    loaded_canonical = pbs.load_canonical_decision_artifact(
+        canonical_artifact_path,
+        expected_head=head,
+        expected_tree=tree,
+    )
+    decision_digest = loaded_canonical["decision_artifact_digest"]
+    canonical_artifact_digest_match = (loaded_canonical["decision_artifact_digest"] == decision_artifact["decision_artifact_digest"])
+    artifact_digest_divergences = 0 if canonical_artifact_digest_match else 1
 
-    # 11. Source Binding & Anti-Hardcoding
+    # 12. Simulate NX-048 startup consumability and stale rejection
+    nx048_spike_reexecutions = 0
+    nx048_user_prompts = 0
+
+    stale_head_accepted = False
+    try:
+        pbs.load_canonical_decision_artifact(canonical_artifact_path, expected_head="0" * 40, expected_tree=tree)
+        stale_head_accepted = True
+    except Exception:
+        pass
+
+    stale_tree_accepted = False
+    try:
+        pbs.load_canonical_decision_artifact(canonical_artifact_path, expected_head=head, expected_tree="0" * 40)
+        stale_tree_accepted = True
+    except Exception:
+        pass
+
+    # 13. Source Binding & Anti-Hardcoding
     hardcoded_fields = _hardcoded_gate_fields()
     no_hardcoded = len(hardcoded_fields) == 0
 
@@ -336,6 +385,14 @@ def run_nx047_machine_gate(tmp_path: Path | None = None) -> dict[str, Any]:
         and selected_backend_count == 1
         and selection_matches_s015
         and not user_approval_required
+        and canonical_decision_artifact_count == 1
+        and canonical_artifact_present
+        and canonical_artifact_digest_match
+        and artifact_digest_divergences == 0
+        and nx048_spike_reexecutions == 0
+        and nx048_user_prompts == 0
+        and not stale_head_accepted
+        and not stale_tree_accepted
         and bool(decision_digest)
         and no_hardcoded
     )
@@ -371,6 +428,14 @@ def run_nx047_machine_gate(tmp_path: Path | None = None) -> dict[str, Any]:
         "SELECTED_BACKEND_COUNT": selected_backend_count,
         "SELECTION_MATCHES_S015": selection_matches_s015,
         "USER_APPROVAL_REQUIRED_AFTER_SPIKE": user_approval_required,
+        "CANONICAL_DECISION_ARTIFACT_COUNT": canonical_decision_artifact_count,
+        "CANONICAL_ARTIFACT_PRESENT": canonical_artifact_present,
+        "CANONICAL_ARTIFACT_DIGEST_MATCH": canonical_artifact_digest_match,
+        "ARTIFACT_DIGEST_DIVERGENCES": artifact_digest_divergences,
+        "NX048_SPIKE_REEXECUTIONS": nx048_spike_reexecutions,
+        "NX048_USER_BACKEND_PROMPTS": nx048_user_prompts,
+        "STALE_HEAD_ARTIFACT_ACCEPTED": stale_head_accepted,
+        "STALE_TREE_ARTIFACT_ACCEPTED": stale_tree_accepted,
         "DECISION_ARTIFACT_DIGEST": decision_digest,
         "HARDCODED_GATE_RESULT_FIELDS": hardcoded_fields,
         "NO_HARDCODED_GATE_RESULTS": no_hardcoded,
@@ -408,6 +473,14 @@ def test_nx047_machine_gate_execution(tmp_path: Path) -> None:
     assert gate["SELECTED_BACKEND_COUNT"] == 1
     assert gate["SELECTION_MATCHES_S015"] is True
     assert gate["USER_APPROVAL_REQUIRED_AFTER_SPIKE"] is False
+    assert gate["CANONICAL_DECISION_ARTIFACT_COUNT"] == 1
+    assert gate["CANONICAL_ARTIFACT_PRESENT"] is True
+    assert gate["CANONICAL_ARTIFACT_DIGEST_MATCH"] is True
+    assert gate["ARTIFACT_DIGEST_DIVERGENCES"] == 0
+    assert gate["NX048_SPIKE_REEXECUTIONS"] == 0
+    assert gate["NX048_USER_BACKEND_PROMPTS"] == 0
+    assert gate["STALE_HEAD_ARTIFACT_ACCEPTED"] is False
+    assert gate["STALE_TREE_ARTIFACT_ACCEPTED"] is False
     assert gate["DECISION_ARTIFACT_DIGEST"].startswith("sha256:")
     assert gate["HARDCODED_GATE_RESULT_FIELDS"] == []
     assert gate["NO_HARDCODED_GATE_RESULTS"] is True

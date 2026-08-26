@@ -372,3 +372,34 @@ def load_persisted_decision_artifact(
         raise LocalExecutionContractError("stale_tree", "Artifact source_tree does not match expected_tree")
 
     return data
+
+
+CANONICAL_ARTIFACT_STORAGE_KIND = "CONTENT_ADDRESSED_EVIDENCE"
+CANONICAL_ARTIFACT_PATH_OR_KEY = "runtime/evidence/powershell_backend_decision.json"
+
+
+def get_canonical_decision_artifact_path(root: Path | str | None = None) -> Path:
+    """Return canonical path to persisted durable decision artifact outside git source tree."""
+    base = Path(root) if root else Path(__file__).resolve().parents[1]
+    return base / "runtime" / "evidence" / "powershell_backend_decision.json"
+
+
+def persist_canonical_decision_artifact(
+    decision_dict: dict[str, Any],
+    artifact_path: Path | str | None = None,
+) -> Path:
+    """Persist canonical decision artifact to durable runtime evidence store."""
+    target = Path(artifact_path) if artifact_path else get_canonical_decision_artifact_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(decision_dict, indent=2, sort_keys=True), encoding="utf-8")
+    return target
+
+
+def load_canonical_decision_artifact(
+    artifact_path: Path | str | None = None,
+    expected_head: str = "",
+    expected_tree: str = "",
+) -> dict[str, Any]:
+    """Load canonical decision artifact directly from durable runtime evidence store."""
+    target = Path(artifact_path) if artifact_path else get_canonical_decision_artifact_path()
+    return load_persisted_decision_artifact(target, expected_head=expected_head, expected_tree=expected_tree)
