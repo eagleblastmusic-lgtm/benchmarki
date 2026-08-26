@@ -191,6 +191,24 @@ def test_decision_rule_table_driven() -> None:
     assert sel_3 == pbs.PowerShellBackendCandidate.FRAMED_PWSH
 
 
+def test_persisted_decision_artifact_durability_and_consumability() -> None:
+    """NX-048 can deterministically load durable decision artifact and fails closed on stale source."""
+    artifact_path = ROOT / "artifacts" / "powershell_backend_decision.json"
+    assert artifact_path.exists() is True
+
+    # 1. Load valid artifact
+    data = pbs.load_persisted_decision_artifact(artifact_path)
+    assert data["selected_backend"] == "FRAMED_PWSH"
+    assert data["schema"] == "bdb-vnext-powershell-backend-spike-v1"
+    assert data["version"] == "1.0.0"
+    assert data["runspace_criteria"]["packaging_feasibility"] == "FAIL"
+
+    # 2. Stale HEAD check fails closed
+    with pytest.raises(lec.LocalExecutionContractError) as exc_stale:
+        pbs.load_persisted_decision_artifact(artifact_path, expected_head="0" * 40)
+    assert "stale_head" in str(exc_stale.value)
+
+
 # ==============================================================================
 # NX-047 Machine Gate
 # ==============================================================================
@@ -258,30 +276,41 @@ def run_nx047_machine_gate(tmp_path: Path | None = None) -> dict[str, Any]:
     else:
         proto_fail_open += 1
 
-    # 8. Table-driven Selection False Positives/Negatives
+    # 8. Source Readback for Decision Binding
+    head_code, head = _git("rev-parse", "HEAD")
+    tree_code, tree = _git("rev-parse", "HEAD^{tree}")
+    status_code, status_out = _git("status", "--porcelain")
+    diff_code, _ = _git("diff", "--check")
+    worktree_clean = (status_code == 0 and status_out == "" and diff_code == 0)
+
+    # 9. Table-driven Selection False Positives/Negatives
     selection_fp = 0
     selection_fn = 0
-    selected_enum, sel_reason, decision_artifact = pbs.evaluate_backend_selection(runspace_criteria, framed_pwsh_safety_floor=True)
+    selected_enum, sel_reason, decision_artifact = pbs.evaluate_backend_selection(
+        runspace_criteria,
+        framed_pwsh_safety_floor=True,
+        source_head=head,
+        source_tree=tree,
+    )
 
     selected_backend_str = selected_enum.value
     selected_backend_count = 1
     selection_matches_s015 = (selected_backend_str == "FRAMED_PWSH")
     user_approval_required = bool(pbs.USER_APPROVAL_REQUIRED_AFTER_SPIKE)
 
-    # 9. Emit Artifact file to decision directory
+    # 10. Emit Artifact file to decision directory
     artifact_file = target_tmp / "powershell_backend_decision.json"
     artifact_file.write_text(json.dumps(decision_artifact, indent=2, sort_keys=True), encoding="utf-8")
     decision_digest = decision_artifact["decision_artifact_digest"]
 
-    # 10. Source Binding & Anti-Hardcoding
+    # Verify durability via load_persisted_decision_artifact
+    loaded = pbs.load_persisted_decision_artifact(artifact_file, expected_head=head, expected_tree=tree)
+    if loaded["selected_backend"] != "FRAMED_PWSH" or loaded["decision_artifact_digest"] != decision_digest:
+        selection_fn += 1
+
+    # 11. Source Binding & Anti-Hardcoding
     hardcoded_fields = _hardcoded_gate_fields()
     no_hardcoded = len(hardcoded_fields) == 0
-
-    head_code, head = _git("rev-parse", "HEAD")
-    tree_code, tree = _git("rev-parse", "HEAD^{tree}")
-    status_code, status_out = _git("status", "--porcelain")
-    diff_code, _ = _git("diff", "--check")
-    worktree_clean = (status_code == 0 and status_out == "" and diff_code == 0)
 
     source_bound = "PASS" if head_code == 0 and tree_code == 0 and worktree_clean and no_hardcoded else "FAIL"
 

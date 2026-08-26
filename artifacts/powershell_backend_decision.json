@@ -1,0 +1,98 @@
+{
+  "candidates_evaluated": [
+    "RUNSPACE",
+    "FRAMED_PWSH"
+  ],
+  "decision_artifact_digest": "sha256:8dfdced19e850d7428d22f5e4a6a156cd4bc85c9e5d55252563f5764aa00a64a",
+  "framed_pwsh_safety_floor": "PASS",
+  "known_limitations": [
+    "Process startup overhead on new session initialization",
+    "Requires explicit length framing to prevent stream collisions"
+  ],
+  "runspace_criteria": {
+    "cancellation": "PASS",
+    "crash_recovery": "PASS",
+    "isolation": "PASS",
+    "no_cross_project_leakage": "PASS",
+    "packaging_feasibility": "FAIL",
+    "protocol_safety": "PASS"
+  },
+  "schema": "bdb-vnext-powershell-backend-spike-v1",
+  "selected_backend": "FRAMED_PWSH",
+  "selection_reason": "Runspace failed criteria ['packaging_feasibility']; fallback to FRAMED_PWSH per S-015",
+  "source_head": "a9f0c4486df853971d40a435d9d05ad94a0f6679",
+  "source_tree": "c452462f46a496e31f5261c38a6e16401dc8c42f",
+  "threat_matrix_summary": [
+    {
+      "candidate": "BOTH",
+      "mitigation": "Per-session process isolation and strict project session scoping",
+      "name": "Cross-Project State Leakage",
+      "residual_status": "CONTROLLED",
+      "threat_id": "T-001"
+    },
+    {
+      "candidate": "FRAMED_PWSH",
+      "mitigation": "Length-prefixed binary framing with SHA-256 payload digests; no sentinel parsing",
+      "name": "Frame Injection / Sentinel Collision",
+      "residual_status": "CONTROLLED",
+      "threat_id": "T-002"
+    },
+    {
+      "candidate": "BOTH",
+      "mitigation": "Environment sanitization filter on diagnostics and session dumps",
+      "name": "Secret Leakage in Session Environment",
+      "residual_status": "CONTROLLED",
+      "threat_id": "T-003"
+    },
+    {
+      "candidate": "FRAMED_PWSH",
+      "mitigation": "Unique request_id correlation and session sequence validation",
+      "name": "Stale Response / Protocol Desynchronization",
+      "residual_status": "CONTROLLED",
+      "threat_id": "T-004"
+    },
+    {
+      "candidate": "BOTH",
+      "mitigation": "Fail-closed disposition; zero blind replay on persistent crash",
+      "name": "Crash Mid-Effect",
+      "residual_status": "CONTROLLED",
+      "threat_id": "T-005"
+    },
+    {
+      "candidate": "BOTH",
+      "mitigation": "Windows Job Object termination for runaway sub-processes",
+      "name": "Cancellation Failure",
+      "residual_status": "CONTROLLED",
+      "threat_id": "T-006"
+    },
+    {
+      "candidate": "BOTH",
+      "mitigation": "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE assigned to process tree",
+      "name": "Child Process Leak",
+      "residual_status": "CONTROLLED",
+      "threat_id": "T-007"
+    },
+    {
+      "candidate": "FRAMED_PWSH",
+      "mitigation": "Immediate fail-closed session termination upon malformed frame header",
+      "name": "Protocol Desync on Malformed Frame",
+      "residual_status": "CONTROLLED",
+      "threat_id": "T-008"
+    },
+    {
+      "candidate": "BOTH",
+      "mitigation": "NX-042 pre-execution policy gating; UAC never bypassed",
+      "name": "Unauthorized Elevation",
+      "residual_status": "CONTROLLED",
+      "threat_id": "T-009"
+    },
+    {
+      "candidate": "BOTH",
+      "mitigation": "10 MiB hard frame size limit and streaming 64 KiB inline digest capture",
+      "name": "Unbounded Memory / Output Stream Flood",
+      "residual_status": "CONTROLLED",
+      "threat_id": "T-010"
+    }
+  ],
+  "version": "1.0.0"
+}

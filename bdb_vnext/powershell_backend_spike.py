@@ -288,6 +288,8 @@ THREAT_MATRIX_FINDINGS = [
 def evaluate_backend_selection(
     runspace_criteria: Mapping[str, CriterionStatus],
     framed_pwsh_safety_floor: bool = True,
+    source_head: str = "",
+    source_tree: str = "",
 ) -> tuple[PowerShellBackendCandidate, str, dict[str, Any]]:
     """Machine-select backend according to S-015 rule without user intervention."""
     required_criteria = [
@@ -315,7 +317,8 @@ def evaluate_backend_selection(
     decision_dict = {
         "schema": POWERSHELL_BACKEND_SPIKE_SCHEMA,
         "version": POWERSHELL_BACKEND_DECISION_VERSION,
-        "evaluated_at": datetime.now(timezone.utc).isoformat(),
+        "source_head": source_head,
+        "source_tree": source_tree,
         "candidates_evaluated": [
             PowerShellBackendCandidate.RUNSPACE.value,
             PowerShellBackendCandidate.FRAMED_PWSH.value,
@@ -336,3 +339,36 @@ def evaluate_backend_selection(
     decision_dict["decision_artifact_digest"] = digest
 
     return selected, reason, decision_dict
+
+
+def load_persisted_decision_artifact(
+    artifact_path: Path | str,
+    expected_head: str = "",
+    expected_tree: str = "",
+) -> dict[str, Any]:
+    """Load and validate persisted decision artifact for NX-048 consumption."""
+    p = Path(artifact_path)
+    if not p.exists() or not p.is_file():
+        raise LocalExecutionContractError("missing_artifact", f"Persisted artifact not found at '{p}'")
+
+    raw_text = p.read_text(encoding="utf-8")
+    data = json.loads(raw_text)
+
+    if data.get("schema") != POWERSHELL_BACKEND_SPIKE_SCHEMA:
+        raise LocalExecutionContractError("invalid_schema", f"Unexpected schema '{data.get('schema')}'")
+
+    expected_digest = data.get("decision_artifact_digest", "")
+    data_copy = {k: v for k, v in data.items() if k != "decision_artifact_digest"}
+    serialized = json.dumps(data_copy, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    actual_digest = "sha256:" + hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    if expected_digest and actual_digest != expected_digest:
+        raise LocalExecutionContractError("digest_mismatch", "Persisted artifact digest mismatch")
+
+    if expected_head and data.get("source_head") and data.get("source_head") != expected_head:
+        raise LocalExecutionContractError("stale_head", "Artifact source_head does not match expected_head")
+
+    if expected_tree and data.get("source_tree") and data.get("source_tree") != expected_tree:
+        raise LocalExecutionContractError("stale_tree", "Artifact source_tree does not match expected_tree")
+
+    return data
