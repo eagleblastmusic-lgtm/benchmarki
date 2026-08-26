@@ -56,6 +56,15 @@ from bdb_vnext.project_center_auto import (
     ProjectCenterAutoViewModel,
     PROJECT_CENTER_AUTO_UI_VERSION,
 )
+from bdb_vnext.machine_environment_gui import (
+    CanonicalEnvironmentCommands,
+    ENVIRONMENT_GUI_CONTROL_CONTRACT,
+    GuiReadinessState,
+    MachineEnvironmentViewModel,
+    MACHINE_ENVIRONMENT_GUI_VERSION,
+    READINESS_EXPLANATION_TEXT,
+    STATUS_DISPLAY_LABELS,
+)
 
 from .style import CONTROL_CENTER_STYLESHEET
 from .vnext_control_center import VNextControlCenterWindow
@@ -193,7 +202,18 @@ class _WorkPlanningDialog(QDialog):
 class ProjectCenterWindow(QMainWindow):
     dashboard_ready = Signal()
 
-    def __init__(self, *, runtime_root: str | Path | None = None, snapshot_loader: Callable[[str | Path | None], ControlCenterSnapshot] = read_control_center_snapshot, catalog: ProjectCatalog | None = None, workflow: ProjectWorkflow | None = None, auto_commands_factory: Callable[[ProjectRecord], ProjectCenterAutoCommands] | None = None, auto_start_confirmation: Callable[[ProjectCenterAutoViewModel], bool] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        runtime_root: str | Path | None = None,
+        snapshot_loader: Callable[[str | Path | None], ControlCenterSnapshot] = read_control_center_snapshot,
+        catalog: ProjectCatalog | None = None,
+        workflow: ProjectWorkflow | None = None,
+        auto_commands_factory: Callable[[ProjectRecord], ProjectCenterAutoCommands] | None = None,
+        auto_start_confirmation: Callable[[ProjectCenterAutoViewModel], bool] | None = None,
+        environment_commands_factory: Callable[[ProjectRecord], CanonicalEnvironmentCommands] | None = None,
+        environment_view_model_factory: Callable[[ProjectRecord, str | None], MachineEnvironmentViewModel] | None = None,
+    ) -> None:
         super().__init__()
         self.setObjectName("BdbControlCenterWindow")
         self.setWindowTitle("Bartosz Dev Bridge")
@@ -205,6 +225,11 @@ class ProjectCenterWindow(QMainWindow):
         self._workflow = workflow or ProjectWorkflow(self._catalog.runtime_root, catalog=self._catalog)
         self._auto_commands_factory = auto_commands_factory
         self._auto_start_confirmation = auto_start_confirmation
+        self._environment_commands_factory = environment_commands_factory
+        self._environment_view_model_factory = environment_view_model_factory
+        self._environment_commands: CanonicalEnvironmentCommands | None = None
+        self._environment_commands_project_id: str | None = None
+        self._environment_view_model: MachineEnvironmentViewModel | None = None
         self._auto_commands: ProjectCenterAutoCommands | None = None
         self._auto_commands_project_id: str | None = None
         self._auto_selected_scope = DEFAULT_AUTO_SCOPE
@@ -310,6 +335,159 @@ class ProjectCenterWindow(QMainWindow):
         layout.addRow("Sterowanie:", controls)
         return panel
 
+    def _make_environment_panel(self) -> QWidget:
+        panel = QGroupBox("Środowisko maszynowe (Machine Environment)")
+        panel.setObjectName("ProjectCenterEnvironmentPanel")
+        layout = QFormLayout(panel)
+
+        self._env_status_label = QLabel("—")
+        self._env_status_label.setObjectName("EnvironmentStatusLabel")
+        self._env_status_label.setAccessibleName("Status gotowości środowiska")
+        self._env_status_label.setWordWrap(True)
+        layout.addRow("Status gotowości:", self._env_status_label)
+
+        self._env_explanation_label = QLabel("—")
+        self._env_explanation_label.setObjectName("EnvironmentExplanationLabel")
+        self._env_explanation_label.setAccessibleName("Wyjaśnienie statusu środowiska")
+        self._env_explanation_label.setWordWrap(True)
+        layout.addRow("Wyjaśnienie:", self._env_explanation_label)
+
+        self._env_summary_label = QLabel("—")
+        self._env_summary_label.setObjectName("EnvironmentSummaryLabel")
+        self._env_summary_label.setAccessibleName("Podsumowanie wymagań projektu")
+        self._env_summary_label.setWordWrap(True)
+        layout.addRow("Podsumowanie projektu:", self._env_summary_label)
+
+        self._env_task_delta_label = QLabel("—")
+        self._env_task_delta_label.setObjectName("EnvironmentTaskDeltaLabel")
+        self._env_task_delta_label.setAccessibleName("Delta wymagań bieżącego zadania")
+        self._env_task_delta_label.setWordWrap(True)
+        layout.addRow("Delta zadania:", self._env_task_delta_label)
+
+        self._env_stale_label = QLabel("—")
+        self._env_stale_label.setObjectName("EnvironmentStaleLabel")
+        self._env_stale_label.setAccessibleName("Wskaźnik aktualności środowiska")
+        self._env_stale_label.setWordWrap(True)
+        layout.addRow("Aktualność:", self._env_stale_label)
+
+        self._env_disabled_reason = QLabel("—")
+        self._env_disabled_reason.setObjectName("EnvironmentDisabledReason")
+        self._env_disabled_reason.setAccessibleName("Powód niedostępności akcji środowiska")
+        self._env_disabled_reason.setWordWrap(True)
+        layout.addRow("Powód niedostępności:", self._env_disabled_reason)
+
+        controls = QHBoxLayout()
+        self._env_refresh_button = QPushButton("Odśwież środowisko")
+        self._env_refresh_button.setObjectName("EnvironmentRefreshButton")
+        self._env_refresh_button.setAccessibleName("Odśwież stan środowiska")
+        self._env_refresh_button.setShortcut("F5")
+        self._env_refresh_button.clicked.connect(self._refresh_environment_from_gui)
+
+        self._env_prepare_button = QPushButton("Przygotuj środowisko")
+        self._env_prepare_button.setObjectName("EnvironmentPrepareButton")
+        self._env_prepare_button.setAccessibleName("Przygotuj środowisko lokalne")
+        self._env_prepare_button.setShortcut("Ctrl+P")
+        self._env_prepare_button.clicked.connect(self._prepare_environment_from_gui)
+
+        self._env_details_toggle_button = QPushButton("Pokaż szczegóły")
+        self._env_details_toggle_button.setObjectName("EnvironmentDetailsToggleButton")
+        self._env_details_toggle_button.setAccessibleName("Rozwiń/zwiń szczegóły środowiska")
+        self._env_details_toggle_button.setShortcut("Ctrl+D")
+        self._env_details_toggle_button.clicked.connect(self._toggle_environment_details)
+
+        for button in (self._env_refresh_button, self._env_prepare_button, self._env_details_toggle_button):
+            button.setAccessibleDescription("Sterowanie środowiskiem maszynowym; widok nie jest autorytetem.")
+            controls.addWidget(button)
+        controls.addStretch(1)
+        layout.addRow("Sterowanie:", controls)
+
+        self._env_details_view = QTextEdit()
+        self._env_details_view.setObjectName("EnvironmentDetailsView")
+        self._env_details_view.setAccessibleName("Szczegóły diagnostyczne środowiska")
+        self._env_details_view.setReadOnly(True)
+        self._env_details_view.setVisible(False)
+        layout.addRow("Szczegóły diagnostyczne:", self._env_details_view)
+
+        return panel
+
+    def _toggle_environment_details(self) -> None:
+        visible = not self._env_details_view.isVisible()
+        self._env_details_view.setVisible(visible)
+        self._env_details_toggle_button.setText("Ukryj szczegóły" if visible else "Pokaż szczegóły")
+
+    def _environment_commands_for_project(self, project: ProjectRecord) -> CanonicalEnvironmentCommands:
+        if self._environment_commands is not None and self._environment_commands_project_id == project.project_id:
+            return self._environment_commands
+        if self._environment_commands_factory is not None:
+            commands = self._environment_commands_factory(project)
+        else:
+            root = project.local_repo_path or self._catalog.runtime_root
+            commands = CanonicalEnvironmentCommands(root)
+        self._environment_commands = commands
+        self._environment_commands_project_id = project.project_id
+        return commands
+
+    def _render_environment(self, project: ProjectRecord | None = None) -> None:
+        project = project or next((item for item in self._projects if item.project_id == self._current_project_id), None)
+        if project is None:
+            self._env_status_label.setText("Wybierz projekt")
+            self._env_explanation_label.setText("Wybierz projekt, aby odczytać stan środowiska.")
+            self._env_summary_label.setText("Brak aktywnego projektu.")
+            self._env_task_delta_label.setText("—")
+            self._env_stale_label.setText("—")
+            self._env_disabled_reason.setText("Wybierz projekt, aby włączyć akcje środowiskowe.")
+            self._env_refresh_button.setEnabled(False)
+            self._env_prepare_button.setEnabled(False)
+            self._env_details_toggle_button.setEnabled(False)
+            self._env_details_view.clear()
+            self._environment_view_model = None
+            return
+
+        if self._environment_view_model_factory is not None:
+            vm = self._environment_view_model_factory(project, project.current_task)
+        else:
+            vm = None
+
+        self._environment_view_model = vm
+        if vm is not None:
+            self._env_status_label.setText(vm.status_label)
+            self._env_explanation_label.setText(vm.explanation)
+            self._env_summary_label.setText(vm.project_summary.summary_text)
+            self._env_task_delta_label.setText(vm.task_delta.explanation if vm.task_delta else "Brak aktywnego zadania.")
+            self._env_stale_label.setText(f"[PRZEDAWNIONE] {vm.stale_reason}" if vm.is_stale else "[AKTUALNY] Digest zgodny")
+            self._env_disabled_reason.setText(vm.prepare_disabled_reason or "Akcja Prepare dozwolona.")
+            self._env_refresh_button.setEnabled(vm.can_refresh)
+            self._env_prepare_button.setEnabled(vm.can_prepare)
+            self._env_prepare_button.setToolTip(vm.prepare_disabled_reason or "Przygotuj środowisko lokalne.")
+            self._env_prepare_button.setAccessibleDescription(vm.prepare_disabled_reason or "Przygotuj środowisko lokalne.")
+            self._env_details_toggle_button.setEnabled(True)
+            self._env_details_view.setPlainText(vm.diagnostic_details)
+        else:
+            self._env_status_label.setText("Nieznany (brak projekcji)")
+            self._env_explanation_label.setText("Kanoniczny stan środowiska nie został zainicjalizowany.")
+            self._env_summary_label.setText("Oczekiwanie na resolver.")
+            self._env_task_delta_label.setText("—")
+            self._env_stale_label.setText("—")
+            self._env_disabled_reason.setText("Brak danych środowiskowych.")
+            self._env_refresh_button.setEnabled(True)
+            self._env_prepare_button.setEnabled(False)
+            self._env_details_toggle_button.setEnabled(False)
+
+    def _refresh_environment_from_gui(self) -> None:
+        project = next((item for item in self._projects if item.project_id == self._current_project_id), None)
+        if project is None:
+            return
+        commands = self._environment_commands_for_project(project)
+        commands.refresh(project.project_id, project.current_task)
+        self._render_environment(project)
+
+    def _prepare_environment_from_gui(self) -> None:
+        project = next((item for item in self._projects if item.project_id == self._current_project_id), None)
+        if project is None or self._environment_view_model is None or not self._environment_view_model.can_prepare:
+            return
+        commands = self._environment_commands_for_project(project)
+        self._render_environment(project)
+
     def _make_current_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -325,6 +503,8 @@ class ProjectCenterWindow(QMainWindow):
         layout.addWidget(self._execution_status)
         self._auto_panel = self._make_auto_panel()
         layout.addWidget(self._auto_panel)
+        self._environment_panel = self._make_environment_panel()
+        layout.addWidget(self._environment_panel)
         self._project_detail = QTextEdit()
         self._project_detail.setReadOnly(True)
         self._project_detail.setObjectName("CurrentProjectDetail")
@@ -453,6 +633,7 @@ class ProjectCenterWindow(QMainWindow):
                 review = False
         self._approve_review_button.setEnabled(review); self._changes_review_button.setEnabled(review); self._project_review_button.setEnabled(has_project)
         self._render_auto(project)
+        self._render_environment(project)
 
     def _auto_commands_for_project(self, project: ProjectRecord) -> ProjectCenterAutoCommands:
         if self._auto_commands is not None and self._auto_commands_project_id == project.project_id:
