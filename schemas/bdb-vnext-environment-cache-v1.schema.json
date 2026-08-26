@@ -1,0 +1,215 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-environment-cache-v1",
+  "title": "BDB vNext Environment Readiness Cache v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "key",
+    "readiness",
+    "created_at",
+    "expires_at",
+    "generation",
+    "record_digest"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-vnext-environment-cache-v1" },
+    "version": { "const": "v1" },
+    "key": { "$ref": "#/$defs/key" },
+    "readiness": { "$ref": "#/$defs/readiness" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time" },
+    "generation": { "type": "integer", "minimum": 1 },
+    "record_digest": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "identity_or_null": {
+      "anyOf": [
+        { "type": "null" },
+        { "type": "string" }
+      ]
+    },
+    "digest_map": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/digest" }
+    },
+    "executable_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fact_class",
+        "subject",
+        "status",
+        "verification",
+        "fact_version",
+        "fact_path",
+        "fact_digest",
+        "executable_path",
+        "executable_digest",
+        "executable_version",
+        "probe_id"
+      ],
+      "properties": {
+        "fact_class": { "type": "string", "minLength": 1 },
+        "subject": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "minLength": 1 },
+        "verification": { "type": "string", "minLength": 1 },
+        "fact_version": { "$ref": "#/$defs/identity_or_null" },
+        "fact_path": { "$ref": "#/$defs/identity_or_null" },
+        "fact_digest": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/digest" }
+          ]
+        },
+        "executable_path": { "$ref": "#/$defs/identity_or_null" },
+        "executable_digest": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/digest" }
+          ]
+        },
+        "executable_version": { "$ref": "#/$defs/identity_or_null" },
+        "probe_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "key": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "project_id",
+        "task_id",
+        "requirement_set_id",
+        "requirement_digest",
+        "inventory_schema",
+        "inventory_version",
+        "inventory_id",
+        "inventory_digest",
+        "path_digest",
+        "executable_identities",
+        "manifest_digests",
+        "lockfile_digests",
+        "source_identity_digest",
+        "collector_version",
+        "resolver_version",
+        "key_digest"
+      ],
+      "properties": {
+        "schema": { "const": "bdb-vnext-environment-cache-v1" },
+        "version": { "const": "v1" },
+        "project_id": { "type": "string", "minLength": 1 },
+        "task_id": { "type": "string", "minLength": 1 },
+        "requirement_set_id": { "type": "string", "minLength": 1 },
+        "requirement_digest": { "$ref": "#/$defs/digest" },
+        "inventory_schema": { "type": "string", "minLength": 1 },
+        "inventory_version": { "type": "string", "minLength": 1 },
+        "inventory_id": { "type": "string", "minLength": 1 },
+        "inventory_digest": { "$ref": "#/$defs/digest" },
+        "path_digest": { "$ref": "#/$defs/digest" },
+        "executable_identities": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/executable_identity" }
+        },
+        "manifest_digests": { "$ref": "#/$defs/digest_map" },
+        "lockfile_digests": { "$ref": "#/$defs/digest_map" },
+        "source_identity_digest": { "$ref": "#/$defs/digest" },
+        "collector_version": { "type": "string", "minLength": 1 },
+        "resolver_version": { "type": "string", "minLength": 1 },
+        "key_digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "requirement_resolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requirement_id",
+        "capability",
+        "required",
+        "disposition",
+        "selected_capability",
+        "observed_fact_class",
+        "observed_version",
+        "observed_path",
+        "observed_digest",
+        "blocking",
+        "reason",
+        "explanation",
+        "requirement_digest",
+        "inventory_id",
+        "inventory_freshness"
+      ],
+      "properties": {
+        "requirement_id": { "type": "string", "minLength": 1 },
+        "capability": { "type": "string", "minLength": 1 },
+        "required": { "type": "boolean" },
+        "disposition": {
+          "enum": ["ALREADY_AVAILABLE", "MISSING", "VERSION_MISMATCH", "UNVERIFIABLE"]
+        },
+        "selected_capability": { "$ref": "#/$defs/identity_or_null" },
+        "observed_fact_class": { "$ref": "#/$defs/identity_or_null" },
+        "observed_version": { "$ref": "#/$defs/identity_or_null" },
+        "observed_path": { "$ref": "#/$defs/identity_or_null" },
+        "observed_digest": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/digest" }
+          ]
+        },
+        "blocking": { "type": "boolean" },
+        "reason": { "type": "string", "minLength": 1 },
+        "explanation": { "type": "string", "minLength": 1 },
+        "requirement_digest": { "$ref": "#/$defs/digest" },
+        "inventory_id": { "type": "string", "minLength": 1 },
+        "inventory_freshness": { "type": "string", "minLength": 1 }
+      }
+    },
+    "readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "status",
+        "ready",
+        "requirement_digest",
+        "inventory_id",
+        "inventory_digest",
+        "inventory_freshness",
+        "evaluated_at",
+        "stale",
+        "blocking_requirement_ids",
+        "requirements",
+        "explanation"
+      ],
+      "properties": {
+        "schema": { "const": "bdb-vnext-environment-readiness-v1" },
+        "version": { "const": "v1" },
+        "status": { "enum": ["ENVIRONMENT_READY", "ENVIRONMENT_NOT_READY"] },
+        "ready": { "type": "boolean" },
+        "requirement_digest": { "$ref": "#/$defs/digest" },
+        "inventory_id": { "type": "string", "minLength": 1 },
+        "inventory_digest": { "$ref": "#/$defs/digest" },
+        "inventory_freshness": { "type": "string", "minLength": 1 },
+        "evaluated_at": { "type": "string", "format": "date-time" },
+        "stale": { "type": "boolean" },
+        "blocking_requirement_ids": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "requirements": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/requirement_resolution" }
+        },
+        "explanation": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
