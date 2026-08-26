@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -44,6 +45,17 @@ from bdb_vnext.project_catalog import ProjectBrief, ProjectCatalog, ProjectCatal
 from bdb_vnext.project_execution import ProjectExecutionError
 from bdb_vnext.project_workflow import ProjectWorkflow, ProjectWorkflowError
 from bdb_vnext.project_memory import HANDOFF_MODES, ProjectMemoryError, bounded_history_summary, project_health, project_status_sentence, resolve_next_action
+from bdb_vnext.auto_scope_contract import AutoScope, DEFAULT_AUTO_SCOPE
+from bdb_vnext.project_center_auto import (
+    AUTO_SCOPE_OPTIONS,
+    AUTO_STATUS_REASON_TEXT,
+    CanonicalAutoState,
+    CanonicalProjectCenterAutoCommands,
+    ProjectCenterAutoCommandError,
+    ProjectCenterAutoCommands,
+    ProjectCenterAutoViewModel,
+    PROJECT_CENTER_AUTO_UI_VERSION,
+)
 
 from .style import CONTROL_CENTER_STYLESHEET
 from .vnext_control_center import VNextControlCenterWindow
@@ -181,7 +193,7 @@ class _WorkPlanningDialog(QDialog):
 class ProjectCenterWindow(QMainWindow):
     dashboard_ready = Signal()
 
-    def __init__(self, *, runtime_root: str | Path | None = None, snapshot_loader: Callable[[str | Path | None], ControlCenterSnapshot] = read_control_center_snapshot, catalog: ProjectCatalog | None = None, workflow: ProjectWorkflow | None = None) -> None:
+    def __init__(self, *, runtime_root: str | Path | None = None, snapshot_loader: Callable[[str | Path | None], ControlCenterSnapshot] = read_control_center_snapshot, catalog: ProjectCatalog | None = None, workflow: ProjectWorkflow | None = None, auto_commands_factory: Callable[[ProjectRecord], ProjectCenterAutoCommands] | None = None, auto_start_confirmation: Callable[[ProjectCenterAutoViewModel], bool] | None = None) -> None:
         super().__init__()
         self.setObjectName("BdbControlCenterWindow")
         self.setWindowTitle("Bartosz Dev Bridge")
@@ -191,6 +203,13 @@ class ProjectCenterWindow(QMainWindow):
         self._snapshot_loader = snapshot_loader
         self._catalog = catalog or ProjectCatalog(self._runtime_root or default_vnext_runtime_root())
         self._workflow = workflow or ProjectWorkflow(self._catalog.runtime_root, catalog=self._catalog)
+        self._auto_commands_factory = auto_commands_factory
+        self._auto_start_confirmation = auto_start_confirmation
+        self._auto_commands: ProjectCenterAutoCommands | None = None
+        self._auto_commands_project_id: str | None = None
+        self._auto_selected_scope = DEFAULT_AUTO_SCOPE
+        self._auto_scope_user_changed = False
+        self._auto_view_model = ProjectCenterAutoViewModel.from_canonical(CanonicalAutoState())
         self._snapshot: ControlCenterSnapshot | None = None
         self._projects: tuple[ProjectRecord, ...] = ()
         self._current_project_id: str | None = None
@@ -224,16 +243,142 @@ class ProjectCenterWindow(QMainWindow):
     def _make_projects_page(self) -> QWidget:
         page = QWidget(); layout = QVBoxLayout(page); layout.addWidget(QLabel("Moje projekty")); self._project_table = QTableWidget(0, 5); self._project_table.setObjectName("ProjectCatalogTable"); self._project_table.setHorizontalHeaderLabels(("Nazwa", "Status", "Postęp", "Etap", "Zadanie")); self._project_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); self._project_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); self._project_table.itemSelectionChanged.connect(self._select_project_row); layout.addWidget(self._project_table, 1); return page
 
+    def _make_auto_panel(self) -> QWidget:
+        panel = QGroupBox("AUTO — kanoniczny Project Memory")
+        panel.setObjectName("ProjectCenterAutoPanel")
+        layout = QFormLayout(panel)
+
+        self._auto_scope_selector = QComboBox()
+        self._auto_scope_selector.setObjectName("AutoScopeSelector")
+        self._auto_scope_selector.setAccessibleName("AUTO scope")
+        self._auto_scope_selector.setAccessibleDescription("Wybierz zakres AUTO; wybór nie zmienia kanonicznego stanu bez jawnego startu.")
+        for scope in AUTO_SCOPE_OPTIONS:
+            self._auto_scope_selector.addItem(scope.value, scope)
+        self._auto_scope_selector.setCurrentIndex(AUTO_SCOPE_OPTIONS.index(DEFAULT_AUTO_SCOPE))
+        self._auto_scope_selector.currentIndexChanged.connect(self._auto_scope_selection_changed)
+        layout.addRow("Zakres:", self._auto_scope_selector)
+
+        self._auto_scope_status = QLabel("—")
+        self._auto_scope_status.setObjectName("AutoScopeStatus")
+        self._auto_scope_status.setWordWrap(True)
+        layout.addRow("Status zakresu:", self._auto_scope_status)
+        self._auto_current_milestone = QLabel("—")
+        self._auto_current_milestone.setObjectName("AutoCurrentMilestone")
+        layout.addRow("Bieżący milestone:", self._auto_current_milestone)
+        self._auto_current_task = QLabel("—")
+        self._auto_current_task.setObjectName("AutoCurrentTask")
+        layout.addRow("Bieżące zadanie:", self._auto_current_task)
+        self._auto_continuation_status = QLabel("—")
+        self._auto_continuation_status.setObjectName("AutoContinuationStatus")
+        layout.addRow("Kontynuacja:", self._auto_continuation_status)
+        self._auto_reentry_status = QLabel("—")
+        self._auto_reentry_status.setObjectName("AutoReentryStatus")
+        layout.addRow("Re-entry:", self._auto_reentry_status)
+        self._auto_premium_state = QLabel("—")
+        self._auto_premium_state.setObjectName("AutoPremiumState")
+        layout.addRow("Premium Calculator:", self._auto_premium_state)
+        self._auto_blocker_reason = QLabel("—")
+        self._auto_blocker_reason.setObjectName("AutoBlockerReason")
+        self._auto_blocker_reason.setWordWrap(True)
+        layout.addRow("Powód / blocker:", self._auto_blocker_reason)
+        self._auto_disabled_reason = QLabel("—")
+        self._auto_disabled_reason.setObjectName("AutoDisabledReason")
+        self._auto_disabled_reason.setWordWrap(True)
+        layout.addRow("Powód niedostępności:", self._auto_disabled_reason)
+
+        controls = QHBoxLayout()
+        self._auto_start_button = QPushButton("Uruchom AUTO")
+        self._auto_start_button.setObjectName("AutoMilestoneButton")
+        self._auto_start_button.setAccessibleName("Uruchom AUTO")
+        self._auto_start_button.clicked.connect(self._start_auto_from_gui)
+        self._auto_stop_button = QPushButton("STOP")
+        self._auto_stop_button.setObjectName("StopMilestoneButton")
+        self._auto_stop_button.setAccessibleName("STOP")
+        self._auto_stop_button.clicked.connect(self._stop_auto_from_gui)
+        self._auto_continue_button = QPushButton("Kontynuuj")
+        self._auto_continue_button.setObjectName("AutoContinueButton")
+        self._auto_continue_button.setAccessibleName("Kontynuuj")
+        self._auto_continue_button.clicked.connect(self._continue_auto_from_gui)
+        self._auto_resume_button = QPushButton("Wznów")
+        self._auto_resume_button.setObjectName("AutoResumeButton")
+        self._auto_resume_button.setAccessibleName("Wznów")
+        self._auto_resume_button.clicked.connect(self._resume_auto_from_gui)
+        for button in (self._auto_start_button, self._auto_stop_button, self._auto_continue_button, self._auto_resume_button):
+            button.setAccessibleDescription("Stan i powód niedostępności są pokazane w panelu AUTO.")
+            controls.addWidget(button)
+        controls.addStretch(1)
+        layout.addRow("Sterowanie:", controls)
+        return panel
+
     def _make_current_page(self) -> QWidget:
-        page = QWidget(); layout = QVBoxLayout(page); self._project_title = QLabel("Wybierz projekt"); self._project_title.setObjectName("CurrentProjectTitle"); layout.addWidget(self._project_title); self._project_progress = QLabel("Plan nie został zaimportowany."); self._project_progress.setObjectName("CurrentProjectProgress"); layout.addWidget(self._project_progress); self._execution_status = QLabel("Wykonanie: brak aktywnej próby"); self._execution_status.setObjectName("ProjectExecutionStatus"); self._execution_status.setWordWrap(True); layout.addWidget(self._execution_status)
-        self._project_detail = QTextEdit(); self._project_detail.setReadOnly(True); self._project_detail.setObjectName("CurrentProjectDetail"); layout.addWidget(self._project_detail, 1)
-        self._memory_tabs = QTabWidget(); self._memory_tabs.setObjectName("ProjectMemoryTabs")
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        self._project_title = QLabel("Wybierz projekt")
+        self._project_title.setObjectName("CurrentProjectTitle")
+        layout.addWidget(self._project_title)
+        self._project_progress = QLabel("Plan nie został zaimportowany.")
+        self._project_progress.setObjectName("CurrentProjectProgress")
+        layout.addWidget(self._project_progress)
+        self._execution_status = QLabel("Wykonanie: brak aktywnej próby")
+        self._execution_status.setObjectName("ProjectExecutionStatus")
+        self._execution_status.setWordWrap(True)
+        layout.addWidget(self._execution_status)
+        self._auto_panel = self._make_auto_panel()
+        layout.addWidget(self._auto_panel)
+        self._project_detail = QTextEdit()
+        self._project_detail.setReadOnly(True)
+        self._project_detail.setObjectName("CurrentProjectDetail")
+        layout.addWidget(self._project_detail, 1)
+        self._memory_tabs = QTabWidget()
+        self._memory_tabs.setObjectName("ProjectMemoryTabs")
         for name, object_name in (("Plan", "ProjectPlanView"), ("Historia", "ProjectHistoryView"), ("Decyzje / Inbox", "ProjectDecisionsInboxView"), ("Ryzyka / dług / checkpointy", "ProjectRisksDebtCheckpointsView")):
-            view = QTextEdit(); view.setReadOnly(True); view.setObjectName(object_name); self._memory_tabs.addTab(view, name)
+            view = QTextEdit()
+            view.setReadOnly(True)
+            view.setObjectName(object_name)
+            self._memory_tabs.addTab(view, name)
         layout.addWidget(self._memory_tabs, 1)
-        actions = QHBoxLayout(); self._import_plan_button = QPushButton("Wczytaj plan"); self._import_plan_button.setObjectName("ImportPlanButton"); self._import_plan_button.clicked.connect(self._import_plan); self._plan_prompt_button = QPushButton("Wstaw prompt planu"); self._plan_prompt_button.setObjectName("PlanPromptButton"); self._plan_prompt_button.clicked.connect(lambda: self._queue_prompt("plan")); self._work_prompt_button = QPushButton("Przygotuj dla Work"); self._work_prompt_button.setObjectName("WorkPromptButton"); self._work_prompt_button.clicked.connect(self._prepare_for_work); self._start_button = QPushButton("Rozpocznij w ChatGPT"); self._start_button.setObjectName("StartProjectButton"); self._start_button.clicked.connect(lambda: self._queue_prompt("start")); self._continue_button = QPushButton("Kontynuuj w ChatGPT"); self._continue_button.setObjectName("ContinueProjectButton"); self._continue_button.clicked.connect(lambda: self._queue_prompt("continue")); self._auto_milestone_button = QPushButton("AUTO: bieżący milestone"); self._auto_milestone_button.setObjectName("AutoMilestoneButton"); self._auto_milestone_button.clicked.connect(self._start_milestone_auto); self._stop_milestone_button = QPushButton("STOP AUTO"); self._stop_milestone_button.setObjectName("StopMilestoneButton"); self._stop_milestone_button.clicked.connect(self._stop_milestone_auto); self._handoff_mode = QComboBox(); self._handoff_mode.setObjectName("ProjectHandoffMode"); self._handoff_mode.addItems(HANDOFF_MODES); self._handoff_button = QPushButton("Nowa rozmowa / Handoff"); self._handoff_button.setObjectName("ProjectHandoffButton"); self._handoff_button.clicked.connect(self._queue_handoff); self._approve_review_button = QPushButton("Zatwierdź review"); self._approve_review_button.setObjectName("ApproveProjectReviewButton"); self._approve_review_button.clicked.connect(self._approve_review); self._changes_review_button = QPushButton("Wymaga poprawki"); self._changes_review_button.setObjectName("RequestProjectChangesButton"); self._changes_review_button.clicked.connect(self._request_changes); self._project_review_button = QPushButton("Przegląd projektu"); self._project_review_button.setObjectName("ProjectReviewButton"); self._project_review_button.clicked.connect(self._request_project_review)
-        for button in (self._import_plan_button, self._plan_prompt_button, self._work_prompt_button, self._start_button, self._continue_button, self._auto_milestone_button, self._stop_milestone_button, self._handoff_mode, self._handoff_button, self._approve_review_button, self._changes_review_button, self._project_review_button): actions.addWidget(button)
-        actions.addStretch(1); layout.addLayout(actions); self._set_project_action_state(); return page
+
+        actions = QHBoxLayout()
+        self._import_plan_button = QPushButton("Wczytaj plan")
+        self._import_plan_button.setObjectName("ImportPlanButton")
+        self._import_plan_button.clicked.connect(self._import_plan)
+        self._plan_prompt_button = QPushButton("Wstaw prompt planu")
+        self._plan_prompt_button.setObjectName("PlanPromptButton")
+        self._plan_prompt_button.clicked.connect(lambda: self._queue_prompt("plan"))
+        self._work_prompt_button = QPushButton("Przygotuj dla Work")
+        self._work_prompt_button.setObjectName("WorkPromptButton")
+        self._work_prompt_button.clicked.connect(self._prepare_for_work)
+        self._start_button = QPushButton("Rozpocznij w ChatGPT")
+        self._start_button.setObjectName("StartProjectButton")
+        self._start_button.clicked.connect(lambda: self._queue_prompt("start"))
+        self._continue_button = QPushButton("Kontynuuj w ChatGPT")
+        self._continue_button.setObjectName("ContinueProjectButton")
+        self._continue_button.clicked.connect(lambda: self._queue_prompt("continue"))
+        # Keep the historical attribute names for compatibility while routing
+        # AUTO through the canonical Project Center command boundary.
+        self._auto_milestone_button = self._auto_start_button
+        self._stop_milestone_button = self._auto_stop_button
+        self._handoff_mode = QComboBox()
+        self._handoff_mode.setObjectName("ProjectHandoffMode")
+        self._handoff_mode.addItems(HANDOFF_MODES)
+        self._handoff_button = QPushButton("Nowa rozmowa / Handoff")
+        self._handoff_button.setObjectName("ProjectHandoffButton")
+        self._handoff_button.clicked.connect(self._queue_handoff)
+        self._approve_review_button = QPushButton("Zatwierdź review")
+        self._approve_review_button.setObjectName("ApproveProjectReviewButton")
+        self._approve_review_button.clicked.connect(self._approve_review)
+        self._changes_review_button = QPushButton("Wymaga poprawki")
+        self._changes_review_button.setObjectName("RequestProjectChangesButton")
+        self._changes_review_button.clicked.connect(self._request_changes)
+        self._project_review_button = QPushButton("Przegląd projektu")
+        self._project_review_button.setObjectName("ProjectReviewButton")
+        self._project_review_button.clicked.connect(self._request_project_review)
+        for button in (self._import_plan_button, self._plan_prompt_button, self._work_prompt_button, self._start_button, self._continue_button, self._auto_milestone_button, self._stop_milestone_button, self._handoff_mode, self._handoff_button, self._approve_review_button, self._changes_review_button, self._project_review_button):
+            actions.addWidget(button)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+        self._set_project_action_state()
+        return page
 
     def _make_advanced_page(self) -> QWidget:
         page = QWidget(); layout = QVBoxLayout(page); layout.addWidget(QLabel("Zaawansowane / System / Diagnostyka")); detail = QLabel("Techniczne widoki CC3 są zachowane. Otwórz je osobno, aby zobaczyć canonical authority status."); detail.setWordWrap(True); layout.addWidget(detail); button = QPushButton("Otwórz techniczny Control Center"); button.setObjectName("OpenAdvancedControlCenterButton"); button.clicked.connect(self._open_advanced); layout.addWidget(button); layout.addStretch(1); return page
@@ -273,10 +418,26 @@ class ProjectCenterWindow(QMainWindow):
         self._select_project(str(item.data(32))); self.select_page("Current project")
 
     def _select_project(self, project_id: str | None) -> None:
-        self._current_project_id = project_id; project = next((item for item in self._projects if item.project_id == project_id), None)
+        self._current_project_id = project_id
+        self._auto_selected_scope = DEFAULT_AUTO_SCOPE
+        self._auto_scope_user_changed = False
+        self._auto_commands = None
+        self._auto_commands_project_id = None
+        project = next((item for item in self._projects if item.project_id == project_id), None)
         if project is None:
-            self._project_title.setText("Wybierz projekt"); self._project_progress.setText("Nie zaimportowano planu projektu."); self._project_detail.setPlainText("{}" if not self._projects else "Wybierz projekt z listy."); self._render_memory(None); self._render_execution(None); self._set_project_action_state(); return
-        self._project_title.setText(project.display_name); self._project_progress.setText(f"Postęp: {project.completed_tasks}/{project.total_tasks}" if project.plan_imported else "Nie zaimportowano planu projektu."); self._project_detail.setPlainText(json.dumps(project.to_dict(), ensure_ascii=False, sort_keys=True, indent=2)); self._render_memory(project); self._render_execution(project); self._set_project_action_state()
+            self._project_title.setText("Wybierz projekt")
+            self._project_progress.setText("Nie zaimportowano planu projektu.")
+            self._project_detail.setPlainText("{}" if not self._projects else "Wybierz projekt z listy.")
+            self._render_memory(None)
+            self._render_execution(None)
+            self._set_project_action_state()
+            return
+        self._project_title.setText(project.display_name)
+        self._project_progress.setText(f"Postęp: {project.completed_tasks}/{project.total_tasks}" if project.plan_imported else "Nie zaimportowano planu projektu.")
+        self._project_detail.setPlainText(json.dumps(project.to_dict(), ensure_ascii=False, sort_keys=True, indent=2))
+        self._render_memory(project)
+        self._render_execution(project)
+        self._set_project_action_state()
 
     def _set_project_action_state(self) -> None:
         project = next((item for item in self._projects if item.project_id == self._current_project_id), None)
@@ -291,8 +452,198 @@ class ProjectCenterWindow(QMainWindow):
             except Exception:
                 review = False
         self._approve_review_button.setEnabled(review); self._changes_review_button.setEnabled(review); self._project_review_button.setEnabled(has_project)
-        self._auto_milestone_button.setEnabled(has_plan)
-        self._stop_milestone_button.setEnabled(has_plan)
+        self._render_auto(project)
+
+    def _auto_commands_for_project(self, project: ProjectRecord) -> ProjectCenterAutoCommands:
+        if self._auto_commands is not None and self._auto_commands_project_id == project.project_id:
+            return self._auto_commands
+        if self._auto_commands_factory is not None:
+            commands = self._auto_commands_factory(project)
+        else:
+            commands = CanonicalProjectCenterAutoCommands(
+                self._catalog.runtime_root,
+                project.project_id,
+                project_provider=lambda project=project: project,
+                plan_provider=lambda project_id=project.project_id: self._workflow.memory(project_id).current_plan(),
+            )
+        self._auto_commands = commands
+        self._auto_commands_project_id = project.project_id
+        return commands
+
+    @staticmethod
+    def _canonical_auto_state(value: CanonicalAutoState | dict[str, Any]) -> CanonicalAutoState:
+        if isinstance(value, CanonicalAutoState):
+            return value
+        return CanonicalAutoState(
+            project_id=str(value.get("project_id", "")),
+            scope=AutoScope(value.get("scope", DEFAULT_AUTO_SCOPE.value)),
+            scope_epoch=int(value.get("scope_epoch", 0)),
+            run_id=value.get("run_id"),
+            current_milestone_id=value.get("current_milestone_id"),
+            current_task_id=value.get("current_task_id"),
+            scope_status=str(value.get("scope_status", "WAITING_FOR_PLAN")),
+            continuation_status=str(value.get("continuation_status", "NONE")),
+            reentry_status=str(value.get("reentry_status", "NONE")),
+            reason_code=str(value.get("reason_code", "WAITING_FOR_PLAN")),
+            reason=str(value.get("reason", "")),
+            plan_available=bool(value.get("plan_available", False)),
+            plan_version=value.get("plan_version"),
+            canonical_revision=int(value.get("canonical_revision", 0)),
+            stop_fenced=bool(value.get("stop_fenced", False)),
+            p2_completed=bool(value.get("p2_completed", False)),
+            p3_started=bool(value.get("p3_started", False)),
+            authority=str(value.get("authority", "ProjectMemoryStoreV2")),
+        )
+
+    def _render_auto(self, project: ProjectRecord | None = None) -> None:
+        project = project or next((item for item in self._projects if item.project_id == self._current_project_id), None)
+        if project is None:
+            canonical = CanonicalAutoState(reason_code="PROJECT_NOT_SELECTED", reason=AUTO_STATUS_REASON_TEXT["PROJECT_NOT_SELECTED"])
+        else:
+            try:
+                raw = self._auto_commands_for_project(project).snapshot(
+                    plan_available=project.plan_imported,
+                    plan_version=project.plan_version,
+                )
+                canonical = self._canonical_auto_state(raw)
+            except Exception as exc:
+                canonical = CanonicalAutoState(
+                    project_id=project.project_id,
+                    scope=DEFAULT_AUTO_SCOPE,
+                    scope_status="BLOCKED",
+                    reason_code="AUTO_STATE_UNAVAILABLE",
+                    reason=f"Kanoniczny stan AUTO niedostępny: {getattr(exc, 'code', 'unavailable')}.",
+                    plan_available=project.plan_imported,
+                )
+
+        active_statuses = {"ACTIVE", "RUNNABLE", "WAITING", "PAUSED", "CI_WAITING", "DELIVERY_UNCERTAIN", "OPERATOR_CHECKPOINT", "STOPPED", "COMPLETED", "BLOCKED"}
+        if canonical.scope_status in active_statuses:
+            self._auto_selected_scope = canonical.scope
+            self._auto_scope_user_changed = False
+        selected = self._auto_selected_scope if project is not None else DEFAULT_AUTO_SCOPE
+        self._auto_view_model = ProjectCenterAutoViewModel.from_canonical(canonical, selected_scope=selected)
+        selected_index = AUTO_SCOPE_OPTIONS.index(self._auto_view_model.selected_scope)
+        self._auto_scope_selector.blockSignals(True)
+        self._auto_scope_selector.setCurrentIndex(selected_index)
+        self._auto_scope_selector.blockSignals(False)
+        self._auto_scope_selector.setEnabled(project is not None and canonical.scope_status not in active_statuses)
+        self._auto_scope_status.setText(f"Wybrany: {self._auto_view_model.selected_scope.value} · kanoniczny: {canonical.scope.value} · {self._auto_view_model.scope_status}")
+        self._auto_current_milestone.setText(self._auto_view_model.current_milestone)
+        self._auto_current_task.setText(self._auto_view_model.current_task)
+        self._auto_continuation_status.setText(self._auto_view_model.continuation_status)
+        self._auto_reentry_status.setText(self._auto_view_model.reentry_status)
+        premium = "P2 completed · P3 not started" if canonical.p2_completed and not canonical.p3_started else f"P2={'completed' if canonical.p2_completed else 'not completed'} · P3={'started' if canonical.p3_started else 'not started'}"
+        self._auto_premium_state.setText(premium)
+        self._auto_blocker_reason.setText(f"{canonical.reason_code}: {self._auto_view_model.blocker_reason}")
+
+        for action, button in (("start", self._auto_start_button), ("stop", self._auto_stop_button), ("continue", self._auto_continue_button), ("resume", self._auto_resume_button)):
+            enabled = {"start": self._auto_view_model.can_start, "stop": self._auto_view_model.can_stop, "continue": self._auto_view_model.can_continue, "resume": self._auto_view_model.can_resume}[action]
+            reason = self._auto_view_model.disabled_reason(action)
+            button.setEnabled(enabled)
+            button.setToolTip(reason or "Dostępne; wykonanie przejdzie przez canonical command boundary.")
+            button.setAccessibleDescription(reason or "Dostępne; wykonanie przejdzie przez canonical command boundary.")
+        disabled = [self._auto_view_model.disabled_reason(action) for action in ("start", "stop", "continue", "resume") if self._auto_view_model.disabled_reason(action)]
+        self._auto_disabled_reason.setText(disabled[0] if disabled else "Brak zablokowanej akcji.")
+
+    def _auto_scope_selection_changed(self, index: int) -> None:
+        if not (0 <= index < len(AUTO_SCOPE_OPTIONS)):
+            return
+        self._auto_selected_scope = AUTO_SCOPE_OPTIONS[index]
+        self._auto_scope_user_changed = True
+        self._render_auto()
+
+    def _confirm_auto_start(self, view_model: ProjectCenterAutoViewModel) -> bool:
+        if self._auto_start_confirmation is not None:
+            return bool(self._auto_start_confirmation(view_model))
+        answer = QMessageBox.question(
+            self,
+            "Potwierdź start AUTO",
+            f"Uruchomić AUTO w zakresie {view_model.selected_scope.value}?\n\nZakres zostanie zapisany kanonicznie dopiero po potwierdzeniu.",
+            QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Ok,
+            QMessageBox.StandardButton.Cancel,
+        )
+        return answer == QMessageBox.StandardButton.Ok
+
+    def _set_auto_status_from_receipt(self, receipt: Any) -> None:
+        if hasattr(receipt, "reason_code"):
+            self._status.setText(f"BDB AUTO: {receipt.reason_code} — {receipt.explanation}")
+        elif isinstance(receipt, dict):
+            self._status.setText(f"BDB AUTO: {receipt.get('reason_code', 'accepted')} — {receipt.get('explanation', '')}")
+        else:
+            self._status.setText("BDB AUTO: polecenie zapisane w canonical authority")
+
+    def _start_auto_from_gui(self) -> None:
+        project = next((item for item in self._projects if item.project_id == self._current_project_id), None)
+        if project is None:
+            self._status.setText(AUTO_STATUS_REASON_TEXT["PROJECT_NOT_SELECTED"])
+            return
+        view_model = self._auto_view_model
+        if not view_model.can_start:
+            self._status.setText(view_model.blocker_reason)
+            return
+        if not self._confirm_auto_start(view_model):
+            self._status.setText("BDB AUTO: start anulowany — wymagane jest jawne potwierdzenie")
+            return
+        try:
+            receipt = self._auto_commands_for_project(project).start_auto(view_model.selected_scope, confirmed=True)
+        except (ProjectCenterAutoCommandError, ProjectExecutionError, ProjectWorkflowError) as exc:
+            self._status.setText(f"BDB AUTO zatrzymany — {getattr(exc, 'code', 'auto_start_failed')}")
+            return
+        self._mutation_operations_invoked += 1
+        self._set_auto_status_from_receipt(receipt)
+        self._render_auto(project)
+
+    def _stop_auto_from_gui(self) -> None:
+        project = next((item for item in self._projects if item.project_id == self._current_project_id), None)
+        if project is None or not self._auto_view_model.can_stop:
+            self._status.setText(self._auto_view_model.disabled_reason("stop") or AUTO_STATUS_REASON_TEXT["PROJECT_NOT_SELECTED"])
+            return
+        try:
+            receipt = self._auto_commands_for_project(project).stop_auto()
+        except (ProjectCenterAutoCommandError, ProjectExecutionError, ProjectWorkflowError) as exc:
+            self._status.setText(f"BDB AUTO STOP zatrzymany — {getattr(exc, 'code', 'auto_stop_failed')}")
+            return
+        self._mutation_operations_invoked += 1
+        self._set_auto_status_from_receipt(receipt)
+        self._render_auto(project)
+
+    def _continue_auto_from_gui(self) -> None:
+        project = next((item for item in self._projects if item.project_id == self._current_project_id), None)
+        if project is None or not self._auto_view_model.can_continue:
+            self._status.setText(self._auto_view_model.disabled_reason("continue") or AUTO_STATUS_REASON_TEXT["PROJECT_NOT_SELECTED"])
+            return
+        try:
+            # No task or milestone is passed here; canonical orchestrator owns
+            # the next-action decision.
+            receipt = self._auto_commands_for_project(project).continue_auto()
+        except (ProjectCenterAutoCommandError, ProjectExecutionError, ProjectWorkflowError) as exc:
+            self._status.setText(f"BDB AUTO Kontynuuj zatrzymane — {getattr(exc, 'code', 'auto_continue_failed')}")
+            return
+        self._mutation_operations_invoked += 1
+        self._set_auto_status_from_receipt(receipt)
+        self._render_auto(project)
+
+    def _resume_auto_from_gui(self) -> None:
+        project = next((item for item in self._projects if item.project_id == self._current_project_id), None)
+        if project is None or not self._auto_view_model.can_resume:
+            self._status.setText(self._auto_view_model.disabled_reason("resume") or AUTO_STATUS_REASON_TEXT["PROJECT_NOT_SELECTED"])
+            return
+        try:
+            receipt = self._auto_commands_for_project(project).resume_auto()
+        except (ProjectCenterAutoCommandError, ProjectExecutionError, ProjectWorkflowError) as exc:
+            self._status.setText(f"BDB AUTO Wznów zatrzymane — {getattr(exc, 'code', 'auto_resume_failed')}")
+            return
+        self._mutation_operations_invoked += 1
+        self._set_auto_status_from_receipt(receipt)
+        self._render_auto(project)
+
+    # Compatibility entry points retain their names but now use canonical
+    # Project Center AUTO commands rather than the legacy milestone shortcut.
+    def _start_milestone_auto(self) -> None:
+        self._start_auto_from_gui()
+
+    def _stop_milestone_auto(self) -> None:
+        self._stop_auto_from_gui()
 
     def _render_execution(self, project: ProjectRecord | None) -> None:
         if project is None:
@@ -355,38 +706,6 @@ class ProjectCenterWindow(QMainWindow):
         except Exception as exc:
             self._status.setText(f"BDB: review projektu zatrzymany — {getattr(exc, 'code', 'review_failed')}"); return
         self._status.setText("BDB: przegląd projektu zapisany w Project Memory")
-
-    def _start_milestone_auto(self) -> None:
-        if self._current_project_id is None:
-            return
-        try:
-            snapshot = self._workflow.execution.begin_milestone_auto(self._current_project_id)
-            if snapshot.get("status") == "MILESTONE_COMPLETED":
-                self._status.setText(f"BDB AUTO: {snapshot.get('milestone_id')} już ukończony — następny milestone wymaga użytkownika")
-                return
-            launch = self._workflow.queue_continue_prompt(self._current_project_id)
-            self._status.setText(f"BDB AUTO: {snapshot.get('milestone_id')} · {snapshot.get('current_task_id')} · prompt oczekuje ({launch.launch_id}); BDB wstawi i wyśle automatycznie")
-        except (ProjectWorkflowError, ProjectExecutionError) as exc:
-            self._status.setText(f"BDB AUTO zatrzymany — {getattr(exc, 'code', 'milestone_auto_failed')}")
-            return
-        self._projects = self._catalog.read(); self._render_catalog(self._projects); self._select_project(self._current_project_id)
-
-    def _stop_milestone_auto(self) -> None:
-        if self._current_project_id is None:
-            return
-        try:
-            snapshot = self._workflow.execution.snapshot(self._current_project_id)
-            auto = snapshot.get("milestone_auto") or {}
-            run_id = auto.get("milestone_run_id")
-            if not run_id:
-                self._status.setText("BDB AUTO: brak aktywnego milestone run")
-                return
-            self._workflow.execution.stop_milestone_auto(self._current_project_id, run_id=run_id)
-            self._status.setText("BDB AUTO: zatrzymano przez użytkownika")
-        except (ProjectWorkflowError, ProjectExecutionError) as exc:
-            self._status.setText(f"BDB AUTO stop zatrzymany — {getattr(exc, 'code', 'milestone_auto_stop_failed')}")
-            return
-        self.start_bootstrap(); self._select_project(self._current_project_id)
 
     def _render_memory(self, project: ProjectRecord | None) -> None:
         views = [self._memory_tabs.widget(index) for index in range(self._memory_tabs.count())]
@@ -504,7 +823,7 @@ class ProjectCenterWindow(QMainWindow):
                 execution = self._workflow.execution.snapshot(project.project_id)
             except Exception:
                 execution = {"status": "UNAVAILABLE"}
-        return {"window_object_name": self.objectName(), "window_constructed": True, "read_only_startup": True, "bootstrap_completed": self._bootstrap_completed, "bootstrap_ok": self._bootstrap_ok, "bootstrap_error_code": self._bootstrap_error_code, "semantic_source": "bdb_vnext.control_center_query", "project_catalog_source": "bdb_vnext.project_catalog", "project_memory_source": "bdb_vnext.project_memory", "project_execution_source": "bdb_vnext.project_execution", "legacy_fallback": False, "page_names": list(PROJECT_PAGE_NAMES), "page_count": self._pages.count(), "project_count": len(self._projects), "work_count": len(snapshot.works) if snapshot is not None else 0, "current_project_id": self._current_project_id, "auto_send": False, "send_operations_invoked": 0, "mutation_operations_invoked": self._mutation_operations_invoked, "advanced_available": True, "snapshot_source": "bdb_vnext.control_center_query", "status_vector": status_vector, "health": health, "next_action": next_action, "execution": execution, "pending_plan_update": self._pending_plan_preview is not None, "actions_enabled": False, "auto_resume_invoked": False}
+        return {"window_object_name": self.objectName(), "window_constructed": True, "read_only_startup": True, "bootstrap_completed": self._bootstrap_completed, "bootstrap_ok": self._bootstrap_ok, "bootstrap_error_code": self._bootstrap_error_code, "semantic_source": "bdb_vnext.control_center_query", "project_catalog_source": "bdb_vnext.project_catalog", "project_memory_source": "bdb_vnext.project_memory", "project_execution_source": "bdb_vnext.project_execution", "legacy_fallback": False, "page_names": list(PROJECT_PAGE_NAMES), "page_count": self._pages.count(), "project_count": len(self._projects), "work_count": len(snapshot.works) if snapshot is not None else 0, "current_project_id": self._current_project_id, "auto_send": False, "auto_ui_version": PROJECT_CENTER_AUTO_UI_VERSION, "auto_scope": self._auto_view_model.selected_scope.value, "canonical_auto_scope": self._auto_view_model.canonical.scope.value, "canonical_auto_status": self._auto_view_model.scope_status, "auto_scope_selection_pending": self._auto_view_model.selected_scope_is_pending, "auto_send_operations_invoked": 0, "send_operations_invoked": 0, "mutation_operations_invoked": self._mutation_operations_invoked, "advanced_available": True, "snapshot_source": "bdb_vnext.control_center_query", "status_vector": status_vector, "health": health, "next_action": next_action, "execution": execution, "pending_plan_update": self._pending_plan_preview is not None, "actions_enabled": False, "auto_resume_invoked": False}
 
 
 __all__ = ["PROJECT_PAGE_NAMES", "ProjectCenterWindow", "slugify_project_alias", "validate_wizard_payload"]
