@@ -728,6 +728,12 @@ def run_nx028_machine_gate() -> dict[str, Any]:
             main_result.selected_channel,
             operator_pending.selected_channel,
         }
+        # The source-bound readback must not include the gate's own temporary
+        # SQLite fixtures.  The outer finally remains as a crash-safe cleanup.
+        for path in paths:
+            path.unlink(missing_ok=True)
+            for suffix in ("-wal", "-shm"):
+                Path(f"{path}{suffix}").unlink(missing_ok=True)
         head, tree, clean = _source_readback(repo_root)
         return {
             "SESSION_REENTRY_VERSION_EXPLICIT": bool(SESSION_REENTRY_VERSION_EXPLICIT and SESSION_REENTRY_VERSION == "v1"),
