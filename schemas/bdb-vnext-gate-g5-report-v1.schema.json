@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-gate-g5-report-v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "version",
+    "gate_id",
+    "milestone_id",
+    "source_head",
+    "source_tree",
+    "test_manifest",
+    "manifest_digest",
+    "pytest_collected",
+    "pytest_passed",
+    "pytest_failed",
+    "pytest_errors",
+    "witness_trace_corpus_digest",
+    "manual_qualification_digest",
+    "adversarial_fixtures_count",
+    "failure_injection_fixtures_count",
+    "overall_status",
+    "report_digest"
+  ],
+  "properties": {
+    "schema": {"const": "bdb-vnext-gate-g5-report-v1"},
+    "version": {"type": "string"},
+    "gate_id": {"type": "string"},
+    "milestone_id": {"type": "string"},
+    "source_head": {"type": "string"},
+    "source_tree": {"type": "string"},
+    "test_manifest": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "manifest_digest": {"type": "string"},
+    "pytest_collected": {"type": "integer"},
+    "pytest_passed": {"type": "integer"},
+    "pytest_failed": {"type": "integer"},
+    "pytest_errors": {"type": "integer"},
+    "witness_trace_corpus_digest": {"type": "string"},
+    "manual_qualification_digest": {"type": "string"},
+    "adversarial_fixtures_count": {"type": "integer"},
+    "failure_injection_fixtures_count": {"type": "integer"},
+    "overall_status": {"type": "string"},
+    "report_digest": {"type": "string"}
+  },
+  "additionalProperties": false
+}

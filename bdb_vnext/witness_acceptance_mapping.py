@@ -538,10 +538,14 @@ class CriterionEvaluator:
 
         return report
 
-    def _persist_report(self, report: TaskAcceptanceReport) -> Path:
+    def _report_path(self, report_id: str) -> Path:
         if not self.storage_dir:
             raise LocalExecutionContractError("no_storage", "Storage directory not set")
-        out_path = self.storage_dir / f"{report.report_id}.json"
+        safe_name = hashlib.sha256(report_id.encode("utf-8")).hexdigest()[:24] + ".json"
+        return self.storage_dir / safe_name
+
+    def _persist_report(self, report: TaskAcceptanceReport) -> Path:
+        out_path = self._report_path(report.report_id)
         data = report.to_dict()
         data["report_digest"] = report.report_digest
         out_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -551,7 +555,7 @@ class CriterionEvaluator:
         """Independent verifier re-reading persisted report from disk."""
         if not self.storage_dir:
             return False, "NO_STORAGE_DIR", None
-        report_path = self.storage_dir / f"{report_id}.json"
+        report_path = self._report_path(report_id)
         if not report_path.exists():
             return False, "REPORT_NOT_FOUND", None
 
