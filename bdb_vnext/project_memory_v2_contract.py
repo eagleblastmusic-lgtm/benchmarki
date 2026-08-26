@@ -235,6 +235,28 @@ AUTHORITY_INVENTORY: tuple[AuthorityFact, ...] = (
         v2_owner="ProjectMemoryStoreV2",
         v2_table="leases",
     ),
+    AuthorityFact(
+        fact_name="budget_ledger",
+        current_owner="ProjectMemoryStoreV2 / FailureBudgetLedger",
+        current_storage="memory.db (budget_ledgers)",
+        mutability="MUTABLE",
+        identity="(project_id, task_id)",
+        revision_generation_rule="monotonic budget generation per task",
+        relationships="FK to projects(project_id)",
+        v2_owner="ProjectMemoryStoreV2",
+        v2_table="budget_ledgers",
+    ),
+    AuthorityFact(
+        fact_name="budget_override",
+        current_owner="ProjectMemoryStoreV2 / FailureBudgetLedger",
+        current_storage="memory.db (budget_overrides)",
+        mutability="APPEND_ONLY",
+        identity="override_id",
+        revision_generation_rule="append-only audit record",
+        relationships="FK to projects(project_id)",
+        v2_owner="ProjectMemoryStoreV2",
+        v2_table="budget_overrides",
+    ),
 )
 
 
@@ -552,6 +574,46 @@ CREATE TABLE IF NOT EXISTS leases (
     FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE RESTRICT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_active_lease ON leases(resource_type, resource_id) WHERE status = 'ACTIVE';
+
+-- 20. Budget Ledgers (NX-014)
+CREATE TABLE IF NOT EXISTS budget_ledgers (
+    ledger_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    run_id TEXT,
+    total_repair_count INTEGER NOT NULL DEFAULT 0,
+    transient_retry_count INTEGER NOT NULL DEFAULT 0,
+    repair_generation INTEGER NOT NULL DEFAULT 0,
+    wall_time_start TEXT,
+    jitter_seed INTEGER NOT NULL DEFAULT 42,
+    exhausted_status TEXT NOT NULL DEFAULT 'ACTIVE',
+    last_fingerprint TEXT,
+    fingerprint_counts_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_budget_ledgers_task ON budget_ledgers(project_id, task_id);
+
+-- 21. Budget Manual Overrides (NX-014)
+CREATE TABLE IF NOT EXISTS budget_overrides (
+    override_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    actor_class TEXT NOT NULL,
+    affected_budget TEXT NOT NULL,
+    previous_value_json TEXT NOT NULL,
+    new_value_json TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE RESTRICT
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_budget_overrides_no_delete
+BEFORE DELETE ON budget_overrides
+BEGIN
+    SELECT RAISE(FAIL, 'budget_overrides is append-only: deletes are prohibited');
+END;
 """
 
 
