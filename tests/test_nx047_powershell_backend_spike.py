@@ -324,8 +324,9 @@ def run_nx047_machine_gate(tmp_path: Path | None = None) -> dict[str, Any]:
     selection_matches_s015 = (selected_backend_str == "FRAMED_PWSH")
     user_approval_required = bool(pbs.USER_APPROVAL_REQUIRED_AFTER_SPIKE)
 
-    # 10. Persist Canonical Durable Decision Artifact (outside git tracked working tree)
-    canonical_artifact_path = pbs.persist_canonical_decision_artifact(decision_artifact)
+    # 10. Persist Decision Artifact to target_tmp
+    target_art_path = target_tmp / "powershell_backend_decision.json"
+    canonical_artifact_path = pbs.persist_canonical_decision_artifact(decision_artifact, artifact_path=target_art_path)
     canonical_decision_artifact_count = 1
     canonical_artifact_present = canonical_artifact_path.exists()
 
