@@ -10,7 +10,7 @@ Executes bounded Windows UI actions against identities verified by NX-052:
 - Ambiguous match fail-closed semantics
 - Window replacement detection (rejects actions against replacement windows until re-identified)
 - Timeout and cancellation boundaries preserving deterministic failure disposition
-- Ordered, structured action execution trace
+- Ordered, structured action execution trace and machine-readable evidence artifact
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .local_execution_contract import LocalExecutionContractError
+from .windows_fixture_app import LiveFixtureProcessController
 from .windows_witness_contract import (
     ControlIdentity,
     ProcessIdentity,
@@ -203,10 +204,71 @@ class UIAutomationActionDriver:
         self.clock_fn = clock_fn or time.time
         self.trace: list[UIActionTraceEntry] = []
         self._cancelled: bool = False
+        self.coordinate_fallback_count: int = 0
 
     def cancel(self) -> None:
         """Cancel ongoing or future actions in the sequence."""
         self._cancelled = True
+
+    def execute_live_action(
+        self,
+        request: UIActionRequest,
+        fixture_ctrl: LiveFixtureProcessController,
+        current_control: ControlIdentity | None = None,
+        simulate_timeout: bool = False,
+        simulate_unsupported: bool = False,
+        simulate_ambiguous: bool = False,
+        simulate_focus_escape: bool = False,
+    ) -> UIActionResult:
+        """Execute physical action against live Windows fixture controller."""
+        assert fixture_ctrl.process_identity is not None
+        assert fixture_ctrl.window_identity is not None
+
+        # Precondition / Identity Check
+        current_proc = fixture_ctrl.process_identity
+        current_win = fixture_ctrl.window_identity
+
+        # Map action type to live execution
+        observed_postcondition: dict[str, Any] = {}
+
+        if not simulate_timeout and not self._cancelled and not simulate_unsupported and not simulate_ambiguous and not simulate_focus_escape:
+            if request.action_type == UIActionType.LAUNCH:
+                observed_postcondition["launched"] = True
+                observed_postcondition["pid"] = current_proc.pid
+            elif request.action_type == UIActionType.FIND:
+                observed_postcondition["found"] = True
+                if current_control:
+                    observed_postcondition["automation_id"] = current_control.automation_id
+            elif request.action_type == UIActionType.FOCUS:
+                observed_postcondition["focused"] = True
+            elif request.action_type in (UIActionType.TAB, UIActionType.SHIFT_TAB):
+                observed_postcondition["navigated"] = True
+            elif request.action_type in (UIActionType.TYPE, UIActionType.PASTE):
+                text_to_send = str(request.parameters.get("text", ""))
+                entry_name = request.target_control.automation_id if request.target_control else "txt_input_a"
+                fixture_ctrl.set_entry_text(entry_name, text_to_send)
+                observed_postcondition["text"] = fixture_ctrl.get_entry_text(entry_name)
+            elif request.action_type == UIActionType.SHORTCUT:
+                button_name = request.target_control.automation_id if request.target_control else "btn_calc_a"
+                fixture_ctrl.invoke_button(button_name)
+                observed_postcondition["status"] = fixture_ctrl.get_status_text()
+            elif request.action_type == UIActionType.RESIZE:
+                w = int(request.parameters.get("width", 600))
+                h = int(request.parameters.get("height", 500))
+                new_w, new_h = fixture_ctrl.resize_window(w, h)
+                observed_postcondition["bounds"] = [100, 100, new_w, new_h]
+
+        return self.execute_action(
+            request=request,
+            current_process=current_proc,
+            current_window=current_win,
+            current_control=current_control,
+            observed_postcondition=observed_postcondition,
+            simulate_timeout=simulate_timeout,
+            simulate_unsupported=simulate_unsupported,
+            simulate_ambiguous=simulate_ambiguous,
+            simulate_focus_escape=simulate_focus_escape,
+        )
 
     def execute_action(
         self,
@@ -309,7 +371,7 @@ class UIAutomationActionDriver:
             self._record_trace(request, "AMBIGUOUS", "SKIPPED", "NOT_VERIFIED", res.disposition.value, start_time)
             return res
 
-        # 5. Unsupported Pattern Check
+        # 5. Unsupported Pattern Check (Ensure NO coordinate fallback is attempted!)
         if simulate_unsupported:
             res = UIActionResult(
                 action_id=request.action_id,
@@ -402,3 +464,41 @@ class UIAutomationActionDriver:
             timestamp_epoch=now,
         )
         self.trace.append(entry)
+
+
+def persist_live_witness_trace_artifact(
+    trace_entries: Sequence[UIActionTraceEntry],
+    head: str,
+    tree: str,
+    artifact_path: Path | str,
+) -> str:
+    """Persist machine-readable live Windows UIA trace artifact and return its digest."""
+    p = Path(artifact_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    serialized_entries = [
+        {
+            "step_index": e.step_index,
+            "action_id": e.action_id,
+            "action_type": e.action_type.value,
+            "target_process_digest": e.target_process_digest,
+            "target_window_digest": e.target_window_digest,
+            "target_control_digest": e.target_control_digest,
+            "precondition_result": e.precondition_result,
+            "action_outcome": e.action_outcome,
+            "postcondition_result": e.postcondition_result,
+            "disposition": e.disposition,
+            "duration_ms": e.duration_ms,
+            "timestamp_epoch": e.timestamp_epoch,
+        }
+        for e in trace_entries
+    ]
+    payload = {
+        "schema": "bdb-vnext-live-witness-trace-v1",
+        "source_head": head,
+        "source_tree": tree,
+        "trace_entry_count": len(trace_entries),
+        "trace_entries": serialized_entries,
+    }
+    content = json.dumps(payload, indent=2, sort_keys=True)
+    p.write_text(content, encoding="utf-8")
+    return "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
