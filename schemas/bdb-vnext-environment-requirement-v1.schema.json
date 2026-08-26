@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-environment-requirement-v1",
+  "title": "BDB vNext Environment Requirement Set v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "set_id",
+    "inventory_contract_version",
+    "max_inventory_age_seconds",
+    "expected_path_digest",
+    "requirements",
+    "requirement_digest"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-vnext-environment-requirement-v1" },
+    "version": { "const": "v1" },
+    "set_id": { "type": "string", "pattern": "^[a-z][a-z0-9_.:-]*$" },
+    "inventory_contract_version": { "const": "v1" },
+    "max_inventory_age_seconds": { "type": "integer", "minimum": 1 },
+    "expected_path_digest": {
+      "anyOf": [
+        { "type": "null" },
+        { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      ]
+    },
+    "requirements": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/requirement" }
+    },
+    "requirement_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "absolute_windows_path": {
+      "type": "string",
+      "pattern": "^(?:[A-Za-z]:[\\\\/]|\\\\\\\\).+"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "reference", "digest"],
+      "properties": {
+        "kind": { "enum": ["PROJECT_MANIFEST", "TASK_DECLARATION", "FIXTURE"] },
+        "reference": { "type": "string", "minLength": 1 },
+        "digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["declared_at", "declaration_id", "authority"],
+      "properties": {
+        "declared_at": { "type": "string", "format": "date-time" },
+        "declaration_id": { "type": "string", "minLength": 1 },
+        "authority": { "type": "string", "minLength": 1 }
+      }
+    },
+    "alternative": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capability", "version_constraint"],
+      "properties": {
+        "capability": { "type": "string", "pattern": "^[a-z][a-z0-9_.:-]*$" },
+        "version_constraint": {
+          "anyOf": [
+            { "type": "null" },
+            { "type": "string", "minLength": 1 }
+          ]
+        }
+      }
+    },
+    "requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requirement_id",
+        "capability",
+        "required",
+        "version_constraint",
+        "source",
+        "provenance",
+        "alternatives",
+        "exact_executable_path",
+        "exact_executable_digest"
+      ],
+      "properties": {
+        "requirement_id": { "type": "string", "pattern": "^[a-z][a-z0-9_.:-]*$" },
+        "capability": { "type": "string", "pattern": "^[a-z][a-z0-9_.:-]*$" },
+        "required": { "type": "boolean" },
+        "version_constraint": {
+          "anyOf": [
+            { "type": "null" },
+            { "type": "string", "minLength": 1 }
+          ]
+        },
+        "source": { "$ref": "#/$defs/source" },
+        "provenance": { "$ref": "#/$defs/provenance" },
+        "alternatives": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/alternative" }
+        },
+        "exact_executable_path": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/absolute_windows_path" }
+          ]
+        },
+        "exact_executable_digest": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/digest" }
+          ]
+        }
+      }
+    }
+  }
+}
