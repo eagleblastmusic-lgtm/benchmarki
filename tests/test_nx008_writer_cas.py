@@ -153,6 +153,59 @@ def test_ast_unprotected_mutator_paths() -> None:
     assert unprotected == []
 
 
+REQUIRED_GATE_OUTCOME_FIELDS = (
+    "SINGLE_CANONICAL_WRITE_TRANSACTION_API",
+    "UNPROTECTED_MUTATOR_PATHS",
+    "REVISION_MONOTONIC",
+    "STALE_REVISION_REJECTED",
+    "STALE_REJECTION_PARTIAL_WRITE",
+    "CONCURRENT_WRITER_LOST_UPDATE",
+    "EVENT_IDS_COMPLETE",
+    "DUPLICATE_EVENT_IDS",
+    "PROJECT_CATALOG_IS_REBUILDABLE_PROJECTION",
+    "CATALOG_MEMORY_SPLIT_BRAIN",
+    "PROJECTION_CURSOR_MONOTONIC",
+    "INTERRUPTED_WRITE_RECOVERABLE",
+    "PARTIAL_WRITE_ANOMALIES_DETECTED",
+    "CORRUPT_TAIL_HANDLING",
+    "FINAL_STATE_DIGEST_DETERMINISTIC",
+    "SEMANTICALLY_EQUIVALENT",
+    "THREAD_CONCURRENCY_HARNESS",
+    "CROSS_PROCESS_WRITER_HARNESS",
+    "SOURCE_BOUND_MACHINE_GATE",
+    "NO_HARDCODED_GATE_RESULTS",
+    "status",
+)
+
+
+def inspect_gate_for_hardcoded_results() -> tuple[bool, list[str]]:
+    """AST inspection of run_nx008_machine_gate ensuring all outcome fields are derived rather than literal constants."""
+    src_file = Path(__file__).resolve()
+    tree = ast.parse(src_file.read_text(encoding="utf-8"))
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "run_nx008_machine_gate")
+    dict_node = next(
+        n.value
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "gate_result" for t in n.targets)
+    )
+
+    hardcoded_fields = []
+    for k, v in zip(dict_node.keys, dict_node.values):
+        if isinstance(k, ast.Constant) and k.value in REQUIRED_GATE_OUTCOME_FIELDS:
+            if isinstance(v, ast.Constant):
+                hardcoded_fields.append(str(k.value))
+
+    return (len(hardcoded_fields) == 0, hardcoded_fields)
+
+
+def test_no_hardcoded_gate_results_ast() -> None:
+    """Requirement: AST analysis proves zero hardcoded machine gate outcome fields."""
+    no_hardcoded, hardcoded_list = inspect_gate_for_hardcoded_results()
+    assert no_hardcoded is True
+    assert hardcoded_list == []
+
+
+
 def _make_sample_plan(project_id: str, version: int = 1, project_name: str = "Sample Project") -> dict[str, Any]:
     return {
         "schema": PROJECT_PLAN_SCHEMA,
@@ -892,10 +945,21 @@ for i in range(n):
         head_sha = head_proc.stdout.strip()
         tree_proc = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=repo_root, capture_output=True, text=True, check=True)
         tree_sha = tree_proc.stdout.strip()
+        diff_proc = subprocess.run(["git", "diff", "--quiet"], cwd=repo_root)
+        cached_proc = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=repo_root)
         status_proc = subprocess.run(["git", "status", "--porcelain"], cwd=repo_root, capture_output=True, text=True, check=True)
-        worktree_clean = (len(status_proc.stdout.strip()) == 0)
+        worktree_clean = bool(
+            diff_proc.returncode == 0
+            and cached_proc.returncode == 0
+            and len(status_proc.stdout.strip()) == 0
+        )
         manifest_digest = compute_test_manifest_digest(repo_root)
-        source_bound_ok = bool(len(head_sha) == 40 and len(tree_sha) == 40 and len(manifest_digest) > 0)
+        source_bound_ok = bool(
+            len(head_sha) == 40
+            and len(tree_sha) == 40
+            and len(manifest_digest) > 0
+            and worktree_clean
+        )
     except Exception:
         head_sha = "unknown"
         tree_sha = "unknown"
@@ -904,6 +968,10 @@ for i in range(n):
         source_bound_ok = False
 
     source_bound_machine_gate = "PASS" if source_bound_ok else "FAIL"
+
+    # 18. Derived check for zero hardcoded gate result fields
+    no_hardcoded_results, hardcoded_fields = inspect_gate_for_hardcoded_results()
+    no_hardcoded_gate_results = bool(no_hardcoded_results and len(hardcoded_fields) == 0)
 
     all_invariants_pass = (
         single_canonical_api is True
@@ -924,6 +992,7 @@ for i in range(n):
         and thread_concurrency_harness == "PASS"
         and cross_process_writer_harness == "PASS"
         and source_bound_machine_gate == "PASS"
+        and no_hardcoded_gate_results is True
     )
 
     gate_result = {
@@ -974,8 +1043,9 @@ for i in range(n):
         "TEST_MANIFEST": list(FOCUSED_TEST_MANIFEST),
         "TEST_MANIFEST_DIGEST": manifest_digest,
         "SOURCE_BOUND_MACHINE_GATE": source_bound_machine_gate,
-        "NO_HARDCODED_GATE_RESULTS": True,
-        "status": "PASS" if all_invariants_pass else "FAIL",
+        "HARDCODED_GATE_RESULT_FIELDS": hardcoded_fields,
+        "NO_HARDCODED_GATE_RESULTS": no_hardcoded_gate_results,
+        "status": ("PASS" if all_invariants_pass else "FAIL"),
     }
 
     assert gate_result["SINGLE_CANONICAL_WRITE_TRANSACTION_API"] is True
@@ -1000,6 +1070,24 @@ for i in range(n):
     assert gate_result["status"] == "PASS"
 
     return gate_result
+
+
+def test_source_bound_gate_rejects_dirty_worktree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Requirement: Source-bound machine gate must fail if the repository worktree is dirty or modified."""
+    original_run = subprocess.run
+
+    def mock_run(cmd: list[str], *args: Any, **kwargs: Any) -> Any:
+        if cmd == ["git", "status", "--porcelain"]:
+            class MockCompleted:
+                stdout = " M dirty_file.py\n"
+                stderr = ""
+                returncode = 0
+            return MockCompleted()
+        return original_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+    with pytest.raises(AssertionError):
+        run_nx008_machine_gate(tmp_path)
 
 
 def test_nx008_machine_gate_execution(tmp_path: Path) -> None:
