@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-shared-resource-result-v1",
+  "title": "BDB vNext Shared Resource Result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "version", "status", "key_digest", "accepted", "exact_hit",
+    "bytes_written", "manifest_digest", "resource_relative_path", "reason", "result_digest"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-vnext-shared-resource-result-v1" },
+    "version": { "const": "v1" },
+    "status": { "enum": ["PUBLISHED", "REBUILT", "EXACT_HIT", "MISSING", "POISONED", "BLOCKED", "ACL_DENIED", "QUOTA_BLOCKED", "LOCK_BUSY", "INVALID"] },
+    "key_digest": { "$ref": "#/$defs/digest" },
+    "accepted": { "type": "boolean" },
+    "exact_hit": { "type": "boolean" },
+    "bytes_written": { "type": "integer", "minimum": 0 },
+    "manifest_digest": { "anyOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+    "resource_relative_path": { "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] },
+    "reason": { "type": "string", "minLength": 1 },
+    "result_digest": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  }
+}

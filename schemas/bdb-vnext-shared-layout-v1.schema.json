@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-shared-layout-v1",
+  "title": "BDB vNext Shared Root Layout v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version", "root", "areas", "layout_digest"],
+  "properties": {
+    "schema": { "const": "bdb-vnext-shared-layout-v1" },
+    "version": { "const": "v1" },
+    "root": { "type": "string", "minLength": 1 },
+    "areas": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "type": "string", "minLength": 1 }
+    },
+    "layout_digest": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  }
+}

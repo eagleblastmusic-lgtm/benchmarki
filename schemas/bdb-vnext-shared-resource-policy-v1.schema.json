@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-shared-resource-policy-v1",
+  "title": "BDB vNext Shared Resource Policy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version", "rules", "policy_digest"],
+  "properties": {
+    "schema": { "const": "bdb-vnext-shared-resource-policy-v1" },
+    "version": { "const": "v1" },
+    "rules": { "type": "array", "items": { "$ref": "#/$defs/rule" } },
+    "policy_digest": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "identity": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.:-]*$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "mutability": { "enum": ["SEALED_IMMUTABLE", "APPEND_ONLY_CACHE", "MUTABLE_DISALLOWED"] },
+    "rule": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ecosystem", "artifact_class", "area", "mutability", "shared_allowed", "project_local_required"],
+      "properties": {
+        "ecosystem": { "$ref": "#/$defs/identity" },
+        "artifact_class": { "$ref": "#/$defs/identity" },
+        "area": { "$ref": "#/$defs/identity" },
+        "mutability": { "$ref": "#/$defs/mutability" },
+        "shared_allowed": { "type": "boolean" },
+        "project_local_required": { "type": "boolean" }
+      }
+    },
+    "key": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ecosystem", "artifact_class", "platform", "tool_version", "content_digest", "policy_version", "key_digest"],
+      "properties": {
+        "ecosystem": { "$ref": "#/$defs/identity" },
+        "artifact_class": { "$ref": "#/$defs/identity" },
+        "platform": { "$ref": "#/$defs/identity" },
+        "tool_version": { "type": "string", "minLength": 1 },
+        "content_digest": { "$ref": "#/$defs/digest" },
+        "policy_version": { "const": "v1" },
+        "key_digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "manifest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "version", "key", "area", "mutability", "payload_digest", "size_bytes", "manifest_digest"],
+      "properties": {
+        "schema": { "const": "bdb-vnext-shared-resource-policy-v1" },
+        "version": { "const": "v1" },
+        "key": { "$ref": "#/$defs/key" },
+        "area": { "$ref": "#/$defs/identity" },
+        "mutability": { "$ref": "#/$defs/mutability" },
+        "payload_digest": { "$ref": "#/$defs/digest" },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "manifest_digest": { "$ref": "#/$defs/digest" }
+      }
+    }
+  }
+}
