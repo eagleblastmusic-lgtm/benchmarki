@@ -589,13 +589,33 @@ CREATE TABLE IF NOT EXISTS leases (
     resource_type TEXT NOT NULL,
     resource_id TEXT NOT NULL,
     holder_token TEXT NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'RELEASED', 'EXPIRED')),
+    status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'RELEASED', 'EXPIRED', 'AVAILABLE', 'CLAIMED', 'COMPLETED', 'ABANDONED')),
     acquired_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     fence INTEGER NOT NULL DEFAULT 1 CHECK(fence >= 1),
+    -- NX-026 continuation lease fields.  These remain in the canonical
+    -- Project Memory v2 lease authority; they do not create a second lease
+    -- table or a Browser/Native-owned state store.
+    lease_kind TEXT NOT NULL DEFAULT 'GENERIC' CHECK(lease_kind IN ('GENERIC', 'CONTINUATION')),
+    continuation_id TEXT,
+    packet_digest TEXT,
+    run_id TEXT,
+    scope_epoch INTEGER CHECK(scope_epoch IS NULL OR scope_epoch >= 1),
+    task_id TEXT,
+    execution_binding_id TEXT,
+    owner_id TEXT,
+    owner_token_hash TEXT,
+    generation INTEGER NOT NULL DEFAULT 1 CHECK(generation >= 0),
+    state_revision INTEGER NOT NULL DEFAULT 1 CHECK(state_revision >= 1),
+    last_transition_reason TEXT,
+    completed_at TEXT,
+    abandoned_at TEXT,
     FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE RESTRICT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_active_lease ON leases(resource_type, resource_id) WHERE status = 'ACTIVE';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_continuation_claimed_lease
+    ON leases(resource_type, resource_id)
+    WHERE resource_type = 'CONTINUATION' AND status IN ('CLAIMED', 'ACTIVE');
 
 -- 20. Budget Ledgers (NX-014)
 CREATE TABLE IF NOT EXISTS budget_ledgers (
