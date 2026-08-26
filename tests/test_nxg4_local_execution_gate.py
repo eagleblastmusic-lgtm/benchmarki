@@ -1,7 +1,9 @@
 """NX-G4 — Local Execution and PowerShell Milestone Gate.
 
 Milestone NX-M4 integration proof:
-- Evaluates full M4 manifest across NX-040 through NX-050
+- Evaluates full 12-file M4 manifest across NX-040 through NX-050
+- Derived test counts strictly from real pytest collection and runtime evidence (JUnit XML)
+- Zero caller-supplied test count parameters
 - 10-fixture cross-subsystem trace corpus
 - Security / adversarial invariant verification
 - Duplicate / non-idempotent fault matrix
@@ -9,6 +11,7 @@ Milestone NX-M4 integration proof:
 - Candidate authority & promotion regression
 - Result completeness & source binding
 - Threat model defect ledger (zero critical/high defects)
+- NX-047 canonical historical decision artifact durability verification
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import ast
 import hashlib
 import json
 import subprocess
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -74,11 +78,15 @@ NXG4_GATE_FIELDS = {
     "RESULT_BINDING_DIVERGENCES",
     "OPEN_CRITICAL_DEFECTS",
     "OPEN_HIGH_DEFECTS",
+    "NX047_HISTORICAL_DECISION_MUTATIONS",
     "G4_TEST_FILES",
     "G4_TESTS_COLLECTED",
     "G4_TESTS_PASSED",
     "G4_TESTS_FAILED",
     "G4_TESTS_SKIPPED",
+    "COLLECTION_COUNT_SOURCE",
+    "EXECUTION_COUNT_SOURCE",
+    "CALLER_SUPPLIED_TEST_COUNTS",
     "TEST_COUNT_DIVERGENCES",
     "G4_TEST_MANIFEST_DIGEST",
     "HARDCODED_GATE_RESULT_FIELDS",
@@ -105,6 +113,44 @@ def _git(*args: str) -> tuple[int, str]:
 def _manifest_digest() -> str:
     serialized = "\n".join(M4_TEST_MANIFEST).encode("utf-8")
     return "sha256:" + hashlib.sha256(serialized).hexdigest()
+
+
+def _collect_pytest_manifest_counts(manifest: list[str]) -> int:
+    """Execute pytest --collect-only -q to get verified collected test counts."""
+    completed = subprocess.run(
+        ["python", "-m", "pytest", "--collect-only", "-q", *manifest],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    total = 0
+    for line in completed.stdout.splitlines():
+        line = line.strip()
+        if ":" in line:
+            parts = line.split(":")
+            if len(parts) == 2 and parts[1].strip().isdigit():
+                total += int(parts[1].strip())
+    return total
+
+
+def _read_junit_xml_counts(xml_path: Path | str) -> tuple[int, int, int, int]:
+    """Parse deterministic JUnit XML evidence artifact produced by pytest."""
+    p = Path(xml_path)
+    if not p.exists():
+        return 0, 0, 0, 0
+    tree = ET.parse(p)
+    root = tree.getroot()
+    suite = root if root.tag == "testsuite" else root.find("testsuite")
+    if suite is None:
+        return 0, 0, 0, 0
+    total = int(suite.attrib.get("tests", 0))
+    failures = int(suite.attrib.get("failures", 0))
+    errors = int(suite.attrib.get("errors", 0))
+    skipped = int(suite.attrib.get("skipped", 0))
+    failed = failures + errors
+    passed = total - failed - skipped
+    return total, passed, failed, skipped
 
 
 def _hardcoded_gate_fields() -> list[str]:
@@ -218,15 +264,29 @@ def test_cross_subsystem_trace_corpus(tmp_path: Path) -> None:
 # ==============================================================================
 
 def run_nxg4_machine_gate(
-    collected: int = 0,
-    passed: int = 0,
-    failed: int = 0,
-    skipped: int = 0,
+    xml_report_path: Path | str | None = None,
     tmp_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Execute the canonical NX-G4 machine gate."""
+    """Execute the canonical NX-G4 machine gate deriving test counts from machine evidence."""
     target_tmp = tmp_path or (ROOT / ".pytest_cache" / "nxg4_scratch")
     target_tmp.mkdir(parents=True, exist_ok=True)
+
+    xml_p = Path(xml_report_path) if xml_report_path else (ROOT / ".pytest_cache" / "m4_results.xml")
+
+    # 1. Derive collection count from real pytest --collect-only
+    collected = _collect_pytest_manifest_counts(M4_TEST_MANIFEST)
+    collection_source = "PYTEST_COLLECT_ONLY"
+
+    # 2. Derive execution counts from pytest JUnit XML runtime evidence
+    xml_total, passed, failed, skipped = _read_junit_xml_counts(xml_p)
+    execution_source = "PYTEST_RUNTIME_EVIDENCE"
+    caller_supplied = False
+
+    test_count_div = 0
+    if collected == 0 or xml_total == 0 or collected != xml_total:
+        test_count_div += 1
+    if (passed + failed + skipped) != collected:
+        test_count_div += 1
 
     all_components = True
     trace_fixtures = 10
@@ -256,6 +316,25 @@ def run_nxg4_machine_gate(
     open_critical = 0
     open_high = 0
 
+    # 3. Check NX-047 historical decision artifact durability
+    nx047_mutations = 0
+    art_file = ROOT / "runtime" / "evidence" / "powershell_backend_decision.json"
+    if not art_file.exists():
+        nx047_mutations += 1
+    else:
+        try:
+            art_data = json.loads(art_file.read_text(encoding="utf-8"))
+            if art_data.get("selected_backend") != "FRAMED_PWSH":
+                nx047_mutations += 1
+            if art_data.get("source_head") != "2fa2a021a1f0ea3dfedfc33fd4b492efc38ff349":
+                nx047_mutations += 1
+            if art_data.get("source_tree") != "98235a3e5a5d17f321cc63b0fd596b55fa62f106":
+                nx047_mutations += 1
+            if art_data.get("decision_artifact_digest") != "sha256:91508584188a67f0ae1a87af838d04a9a47ddcf67a086e5eae9ae0c2ad4862ce":
+                nx047_mutations += 1
+        except Exception:
+            nx047_mutations += 1
+
     test_files = len(M4_TEST_MANIFEST)
     manifest_digest_val = _manifest_digest()
 
@@ -267,10 +346,6 @@ def run_nxg4_machine_gate(
     status_code, status_out = _git("status", "--porcelain")
     diff_code, _ = _git("diff", "--check")
     worktree_clean = (status_code == 0 and status_out == "" and diff_code == 0)
-
-    test_count_div = 0
-    if collected > 0 and (passed + failed + skipped) != collected:
-        test_count_div += 1
 
     source_bound = "PASS" if head_code == 0 and tree_code == 0 and worktree_clean and no_hardcoded else "FAIL"
 
@@ -294,9 +369,11 @@ def run_nxg4_machine_gate(
         and result_binding_div == 0
         and open_critical == 0
         and open_high == 0
+        and nx047_mutations == 0
         and test_files == 12
         and failed == 0
         and test_count_div == 0
+        and not caller_supplied
         and no_hardcoded
     )
 
@@ -322,11 +399,15 @@ def run_nxg4_machine_gate(
         "RESULT_BINDING_DIVERGENCES": result_binding_div,
         "OPEN_CRITICAL_DEFECTS": open_critical,
         "OPEN_HIGH_DEFECTS": open_high,
+        "NX047_HISTORICAL_DECISION_MUTATIONS": nx047_mutations,
         "G4_TEST_FILES": test_files,
         "G4_TESTS_COLLECTED": collected,
         "G4_TESTS_PASSED": passed,
         "G4_TESTS_FAILED": failed,
         "G4_TESTS_SKIPPED": skipped,
+        "COLLECTION_COUNT_SOURCE": collection_source,
+        "EXECUTION_COUNT_SOURCE": execution_source,
+        "CALLER_SUPPLIED_TEST_COUNTS": caller_supplied,
         "TEST_COUNT_DIVERGENCES": test_count_div,
         "G4_TEST_MANIFEST_DIGEST": manifest_digest_val,
         "HARDCODED_GATE_RESULT_FIELDS": hardcoded_fields,
@@ -341,7 +422,7 @@ def run_nxg4_machine_gate(
 
 def test_nxg4_machine_gate_execution(tmp_path: Path) -> None:
     """Execute and validate all NX-G4 machine gate fields."""
-    gate = run_nxg4_machine_gate(collected=10, passed=10, failed=0, skipped=0, tmp_path=tmp_path)
+    gate = run_nxg4_machine_gate(tmp_path=tmp_path)
     print(json.dumps(gate, indent=2, sort_keys=True))
     assert gate["ALL_M4_COMPONENTS_QUALIFIED"] is True
     assert gate["G4_TRACE_FIXTURES"] >= 10
@@ -362,8 +443,12 @@ def test_nxg4_machine_gate_execution(tmp_path: Path) -> None:
     assert gate["RESULT_BINDING_DIVERGENCES"] == 0
     assert gate["OPEN_CRITICAL_DEFECTS"] == 0
     assert gate["OPEN_HIGH_DEFECTS"] == 0
+    assert gate["NX047_HISTORICAL_DECISION_MUTATIONS"] == 0
     assert gate["G4_TEST_FILES"] == 12
     assert gate["G4_TESTS_FAILED"] == 0
+    assert gate["COLLECTION_COUNT_SOURCE"] == "PYTEST_COLLECT_ONLY"
+    assert gate["EXECUTION_COUNT_SOURCE"] == "PYTEST_RUNTIME_EVIDENCE"
+    assert gate["CALLER_SUPPLIED_TEST_COUNTS"] is False
     assert gate["TEST_COUNT_DIVERGENCES"] == 0
     assert gate["G4_TEST_MANIFEST_DIGEST"].startswith("sha256:")
     assert gate["HARDCODED_GATE_RESULT_FIELDS"] == []
