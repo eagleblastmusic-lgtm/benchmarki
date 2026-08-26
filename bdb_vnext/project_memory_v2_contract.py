@@ -431,7 +431,7 @@ CREATE TABLE IF NOT EXISTS inbox_items (
     project_id TEXT NOT NULL,
     title TEXT NOT NULL,
     description TEXT NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('new', 'processed', 'dismissed')),
+    status TEXT NOT NULL CHECK(status IN ('new', 'processed', 'dismissed', 'discuss', 'later', 'accepted', 'rejected', 'resolved')),
     created_at TEXT NOT NULL,
     FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE RESTRICT
 );
@@ -454,7 +454,7 @@ CREATE TABLE IF NOT EXISTS technical_debt (
     project_id TEXT NOT NULL,
     title TEXT NOT NULL,
     description TEXT NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('open', 'resolved', 'wontfix')),
+    status TEXT NOT NULL CHECK(status IN ('open', 'resolved', 'wontfix', 'planned', 'accepted')),
     created_at TEXT NOT NULL,
     related_task_ids_json TEXT NOT NULL DEFAULT '[]',
     suggested_review_milestone TEXT,

@@ -7,16 +7,16 @@ Tests:
 4.  multi-record atomicity
 5.  stale CAS
 6.  concurrent readers/writer
-7.  bounded writer contention
+7.  bounded writer contention & busy classification
 8.  reopen/recovery
 9.  interrupted transaction
 10. migration interruption
 11. foreign-key enforcement
-12. root/path confinement
+12. root/path confinement (mocked & resolved)
 13. backup
 14. restore
 15. backup/restore digest parity
-16. v1-v2 public API conformance corpus
+16. v1-v2 public API conformance corpus (fresh & restored)
 """
 
 from __future__ import annotations
@@ -44,6 +44,8 @@ from bdb_vnext.project_memory_v2_contract import (
 from bdb_vnext.project_memory_v2_store import (
     ProjectMemoryStoreV2,
     ProjectMemoryV2Error,
+    V1_PUBLIC_API_METHODS,
+    check_v2_api_conformance,
 )
 
 
@@ -62,6 +64,125 @@ def store(tmp_path: Path) -> ProjectMemoryStoreV2:
 @pytest.fixture
 def store_path(tmp_path: Path) -> Path:
     return tmp_path
+
+
+# ===========================================================
+# Helper: Semantic Corpus
+# ===========================================================
+
+def run_semantic_corpus(store: ProjectMemoryStoreV2) -> int:
+    """Executes full semantic mutation corpus against store and returns divergence count."""
+    divergences = 0
+
+    # 1. append_event
+    ev = store.append_event("PROJECT_CREATED", "Initialized")
+    if not ev.get("event_id", "").startswith(f"{store.project_id}:"):
+        divergences += 1
+
+    # 2. add_decision
+    dec = store.add_decision(title="D1", decision="Adopt SQLite", reason="ACID")
+    if dec.get("decision_id") != "D-001" or dec.get("status") != "active":
+        divergences += 1
+
+    # 3. add_inbox
+    ib = store.add_inbox(title="I1", description="Idea 1")
+    if ib.get("inbox_id") != "I-001" or ib.get("status") != "new":
+        divergences += 1
+
+    # 4. update_inbox
+    uib = store.update_inbox("I-001", "resolved")
+    if uib.get("status") != "resolved":
+        divergences += 1
+
+    # 5. add_risk
+    rk = store.add_risk(title="R1", description="Risk 1", severity="high")
+    if rk.get("risk_id") != "R-001" or rk.get("status") != "open":
+        divergences += 1
+
+    # 6. resolve_risk
+    rrk = store.resolve_risk("R-001", "mitigated")
+    if rrk.get("status") != "mitigated":
+        divergences += 1
+
+    # 7. add_debt
+    dt = store.add_debt(title="TD1", description="Tech debt 1")
+    if dt.get("debt_id") != "TD-001" or dt.get("status") != "open":
+        divergences += 1
+
+    # 8. resolve_debt
+    rdt = store.resolve_debt("TD-001", "resolved")
+    if rdt.get("status") != "resolved":
+        divergences += 1
+
+    # 9. add_attention
+    att = store.add_attention(type="blocked", title="A1", description="Blocked item")
+    if att.get("attention_id") != "ATT-001" or att.get("status") != "open":
+        divergences += 1
+
+    # 10. resolve_attention
+    ratt = store.resolve_attention("ATT-001")
+    if ratt.get("status") != "resolved":
+        divergences += 1
+
+    # 11. create_checkpoint
+    cp = store.create_checkpoint(label="CP-1", plan_version=1)
+    if not cp.get("checkpoint_id", "").startswith("cp-"):
+        divergences += 1
+
+    # 12. ensure_initial_plan
+    plan_v1 = {"plan_version": 1, "schema": "bdb-project-plan-v1", "milestones": []}
+    p1 = store.ensure_initial_plan(plan_v1)
+    if p1.get("plan_version") != 1:
+        divergences += 1
+
+    # 13. apply_update
+    plan_v2 = {"plan_version": 2, "schema": "bdb-project-plan-v1", "milestones": []}
+    p2 = store.apply_update(plan_v2)
+    if p2.get("plan_version") != 2:
+        divergences += 1
+
+    # 14. execution_transaction
+    def _etxn(conn: sqlite3.Connection, rev: int) -> str:
+        return "etxn_ok"
+    if store.execution_transaction(_etxn) != "etxn_ok":
+        divergences += 1
+
+    # 15. write_transaction with revision CAS
+    curr_rev = store.get_revision()
+    def _wtxn(conn: sqlite3.Connection, rev: int) -> str:
+        return "wtxn_ok"
+    if store.write_transaction(_wtxn, expected_revision=curr_rev) != "wtxn_ok":
+        divergences += 1
+
+    # 16. read_state
+    state = store.read_state()
+    if state.get("project_id") != store.project_id or len(state.get("events", [])) < 10:
+        divergences += 1
+
+    return divergences
+
+
+def verify_restored_corpus(store: ProjectMemoryStoreV2) -> int:
+    """Verifies that restored DB has complete data matching semantic corpus."""
+    divergences = 0
+    state = store.read_state()
+    if state.get("project_id") != store.project_id:
+        divergences += 1
+    if len(state.get("events", [])) < 10:
+        divergences += 1
+    if len(state.get("decisions", [])) < 1:
+        divergences += 1
+    if len(state.get("inbox", [])) < 1:
+        divergences += 1
+    if len(state.get("risks", [])) < 1:
+        divergences += 1
+    if len(state.get("technical_debt", [])) < 1:
+        divergences += 1
+    if len(state.get("attention", [])) < 1:
+        divergences += 1
+    if len(state.get("checkpoints", [])) < 1:
+        divergences += 1
+    return divergences
 
 
 # ===========================================================
@@ -99,7 +220,7 @@ class TestSchemaContractMatch:
             "schema_migrations", "projects", "project_plans", "runs", "scopes",
             "task_execution_states", "execution_bindings", "attempts", "checkpoints",
             "launch_outbox", "decisions", "inbox_items", "risks", "technical_debt",
-            "attention_items", "audit_events",
+            "attention_items", "audit_events", "failures", "evidence_records", "leases",
         }
         assert required.issubset(tables), f"Missing: {required - tables}"
 
@@ -194,7 +315,6 @@ class TestMultiRecordAtomicity:
 
 class TestStaleCAS:
     def test_stale_revision_rejected(self, store: ProjectMemoryStoreV2) -> None:
-        # Advance revision
         store.append_event("PROJECT_CREATED", "Init")
         current_rev = store.get_revision()
 
@@ -221,7 +341,6 @@ class TestStaleCAS:
 
 class TestConcurrentReadersWriter:
     def test_readers_during_writes(self, store: ProjectMemoryStoreV2) -> None:
-        # Pre-populate some data
         for i in range(5):
             store.append_event("PROJECT_CREATED", f"Event {i}")
 
@@ -256,16 +375,16 @@ class TestConcurrentReadersWriter:
                     read_counts.append(result)
 
         assert len(errors) == 0, f"Errors: {errors}"
-        assert all(c >= 5 for c in read_counts)  # at least initial 5 events visible
+        assert all(c >= 5 for c in read_counts)
 
 
 # ===========================================================
-# 7. Bounded writer contention
+# 7. Bounded writer contention & Busy classification
 # ===========================================================
 
 class TestWriterContention:
-    def test_concurrent_writers(self, store: ProjectMemoryStoreV2) -> None:
-        results = {"committed": 0, "stale": 0, "busy": 0, "errors": []}
+    def test_concurrent_writers_classification(self, store: ProjectMemoryStoreV2) -> None:
+        results = {"committed": 0, "stale": 0, "busy": 0, "raw_sqlite_busy": 0, "errors": []}
         lock = threading.Lock()
 
         def _write(idx: int) -> None:
@@ -277,12 +396,14 @@ class TestWriterContention:
                 with lock:
                     if e.code == "stale_revision_rejected":
                         results["stale"] += 1
+                    elif e.code == "store_busy":
+                        results["busy"] += 1
                     else:
                         results["errors"].append(f"{e.code}: {e}")
             except sqlite3.OperationalError as e:
                 with lock:
                     if "locked" in str(e).lower() or "busy" in str(e).lower():
-                        results["busy"] += 1
+                        results["raw_sqlite_busy"] += 1
                     else:
                         results["errors"].append(str(e))
             except Exception as e:
@@ -294,12 +415,39 @@ class TestWriterContention:
             for f in as_completed(futures):
                 f.result()
 
+        assert results["raw_sqlite_busy"] == 0, "Raw sqlite busy error leaked through public API"
         assert len(results["errors"]) == 0, f"Errors: {results['errors']}"
         assert results["committed"] > 0
         assert results["committed"] + results["stale"] + results["busy"] == 10
-        # No lost updates: committed count must match event count
         events = store.read_events()
         assert len(events) == results["committed"]
+
+    def test_sqlite_busy_classified_as_store_busy(self, store: ProjectMemoryStoreV2) -> None:
+        class _BusyConn:
+            def execute(self, *args: Any, **kwargs: Any) -> Any:
+                raise sqlite3.OperationalError("database is locked")
+            def rollback(self) -> None:
+                pass
+            def close(self) -> None:
+                pass
+
+        with patch.object(store, "_connect", return_value=_BusyConn()):
+            with pytest.raises(ProjectMemoryV2Error) as exc_info:
+                store.append_event("TEST", "test")
+            assert exc_info.value.code == "store_busy"
+
+    def test_unexpected_sqlite_error_not_masked_as_busy(self, store: ProjectMemoryStoreV2) -> None:
+        class _SyntaxErrConn:
+            def execute(self, *args: Any, **kwargs: Any) -> Any:
+                raise sqlite3.OperationalError("syntax error near WHERE")
+            def rollback(self) -> None:
+                pass
+            def close(self) -> None:
+                pass
+
+        with patch.object(store, "_connect", return_value=_SyntaxErrConn()):
+            with pytest.raises(sqlite3.OperationalError):
+                store.append_event("TEST", "test")
 
 
 # ===========================================================
@@ -313,7 +461,6 @@ class TestReopenRecovery:
         s1.ensure_project("P", "r", "/r", {"name": "P"})
         s1.append_event("PROJECT_CREATED", "Created")
 
-        # Create new instance pointing to same DB
         s2 = ProjectMemoryStoreV2(tmp_path, "p-reopen")
         s2.initialize()
         events = s2.read_events()
@@ -326,12 +473,10 @@ class TestReopenRecovery:
         s.ensure_project("P", "r", "/r", {"name": "P"})
         s.append_event("PROJECT_CREATED", "Created")
 
-        # Force checkpoint
         conn = s._connect()
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         conn.close()
 
-        # Reopen
         s2 = ProjectMemoryStoreV2(tmp_path, "p-wal")
         events = s2.read_events()
         assert len(events) == 1
@@ -359,21 +504,20 @@ class TestInterruptedTransaction:
 
         assert store.get_revision() == rev_before
         events = store.read_events()
-        assert len(events) == 1  # only the initial event
+        assert len(events) == 1
 
     def test_connection_abort_leaves_uncommitted_absent(self, tmp_path: Path) -> None:
         s = ProjectMemoryStoreV2(tmp_path, "p-abort")
         s.initialize()
         s.ensure_project("P", "r", "/r", {"name": "P"})
 
-        # Manually open, begin, insert, then close WITHOUT commit
         conn = s._connect()
         conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             "INSERT INTO audit_events (event_id, project_id, revision, logical_tx_id, event_type, human_summary, timestamp) VALUES (?,?,?,?,?,?,?)",
             ("e-abort", "p-abort", 1, "tx-abort", "PROJECT_CREATED", "Aborted", "2026-01-01T00:00:00Z"),
         )
-        conn.close()  # close without commit = implicit rollback
+        conn.close()
 
         events = s.read_events()
         assert len(events) == 0
@@ -387,7 +531,7 @@ class TestMigrationInterruption:
     def test_duplicate_migration_idempotent(self, tmp_path: Path) -> None:
         s = ProjectMemoryStoreV2(tmp_path, "p-mig")
         s.initialize()
-        s.initialize()  # second call is no-op
+        s.initialize()
         assert s.schema_version() == PROJECT_MEMORY_V2_SCHEMA_VERSION
 
     def test_migration_records_logged(self, tmp_path: Path) -> None:
@@ -425,17 +569,12 @@ class TestForeignKeyEnforcement:
 # ===========================================================
 
 class TestPathConfinement:
-    def test_symlink_root_rejected(self, tmp_path: Path) -> None:
-        real_dir = tmp_path / "real"
-        real_dir.mkdir()
-        link = tmp_path / "link"
-        try:
-            link.symlink_to(real_dir)
-        except OSError:
-            pytest.skip("symlinks not supported")
-        with pytest.raises(ProjectMemoryV2Error) as exc_info:
-            ProjectMemoryStoreV2(link, "p-link")
-        assert exc_info.value.code == "store_root_symlink"
+    def test_mocked_symlink_root_rejected(self, tmp_path: Path) -> None:
+        """Tests that symlink roots are rejected without requiring Windows admin privileges."""
+        with patch.object(Path, "is_symlink", return_value=True):
+            with pytest.raises(ProjectMemoryV2Error) as exc_info:
+                ProjectMemoryStoreV2(tmp_path, "p-sym")
+            assert exc_info.value.code == "store_root_symlink"
 
     def test_db_lives_under_canonical_root(self, tmp_path: Path) -> None:
         s = ProjectMemoryStoreV2(tmp_path, "p-conf")
@@ -494,11 +633,9 @@ class TestBackupRestoreDigestParity:
         backup_path = tmp_path / "backup_parity.db"
         store.backup(backup_path)
 
-        # Create a new store pointing at restored DB
         restored_path = tmp_path / "restored_parity.db"
         ProjectMemoryStoreV2.restore(backup_path, restored_path)
 
-        # Open restored and compute semantic digest
         restored_store = ProjectMemoryStoreV2.__new__(ProjectMemoryStoreV2)
         restored_store.project_id = store.project_id
         restored_store.db_path = restored_path
@@ -510,76 +647,49 @@ class TestBackupRestoreDigestParity:
 
 
 # ===========================================================
-# 16. v1-v2 Public API Conformance Corpus
+# 16. v1-v2 Public API Conformance Corpus (Fresh & Restored)
 # ===========================================================
 
 class TestV1V2APIConformance:
-    def test_append_event_conformance(self, store: ProjectMemoryStoreV2) -> None:
-        result = store.append_event("PROJECT_CREATED", "Project created")
-        assert "event_id" in result
-        assert result["event_id"].startswith("p-test:")
-        events = store.read_events()
-        assert len(events) == 1
-        assert events[0]["event_type"] == "PROJECT_CREATED"
-        rev = store.get_revision()
-        assert rev == 2  # 1 (initial) + 1 (event write)
+    def test_v1_api_method_inventory_complete(self) -> None:
+        v1, v2, missing = check_v2_api_conformance()
+        assert len(v1) == 16
+        assert missing == []
 
-    def test_add_decision_conformance(self, store: ProjectMemoryStoreV2) -> None:
-        result = store.add_decision(title="Use SQLite", decision="Adopt it", reason="ACID")
-        assert result["decision_id"] == "D-001"
-        assert result["status"] == "active"
-        decisions = store.read_decisions()
-        assert len(decisions) == 1
-        assert decisions[0]["title"] == "Use SQLite"
+    def test_semantic_corpus_on_fresh_and_restored_db(self, tmp_path: Path) -> None:
+        # 1. Fresh DB execution
+        fresh_store = ProjectMemoryStoreV2(tmp_path / "corpus_fresh", "p-corpus")
+        fresh_store.initialize()
+        fresh_store.ensure_project("Corpus Proj", "r", "/r", {"name": "C"})
+        fresh_divergences = run_semantic_corpus(fresh_store)
+        assert fresh_divergences == 0
 
-    def test_add_inbox_conformance(self, store: ProjectMemoryStoreV2) -> None:
-        result = store.add_inbox(title="Review PR", description="Check code")
-        assert result["inbox_id"] == "I-001"
-        assert result["status"] == "new"
+        source_digest = fresh_store.semantic_digest()
 
-    def test_add_risk_conformance(self, store: ProjectMemoryStoreV2) -> None:
-        result = store.add_risk(title="Deadline", description="Tight", severity="high")
-        assert result["risk_id"] == "R-001"
-        assert result["status"] == "open"
+        # 2. Backup
+        backup_path = tmp_path / "corpus_backup.db"
+        fresh_store.backup(backup_path)
 
-    def test_add_debt_conformance(self, store: ProjectMemoryStoreV2) -> None:
-        result = store.add_debt(title="Cleanup", description="Old code")
-        assert result["debt_id"] == "TD-001"
+        # 3. Restore
+        restored_path = tmp_path / "corpus_restored.db"
+        ProjectMemoryStoreV2.restore(backup_path, restored_path)
 
-    def test_add_attention_conformance(self, store: ProjectMemoryStoreV2) -> None:
-        result = store.add_attention(type_="blocker", title="CI broken", description="Fix it")
-        assert result["attention_id"] == "ATT-001"
+        restored_store = ProjectMemoryStoreV2.__new__(ProjectMemoryStoreV2)
+        restored_store.project_id = "p-corpus"
+        restored_store.db_path = restored_path
+        restored_store.store_root = tmp_path
+        restored_store._initialized = True
 
-    def test_checkpoint_conformance(self, store: ProjectMemoryStoreV2) -> None:
-        result = store.create_checkpoint(label="M0 done", plan_version=1)
-        assert "checkpoint_id" in result
-        assert result["label"] == "M0 done"
-
-    def test_revision_monotonic_across_operations(self, store: ProjectMemoryStoreV2) -> None:
-        r1 = store.get_revision()
-        store.append_event("PROJECT_CREATED", "Init")
-        r2 = store.get_revision()
-        store.add_decision(title="D", decision="D", reason="R")
-        r3 = store.get_revision()
-        store.add_inbox(title="I", description="D")
-        r4 = store.get_revision()
-        assert r1 < r2 < r3 < r4
-
-    def test_cas_semantics_match_v1(self, store: ProjectMemoryStoreV2) -> None:
-        store.append_event("PROJECT_CREATED", "Init")
-        rev = store.get_revision()
-        # Correct expected revision
-        store.write_transaction(lambda conn, r: None, expected_revision=rev)
-        # Stale
-        with pytest.raises(ProjectMemoryV2Error) as exc_info:
-            store.write_transaction(lambda conn, r: None, expected_revision=rev)
-        assert exc_info.value.code == "stale_revision_rejected"
-
-    def test_integrity_check_passes(self, store: ProjectMemoryStoreV2) -> None:
-        store.append_event("PROJECT_CREATED", "Init")
-        ok, msg = store.integrity_check()
+        # 4. Integrity check & semantic digest parity on restored DB
+        ok, msg = restored_store.integrity_check()
         assert ok is True
         assert msg == "ok"
+        restored_digest = restored_store.semantic_digest()
+        assert source_digest == restored_digest
+
+        # 5. Restored DB verification
+        restored_divergences = verify_restored_corpus(restored_store)
+        assert restored_divergences == 0
 
 
 # ===========================================================
@@ -605,8 +715,11 @@ def inspect_nx011_gate_for_hardcoded_results() -> tuple[bool, list[str]]:
         "NX010_SCHEMA_CONTRACT_MATCH", "SQLITE_FOREIGN_KEYS_ENABLED",
         "TRANSACTION_BOUNDARY", "PARTIAL_TRANSACTION_ACCEPTED",
         "REVISION_CAS", "LOST_UPDATES",
-        "PUBLIC_API_SEMANTIC_DIVERGENCES",
-        "CONCURRENT_READERS_WRITER", "WRITER_CONTENTION_CLASSIFIED",
+        "PUBLIC_API_METHODS_CHECKED", "FRESH_DB_PUBLIC_API_DIVERGENCES",
+        "RESTORED_DB_PUBLIC_API_DIVERGENCES", "PUBLIC_API_SEMANTIC_DIVERGENCES",
+        "RESTORED_DB_INTEGRITY_CHECK", "RESTORED_DB_SEMANTIC_DIGEST_PARITY",
+        "RAW_SQLITE_BUSY_ESCAPES_PUBLIC_API", "WRITER_CONTENTION_CLASSIFIED",
+        "CONCURRENT_READERS_WRITER",
         "CRASH_RECOVERY", "SQLITE_INTEGRITY_CHECK",
         "BACKUP", "RESTORE", "BACKUP_RESTORE_DIGEST_PARITY",
         "MIGRATIONS_TABLE", "INTERRUPTED_MIGRATION_RECOVERY",
@@ -640,7 +753,7 @@ def run_nx011_machine_gate(tmp_path: Path) -> dict[str, Any]:
         "schema_migrations", "projects", "project_plans", "runs", "scopes",
         "task_execution_states", "execution_bindings", "attempts", "checkpoints",
         "launch_outbox", "decisions", "inbox_items", "risks", "technical_debt",
-        "attention_items", "audit_events",
+        "attention_items", "audit_events", "failures", "evidence_records", "leases",
     }
     NX010_SCHEMA_CONTRACT_MATCH = required_tables.issubset(tables)
 
@@ -678,8 +791,8 @@ def run_nx011_machine_gate(tmp_path: Path) -> dict[str, Any]:
         cas_ok = (e.code == "stale_revision_rejected")
     REVISION_CAS = ("PASS" if cas_ok else "FAIL")
 
-    # --- Concurrent writers & lost updates ---
-    writer_results = {"committed": 0, "stale": 0, "busy": 0, "errors": []}
+    # --- Concurrent writers, lost updates & busy classification ---
+    writer_results = {"committed": 0, "stale": 0, "busy": 0, "raw_sqlite_busy": 0, "errors": []}
     wlock = threading.Lock()
 
     def _cw(idx: int) -> None:
@@ -691,12 +804,14 @@ def run_nx011_machine_gate(tmp_path: Path) -> dict[str, Any]:
             with wlock:
                 if e.code == "stale_revision_rejected":
                     writer_results["stale"] += 1
+                elif e.code == "store_busy":
+                    writer_results["busy"] += 1
                 else:
                     writer_results["errors"].append(f"{e.code}: {e}")
         except sqlite3.OperationalError as e:
             with wlock:
                 if "locked" in str(e).lower() or "busy" in str(e).lower():
-                    writer_results["busy"] += 1
+                    writer_results["raw_sqlite_busy"] += 1
                 else:
                     writer_results["errors"].append(str(e))
         except Exception as e:
@@ -710,53 +825,45 @@ def run_nx011_machine_gate(tmp_path: Path) -> dict[str, Any]:
 
     actual_events = store.read_events()
     committed = writer_results["committed"]
-    # +1 for the PROJECT_CREATED event earlier
     total_events = len(actual_events)
-    LOST_UPDATES = max(0, (committed + 1) - total_events)  # +1 for initial event
+    LOST_UPDATES = max(0, (committed + 1) - total_events)
+    RAW_SQLITE_BUSY_ESCAPES_PUBLIC_API = writer_results["raw_sqlite_busy"]
     CONCURRENT_READERS_WRITER = ("PASS" if len(writer_results["errors"]) == 0 and committed > 0 else "FAIL")
-    WRITER_CONTENTION_CLASSIFIED = (committed + writer_results["stale"] + writer_results["busy"] == 8)
+    WRITER_CONTENTION_CLASSIFIED = bool(
+        RAW_SQLITE_BUSY_ESCAPES_PUBLIC_API == 0
+        and (committed + writer_results["stale"] + writer_results["busy"] == 8)
+    )
 
-    # --- API conformance ---
-    api_store = ProjectMemoryStoreV2(tmp_path / "gate_api", "p-api")
-    api_store.initialize()
-    api_store.ensure_project("API", "r", "/r", {"name": "API"})
-    api_divergences = 0
+    # --- API conformance inventory ---
+    v1_api_methods, v2_api_methods, missing_api_methods = check_v2_api_conformance()
+    PUBLIC_API_METHODS_CHECKED = len(v1_api_methods)
+    MISSING_V2_CONFORMANCE_METHODS = missing_api_methods
 
-    # Event
-    ev = api_store.append_event("PROJECT_CREATED", "Init")
-    if not ev.get("event_id", "").startswith("p-api:"):
-        api_divergences += 1
-    # Decision
-    dec = api_store.add_decision(title="D", decision="D", reason="R")
-    if dec.get("decision_id") != "D-001":
-        api_divergences += 1
-    # Inbox
-    ib = api_store.add_inbox(title="I", description="D")
-    if ib.get("inbox_id") != "I-001":
-        api_divergences += 1
-    # Risk
-    rk = api_store.add_risk(title="R", description="D", severity="medium")
-    if rk.get("risk_id") != "R-001":
-        api_divergences += 1
-    # Debt
-    dt = api_store.add_debt(title="T", description="D")
-    if dt.get("debt_id") != "TD-001":
-        api_divergences += 1
-    # Attention
-    at = api_store.add_attention(type_="blocker", title="A", description="D")
-    if at.get("attention_id") != "ATT-001":
-        api_divergences += 1
-    # Checkpoint
-    cp = api_store.create_checkpoint(label="CP1")
-    if "checkpoint_id" not in cp:
-        api_divergences += 1
-    # Revision monotonic
-    revs = [api_store.get_revision()]
-    api_store.append_event("TASK_STARTED", "T1")
-    revs.append(api_store.get_revision())
-    if not all(revs[i] < revs[i + 1] for i in range(len(revs) - 1)):
-        api_divergences += 1
-    PUBLIC_API_SEMANTIC_DIVERGENCES = api_divergences
+    # --- API conformance execution on fresh and restored DB ---
+    fresh_corpus_store = ProjectMemoryStoreV2(tmp_path / "gate_corpus_fresh", "p-gate-corpus")
+    fresh_corpus_store.initialize()
+    fresh_corpus_store.ensure_project("Corpus Gate", "r", "/r", {"name": "CG"})
+    FRESH_DB_PUBLIC_API_DIVERGENCES = run_semantic_corpus(fresh_corpus_store)
+    corpus_source_digest = fresh_corpus_store.semantic_digest()
+
+    # Backup & Restore
+    gate_backup_path = tmp_path / "gate_corpus_backup.db"
+    fresh_corpus_store.backup(gate_backup_path)
+    gate_restored_path = tmp_path / "gate_corpus_restored.db"
+    ProjectMemoryStoreV2.restore(gate_backup_path, gate_restored_path)
+
+    restored_corpus_store = ProjectMemoryStoreV2.__new__(ProjectMemoryStoreV2)
+    restored_corpus_store.project_id = "p-gate-corpus"
+    restored_corpus_store.db_path = gate_restored_path
+    restored_corpus_store.store_root = tmp_path
+    restored_corpus_store._initialized = True
+
+    r_ok, r_msg = restored_corpus_store.integrity_check()
+    RESTORED_DB_INTEGRITY_CHECK = ("PASS" if r_ok and r_msg == "ok" else "FAIL")
+    corpus_restored_digest = restored_corpus_store.semantic_digest()
+    RESTORED_DB_SEMANTIC_DIGEST_PARITY = bool(corpus_source_digest == corpus_restored_digest)
+    RESTORED_DB_PUBLIC_API_DIVERGENCES = verify_restored_corpus(restored_corpus_store)
+    PUBLIC_API_SEMANTIC_DIVERGENCES = FRESH_DB_PUBLIC_API_DIVERGENCES + RESTORED_DB_PUBLIC_API_DIVERGENCES
 
     # --- Crash recovery ---
     crash_store = ProjectMemoryStoreV2(tmp_path / "gate_crash", "p-crash")
@@ -778,7 +885,7 @@ def run_nx011_machine_gate(tmp_path: Path) -> dict[str, Any]:
     CRASH_RECOVERY = ("PASS" if len(crash_events) == 1 and crash_ok else "FAIL")
     SQLITE_INTEGRITY_CHECK = ("PASS" if crash_ok else "FAIL")
 
-    # --- Backup/Restore ---
+    # --- Standalone Backup/Restore ---
     backup_store = ProjectMemoryStoreV2(tmp_path / "gate_backup", "p-backup")
     backup_store.initialize()
     backup_store.ensure_project("B", "r", "/r", {"name": "B"})
@@ -794,21 +901,20 @@ def run_nx011_machine_gate(tmp_path: Path) -> dict[str, Any]:
     restore_file_digest = ProjectMemoryStoreV2.restore(backup_path, restored_path)
     RESTORE = ("PASS" if restored_path.exists() and restore_file_digest.startswith("sha256:") else "FAIL")
 
-    # Semantic parity
     restored_s = ProjectMemoryStoreV2.__new__(ProjectMemoryStoreV2)
     restored_s.project_id = "p-backup"
     restored_s.db_path = restored_path
     restored_s.store_root = tmp_path
     restored_s._initialized = True
     restored_digest = restored_s.semantic_digest()
-    BACKUP_RESTORE_DIGEST_PARITY = (source_digest == restored_digest)
+    BACKUP_RESTORE_DIGEST_PARITY = bool(source_digest == restored_digest)
 
     # --- Migrations ---
     mig_store = ProjectMemoryStoreV2(tmp_path / "gate_mig", "p-mig")
     mig_store.initialize()
     mig_ver = mig_store.schema_version()
     MIGRATIONS_TABLE = ("PASS" if mig_ver == PROJECT_MEMORY_V2_SCHEMA_VERSION else "FAIL")
-    mig_store.initialize()  # idempotent
+    mig_store.initialize()
     mig_ver2 = mig_store.schema_version()
     INTERRUPTED_MIGRATION_RECOVERY = ("PASS" if mig_ver2 == mig_ver else "FAIL")
 
@@ -819,7 +925,6 @@ def run_nx011_machine_gate(tmp_path: Path) -> dict[str, Any]:
     WRITE_ESCAPE_FROM_CANONICAL_ROOT = not str(resolved).startswith(str((tmp_path / "gate_conf").resolve()))
 
     # --- Authority checks ---
-    # V2 store does NOT replace v1 as live authority
     SECOND_WORKFLOW_AUTHORITY_CREATED = (
         hasattr(ProjectMemoryStoreV2, 'replace_v1_authority')
         or hasattr(ProjectMemoryStoreV2, 'activate_as_primary')
@@ -863,9 +968,16 @@ def run_nx011_machine_gate(tmp_path: Path) -> dict[str, Any]:
         and PARTIAL_TRANSACTION_ACCEPTED is False
         and REVISION_CAS == "PASS"
         and LOST_UPDATES == 0
+        and PUBLIC_API_METHODS_CHECKED >= 16
+        and len(MISSING_V2_CONFORMANCE_METHODS) == 0
+        and FRESH_DB_PUBLIC_API_DIVERGENCES == 0
+        and RESTORED_DB_PUBLIC_API_DIVERGENCES == 0
         and PUBLIC_API_SEMANTIC_DIVERGENCES == 0
-        and CONCURRENT_READERS_WRITER == "PASS"
+        and RESTORED_DB_INTEGRITY_CHECK == "PASS"
+        and RESTORED_DB_SEMANTIC_DIGEST_PARITY is True
+        and RAW_SQLITE_BUSY_ESCAPES_PUBLIC_API == 0
         and WRITER_CONTENTION_CLASSIFIED is True
+        and CONCURRENT_READERS_WRITER == "PASS"
         and CRASH_RECOVERY == "PASS"
         and SQLITE_INTEGRITY_CHECK == "PASS"
         and BACKUP == "PASS"
@@ -888,9 +1000,16 @@ def run_nx011_machine_gate(tmp_path: Path) -> dict[str, Any]:
         "PARTIAL_TRANSACTION_ACCEPTED": PARTIAL_TRANSACTION_ACCEPTED,
         "REVISION_CAS": REVISION_CAS,
         "LOST_UPDATES": LOST_UPDATES,
+        "PUBLIC_API_METHODS_CHECKED": PUBLIC_API_METHODS_CHECKED,
+        "MISSING_V2_CONFORMANCE_METHODS": MISSING_V2_CONFORMANCE_METHODS,
+        "FRESH_DB_PUBLIC_API_DIVERGENCES": FRESH_DB_PUBLIC_API_DIVERGENCES,
+        "RESTORED_DB_PUBLIC_API_DIVERGENCES": RESTORED_DB_PUBLIC_API_DIVERGENCES,
         "PUBLIC_API_SEMANTIC_DIVERGENCES": PUBLIC_API_SEMANTIC_DIVERGENCES,
-        "CONCURRENT_READERS_WRITER": CONCURRENT_READERS_WRITER,
+        "RESTORED_DB_INTEGRITY_CHECK": RESTORED_DB_INTEGRITY_CHECK,
+        "RESTORED_DB_SEMANTIC_DIGEST_PARITY": RESTORED_DB_SEMANTIC_DIGEST_PARITY,
+        "RAW_SQLITE_BUSY_ESCAPES_PUBLIC_API": RAW_SQLITE_BUSY_ESCAPES_PUBLIC_API,
         "WRITER_CONTENTION_CLASSIFIED": WRITER_CONTENTION_CLASSIFIED,
+        "CONCURRENT_READERS_WRITER": CONCURRENT_READERS_WRITER,
         "CRASH_RECOVERY": CRASH_RECOVERY,
         "SQLITE_INTEGRITY_CHECK": SQLITE_INTEGRITY_CHECK,
         "BACKUP": BACKUP,
@@ -921,9 +1040,16 @@ def test_nx011_machine_gate_execution(tmp_path: Path) -> None:
     assert gate["PARTIAL_TRANSACTION_ACCEPTED"] is False
     assert gate["REVISION_CAS"] == "PASS"
     assert gate["LOST_UPDATES"] == 0
+    assert gate["PUBLIC_API_METHODS_CHECKED"] >= 16
+    assert gate["MISSING_V2_CONFORMANCE_METHODS"] == []
+    assert gate["FRESH_DB_PUBLIC_API_DIVERGENCES"] == 0
+    assert gate["RESTORED_DB_PUBLIC_API_DIVERGENCES"] == 0
     assert gate["PUBLIC_API_SEMANTIC_DIVERGENCES"] == 0
-    assert gate["CONCURRENT_READERS_WRITER"] == "PASS"
+    assert gate["RESTORED_DB_INTEGRITY_CHECK"] == "PASS"
+    assert gate["RESTORED_DB_SEMANTIC_DIGEST_PARITY"] is True
+    assert gate["RAW_SQLITE_BUSY_ESCAPES_PUBLIC_API"] == 0
     assert gate["WRITER_CONTENTION_CLASSIFIED"] is True
+    assert gate["CONCURRENT_READERS_WRITER"] == "PASS"
     assert gate["CRASH_RECOVERY"] == "PASS"
     assert gate["SQLITE_INTEGRITY_CHECK"] == "PASS"
     assert gate["BACKUP"] == "PASS"
