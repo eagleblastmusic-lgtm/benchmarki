@@ -467,7 +467,15 @@ def _run_bounded_manifest() -> dict[str, Any]:
     )
     collect_output = f"{collect.stdout}\n{collect.stderr}"
     collected_match = re.search(r"(\d+)\s+tests?\s+collected", collect_output)
-    collected = int(collected_match.group(1)) if collected_match else 0
+    per_file_counts = re.findall(
+        r"(?m)^tests[\\/][^:\r\n]+:\s+(\d+)\s*$",
+        collect_output,
+    )
+    collected = (
+        sum(int(match) for match in per_file_counts)
+        if per_file_counts
+        else int(collected_match.group(1)) if collected_match else 0
+    )
 
     nested_env = dict(os.environ)
     nested_env["BDB_G2_NESTED"] = "1"
@@ -477,6 +485,7 @@ def _run_bounded_manifest() -> dict[str, Any]:
             "-m",
             "pytest",
             "-q",
+            "-rA",
             "-k",
             "not test_nx_g2_machine_gate_execution",
             *G2_TEST_MANIFEST,
@@ -489,9 +498,18 @@ def _run_bounded_manifest() -> dict[str, Any]:
         timeout=300,
     )
     nested_output = f"{nested.stdout}\n{nested.stderr}"
-    passed = _summary_count(nested_output, "passed")
-    failed = _summary_count(nested_output, "failed") + _summary_count(nested_output, "error")
-    skipped = _summary_count(nested_output, "skipped")
+    passed = _summary_count(nested_output, "passed") + len(
+        re.findall(r"(?mi)^PASSED\s+", nested_output)
+    )
+    failed = (
+        _summary_count(nested_output, "failed")
+        + _summary_count(nested_output, "error")
+        + len(re.findall(r"(?mi)^FAILED\s+", nested_output))
+        + len(re.findall(r"(?mi)^ERROR\s+", nested_output))
+    )
+    skipped = _summary_count(nested_output, "skipped") + len(
+        re.findall(r"(?mi)^SKIPPED(?:\s|\[)", nested_output)
+    )
     if nested.returncode != 0 and failed == 0:
         failed = 1
     gate_test_passed = int(nested.returncode == 0)
