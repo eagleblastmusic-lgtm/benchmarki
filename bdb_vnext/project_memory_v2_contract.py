@@ -115,6 +115,17 @@ AUTHORITY_INVENTORY: tuple[AuthorityFact, ...] = (
         v2_table="send_intents",
     ),
     AuthorityFact(
+        fact_name="session_reentry",
+        current_owner="ProjectMemoryStoreV2 / SessionContinuationController",
+        current_storage="memory.db (session_reentries)",
+        mutability="MUTABLE",
+        identity="reentry_id / continuation_id / packet_digest / scope_epoch",
+        revision_generation_rule="monotonic state_revision with exactly-once effect count",
+        relationships="FK to projects(project_id); binds continuation packet, lease and execution binding",
+        v2_owner="ProjectMemoryStoreV2",
+        v2_table="session_reentries",
+    ),
+    AuthorityFact(
         fact_name="milestone_run",
         current_owner="ProjectMemoryStore (state.execution.milestone_runs)",
         current_storage="project-memory/{id}/state.json",
@@ -503,6 +514,56 @@ CREATE TABLE IF NOT EXISTS send_intents (
 );
 CREATE INDEX IF NOT EXISTS idx_send_intents_project_state ON send_intents(project_id, status);
 CREATE INDEX IF NOT EXISTS idx_send_intents_continuation ON send_intents(project_id, continuation_id, scope_epoch);
+
+-- 10c. Canonical Session Re-entry State (NX-028)
+-- This relation is an extension of Project Memory v2.  It is deliberately
+-- stored beside leases and send_intents; it is not a Browser/local authority.
+CREATE TABLE IF NOT EXISTS session_reentries (
+    reentry_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    continuation_id TEXT NOT NULL,
+    packet_digest TEXT NOT NULL,
+    packet_json TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    scope_epoch INTEGER NOT NULL CHECK(scope_epoch >= 1),
+    task_id TEXT NOT NULL,
+    execution_binding_id TEXT NOT NULL,
+    binding_generation INTEGER NOT NULL CHECK(binding_generation >= 1),
+    canonical_state_revision INTEGER NOT NULL CHECK(canonical_state_revision >= 1),
+    canonical_state_digest TEXT NOT NULL,
+    session_liveness_version TEXT NOT NULL,
+    liveness_state TEXT NOT NULL CHECK(liveness_state IN (
+        'SESSION_ACTIVE', 'TURN_ENDED', 'SESSION_UNAVAILABLE',
+        'CONTINUATION_PENDING', 'REENTRY_PREPARED', 'REENTRY_IN_PROGRESS',
+        'OPERATOR_CHECKPOINT', 'REENTRY_CONFIRMED', 'REENTRY_FAILED',
+        'REENTRY_BLOCKED'
+    )),
+    selected_channel TEXT CHECK(selected_channel IS NULL OR selected_channel IN (
+        'EXISTING_CONVERSATION_VERIFIED',
+        'OFFICIAL_NEW_CONVERSATION_CAPABILITY_VERIFIED',
+        'OPERATOR_ASSISTED_CHECKPOINT_REQUIRED'
+    )),
+    conversation_id TEXT,
+    conversation_binding_proof TEXT,
+    checkpoint_id TEXT,
+    trace_json TEXT NOT NULL DEFAULT '[]',
+    effect_count INTEGER NOT NULL DEFAULT 0 CHECK(effect_count >= 0),
+    operator_prompt_build_required INTEGER NOT NULL DEFAULT 0 CHECK(operator_prompt_build_required IN (0, 1)),
+    operator_decision_required INTEGER NOT NULL DEFAULT 0 CHECK(operator_decision_required IN (0, 1)),
+    state_revision INTEGER NOT NULL DEFAULT 1 CHECK(state_revision >= 1),
+    last_reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE RESTRICT,
+    UNIQUE (project_id, continuation_id, packet_digest, scope_epoch)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_session_reentry_checkpoint
+    ON session_reentries(checkpoint_id) WHERE checkpoint_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_session_reentries_project_state
+    ON session_reentries(project_id, liveness_state);
+CREATE INDEX IF NOT EXISTS idx_session_reentries_binding
+    ON session_reentries(project_id, execution_binding_id, scope_epoch);
 
 -- 11. Decisions
 CREATE TABLE IF NOT EXISTS decisions (
@@ -912,6 +973,7 @@ V1_TO_V2_FIELD_MAPPING: dict[str, dict[str, str]] = {
         "execution.milestone_auto": "scopes (relational rows)",
         "execution.launch_outbox": "launch_outbox (relational rows)",
         "execution.send_intents": "send_intents (relational rows)",
+        "execution.session_reentries": "session_reentries (relational rows)",
         "execution.checkpoints": "checkpoints (relational rows)",
         "execution.attempts[].failure_code": "failures.failure_code (relational rows)",
         "execution.attempts[].evidence_refs": "evidence_records.evidence_ref (relational rows)",
