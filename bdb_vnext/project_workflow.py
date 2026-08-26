@@ -624,8 +624,14 @@ class ProjectWorkflow:
             for rec in pending_records:
                 q_pending = self.queue.peek()
                 if q_pending is None:
-                    self.publish_outbox_launch(project.project_id, rec.launch_id)
-                    reconciled_count += 1
+                    try:
+                        self.publish_outbox_launch(project.project_id, rec.launch_id)
+                        reconciled_count += 1
+                    except (ProjectWorkflowError, ProjectLaunchQueueError):
+                        q_current = self.queue.peek()
+                        if q_current is not None and q_current.launch_id == rec.launch_id:
+                            self.execution.mark_outbox_published(project.project_id, rec.launch_id)
+                            reconciled_count += 1
                 elif q_pending.launch_id == rec.launch_id:
                     self.execution.mark_outbox_published(project.project_id, rec.launch_id)
                     reconciled_count += 1
