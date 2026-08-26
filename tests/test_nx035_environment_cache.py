@@ -414,7 +414,7 @@ def test_current_unready_inventory_cannot_be_promoted_by_a_ready_cache(tmp_path:
 def run_nx035_machine_gate() -> dict[str, Any]:
     requirement_set = _requirement_set(_requirement("req:node"))
     inventory = _canonical_inventory()
-    with tempfile.TemporaryDirectory(prefix=".bdb-vnext-nx035-", dir=str(ROOT)) as temporary:
+    with tempfile.TemporaryDirectory(prefix="bdb-vnext-nx035-") as temporary:
         root = Path(temporary)
         store = _cache(root / "healthy.json")
         _refresh(store, requirement_set, inventory, ttl_seconds=60)
