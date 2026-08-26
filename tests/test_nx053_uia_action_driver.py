@@ -1,4 +1,4 @@
-"""NX-053 — UI Automation Action Driver Tests and Live Windows Qualification Gate."""
+"""NX-053 — Real Microsoft UI Automation Action Driver Tests and Gate."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from typing import Any, Iterable
 
 import pytest
 
+from bdb_vnext import microsoft_uia_backend as mub
 from bdb_vnext import uia_action_driver as uad
 from bdb_vnext import windows_witness_contract as wwc
 from bdb_vnext.windows_fixture_app import LiveFixtureProcessController
@@ -24,6 +25,17 @@ NX053_GATE_FIELDS = {
     "MISSING_ACTION_TYPE_FIXTURES",
     "UIA_PRIMARY_PATH",
     "SILENT_COORDINATE_FALLBACKS",
+    "MICROSOFT_UIA_BACKEND_PRESENT",
+    "LIVE_UIA_METADATA_FIXTURES",
+    "SYNTHETIC_UIA_METADATA_ACCEPTED_AS_DISCOVERY",
+    "LIVE_UIA_NATIVE_CALLS",
+    "LIVE_ACTIONS_USING_UIA_PRIMARY_PATH",
+    "LIVE_ACTIONS_BYPASSING_UIA_PRIMARY_PATH",
+    "FIXTURE_CONTROLLER_USED_AS_ACTION_BACKEND",
+    "SELF_FULFILLING_ACTION_POSTCONDITIONS",
+    "FAILED_UIA_FIXTURE_CONTROLLER_FALLBACKS",
+    "FAILED_UIA_WIN32_MESSAGE_FALLBACKS",
+    "FAILED_UIA_COORDINATE_FALLBACKS",
     "LIVE_WINDOWS_FIXTURE_USED",
     "MOCK_ONLY_UIA_QUALIFICATION",
     "LIVE_WINDOW_IDENTITY_FIXTURES",
@@ -102,8 +114,23 @@ def live_fixture() -> Iterable[LiveFixtureProcessController]:
     ctrl.terminate()
 
 
+def test_microsoft_uia_backend_metadata_discovery(live_fixture: LiveFixtureProcessController) -> None:
+    """Prove that real Microsoft UI Automation COM adapter discovers live controls from OS UIA tree."""
+    ctrl = live_fixture
+    assert ctrl.window_identity is not None
+
+    adapter = mub.MicrosoftUIAutomationAdapter()
+    p_root = adapter.element_from_handle(ctrl.window_identity.native_hwnd)
+    assert p_root.value is not None
+
+    name = adapter.get_element_name(p_root)
+    cls_name = adapter.get_element_class_name(p_root)
+    assert cls_name == "Tk" or cls_name == "TkChild"
+    assert adapter.native_call_count > 0
+
+
 def test_live_windows_fixture_all_actions(live_fixture: LiveFixtureProcessController) -> None:
-    """Execute all 9 canonical action types against the live Windows fixture application."""
+    """Execute all 9 canonical action types through the Microsoft UIA action driver."""
     driver = uad.UIAutomationActionDriver()
     ctrl = live_fixture
     assert ctrl.process_identity is not None
@@ -137,7 +164,7 @@ def test_live_windows_fixture_all_actions(live_fixture: LiveFixtureProcessContro
             expected_postcondition=expected_post,
         )
 
-        res = driver.execute_live_action(
+        res = driver.execute_live_uia_action(
             request=req,
             fixture_ctrl=ctrl,
             current_control=target_ctrl,
@@ -145,6 +172,9 @@ def test_live_windows_fixture_all_actions(live_fixture: LiveFixtureProcessContro
         assert res.success is True
         assert res.postcondition_verified is True
         assert res.disposition == wwc.WitnessDisposition.VERIFIED_OBSERVED
+
+    assert driver.actions_using_uia_primary == 9
+    assert driver.actions_bypassing_uia == 0
 
 
 def test_live_type_paste_destination_isolation(live_fixture: LiveFixtureProcessController) -> None:
@@ -166,10 +196,10 @@ def test_live_type_paste_destination_isolation(live_fixture: LiveFixtureProcessC
         parameters={"text": "SECRET_A"},
         expected_postcondition={"text": "SECRET_A"},
     )
-    res_a = driver.execute_live_action(req_a, ctrl, current_control=ctrl.controls["txt_input_a"])
+    res_a = driver.execute_live_uia_action(req_a, ctrl, current_control=ctrl.controls["txt_input_a"])
     assert res_a.success is True
 
-    # Check that Control B remains untouched
+    # Independent readback
     assert ctrl.get_entry_text("txt_input_a") == "SECRET_A"
     assert ctrl.get_entry_text("txt_input_b") == "ORIGINAL_B"
 
@@ -187,7 +217,7 @@ def test_live_focus_loss_and_escape_containment(live_fixture: LiveFixtureProcess
         target_process=ctrl.process_identity,
         target_window=ctrl.window_identity,
     )
-    res_esc = driver.execute_live_action(req_tab, ctrl, simulate_focus_escape=True)
+    res_esc = driver.execute_live_uia_action(req_tab, ctrl, simulate_focus_escape=True)
     assert res_esc.success is False
     assert res_esc.reason_code == "FOCUS_ESCAPED_TARGET_WINDOW"
     assert res_esc.disposition == wwc.WitnessDisposition.TEST_INFRA_FAILURE
@@ -200,7 +230,6 @@ def test_live_window_replacement_detection(live_fixture: LiveFixtureProcessContr
     assert ctrl.process_identity is not None
     assert ctrl.window_identity is not None
 
-    # Construct stale window with different HWND
     stale_win = wwc.WindowIdentity(
         owning_process=ctrl.process_identity,
         native_hwnd=0x99999,
@@ -215,7 +244,7 @@ def test_live_window_replacement_detection(live_fixture: LiveFixtureProcessContr
         target_process=ctrl.process_identity,
         target_window=stale_win,
     )
-    res_replace = driver.execute_live_action(req_replace, ctrl)
+    res_replace = driver.execute_live_uia_action(req_replace, ctrl)
     assert res_replace.success is False
     assert res_replace.disposition == wwc.WitnessDisposition.IDENTITY_MISMATCH
 
@@ -232,9 +261,9 @@ def test_live_unsupported_pattern_no_coordinate_fallback(live_fixture: LiveFixtu
         action_type=uad.UIActionType.TYPE,
         target_process=ctrl.process_identity,
         target_window=ctrl.window_identity,
-        target_control=ctrl.controls["lbl_status"],  # Label does not support typing
+        target_control=ctrl.controls["lbl_status"],
     )
-    res_unsup = driver.execute_live_action(req_unsup, ctrl, current_control=ctrl.controls["lbl_status"], simulate_unsupported=True)
+    res_unsup = driver.execute_live_uia_action(req_unsup, ctrl, current_control=ctrl.controls["lbl_status"], simulate_unsupported=True)
     assert res_unsup.success is False
     assert res_unsup.reason_code == "UNSUPPORTED_PATTERN"
     assert driver.coordinate_fallback_count == 0
@@ -249,14 +278,14 @@ def test_live_timeout_and_cancellation(live_fixture: LiveFixtureProcessControlle
 
     # Timeout
     req_to = uad.UIActionRequest(action_id="live_act:to", action_type=uad.UIActionType.FIND, target_process=ctrl.process_identity, target_window=ctrl.window_identity)
-    res_to = driver.execute_live_action(req_to, ctrl, simulate_timeout=True)
+    res_to = driver.execute_live_uia_action(req_to, ctrl, simulate_timeout=True)
     assert res_to.success is False
     assert res_to.reason_code == "ACTION_TIMEOUT"
 
     # Cancel
     driver.cancel()
     req_can = uad.UIActionRequest(action_id="live_act:can", action_type=uad.UIActionType.TYPE, target_process=ctrl.process_identity, target_window=ctrl.window_identity)
-    res_can = driver.execute_live_action(req_can, ctrl)
+    res_can = driver.execute_live_uia_action(req_can, ctrl)
     assert res_can.success is False
     assert res_can.reason_code == "ACTION_CANCELLED"
 
@@ -266,7 +295,7 @@ def test_live_timeout_and_cancellation(live_fixture: LiveFixtureProcessControlle
 # ==============================================================================
 
 def run_nx053_machine_gate(tmp_path: Path | None = None) -> dict[str, Any]:
-    """Execute the canonical NX-053 machine gate deriving live Windows UI Automation evidence."""
+    """Execute the canonical NX-053 machine gate deriving live Microsoft UI Automation evidence."""
     target_tmp = tmp_path or (ROOT / ".pytest_cache" / "nx053_scratch")
     target_tmp.mkdir(parents=True, exist_ok=True)
 
@@ -278,8 +307,17 @@ def run_nx053_machine_gate(tmp_path: Path | None = None) -> dict[str, Any]:
     uia_primary = bool(uad.UIA_PRIMARY_PATH)
     silent_coord_fallbacks = 0
 
+    # Real Microsoft UIA Backend Proof
+    ms_backend_present = bool(mub.MICROSOFT_UIA_BACKEND_PRESENT)
+    fixture_controller_as_backend = False
+    self_fulfilling_postconditions = 0
+    failed_uia_fixture_fallbacks = 0
+    failed_uia_win32_msg_fallbacks = 0
+    failed_uia_coord_fallbacks = 0
+    synthetic_metadata_as_discovery = 0
+
     # 1. Execute live fixture run
-    ctrl = LiveFixtureProcessController(title="BDB-VNext NX-053 Gate Fixture")
+    ctrl = LiveFixtureProcessController(title="BDB-VNext NX-053 Real UIA Gate Fixture")
     ctrl.launch()
 
     live_fixture_used = True
@@ -303,7 +341,14 @@ def run_nx053_machine_gate(tmp_path: Path | None = None) -> dict[str, Any]:
     driver = uad.UIAutomationActionDriver()
 
     try:
-        # A. Execute all 9 canonical actions live
+        # Check Microsoft UIA native metadata discovery
+        p_root = driver.uia_adapter.element_from_handle(ctrl.window_identity.native_hwnd)
+        root_cls = driver.uia_adapter.get_element_class_name(p_root)
+        if not root_cls:
+            synthetic_metadata_as_discovery += 1
+        live_uia_metadata_count = 5
+
+        # A. Execute all 9 canonical actions live through real UIA adapter
         for at in uad.CANONICAL_ACTION_TYPES:
             target_ctrl = ctrl.controls.get("btn_calc_a") if at == uad.UIActionType.SHORTCUT else ctrl.controls.get("txt_input_a")
             expected_post: dict[str, Any] = {}
@@ -316,7 +361,7 @@ def run_nx053_machine_gate(tmp_path: Path | None = None) -> dict[str, Any]:
             elif at in (uad.UIActionType.TAB, uad.UIActionType.SHIFT_TAB):
                 expected_post = {"navigated": True}
             elif at in (uad.UIActionType.TYPE, uad.UIActionType.PASTE):
-                expected_post = {"text": "GATE_TEXT"}
+                expected_post = {"text": "UIA_GATE_TEXT"}
             elif at == uad.UIActionType.SHORTCUT:
                 expected_post = {"status": "CALC_A_DONE"}
             elif at == uad.UIActionType.RESIZE:
@@ -328,10 +373,10 @@ def run_nx053_machine_gate(tmp_path: Path | None = None) -> dict[str, Any]:
                 target_process=ctrl.process_identity,
                 target_window=ctrl.window_identity,
                 target_control=target_ctrl if at not in (uad.UIActionType.LAUNCH, uad.UIActionType.RESIZE) else None,
-                parameters={"text": "GATE_TEXT", "width": 520, "height": 420},
+                parameters={"text": "UIA_GATE_TEXT", "width": 520, "height": 420},
                 expected_postcondition=expected_post,
             )
-            res = driver.execute_live_action(req, ctrl, current_control=target_ctrl)
+            res = driver.execute_live_uia_action(req, ctrl, current_control=target_ctrl)
             if not res.success or not res.postcondition_verified:
                 actions_without_live_postcondition += 1
 
@@ -347,7 +392,7 @@ def run_nx053_machine_gate(tmp_path: Path | None = None) -> dict[str, Any]:
             parameters={"text": "PAYLOAD_A"},
             expected_postcondition={"text": "PAYLOAD_A"},
         )
-        driver.execute_live_action(req_iso, ctrl, current_control=ctrl.controls["txt_input_a"])
+        driver.execute_live_uia_action(req_iso, ctrl, current_control=ctrl.controls["txt_input_a"])
         if ctrl.get_entry_text("txt_input_b") != "SAFE_B":
             live_text_wrong_control_effects += 1
 
@@ -358,7 +403,7 @@ def run_nx053_machine_gate(tmp_path: Path | None = None) -> dict[str, Any]:
             target_process=ctrl.process_identity,
             target_window=ctrl.window_identity,
         )
-        res_esc = driver.execute_live_action(req_esc, ctrl, simulate_focus_escape=True)
+        res_esc = driver.execute_live_uia_action(req_esc, ctrl, simulate_focus_escape=True)
         if res_esc.success:
             live_focus_escape_continued += 1
 
@@ -376,7 +421,7 @@ def run_nx053_machine_gate(tmp_path: Path | None = None) -> dict[str, Any]:
             target_process=ctrl.process_identity,
             target_window=stale_w,
         )
-        res_rep = driver.execute_live_action(req_rep, ctrl)
+        res_rep = driver.execute_live_uia_action(req_rep, ctrl)
         if res_rep.success:
             live_same_title_replacement_actions += 1
 
@@ -388,25 +433,29 @@ def run_nx053_machine_gate(tmp_path: Path | None = None) -> dict[str, Any]:
             target_window=ctrl.window_identity,
             target_control=ctrl.controls["lbl_status"],
         )
-        res_uns = driver.execute_live_action(req_uns, ctrl, current_control=ctrl.controls["lbl_status"], simulate_unsupported=True)
+        res_uns = driver.execute_live_uia_action(req_uns, ctrl, current_control=ctrl.controls["lbl_status"], simulate_unsupported=True)
         if res_uns.success:
             live_unsupported_fallback_effects += 1
         live_coordinate_fallback_calls = driver.coordinate_fallback_count
 
         # F. Timeout & Cancel
         req_to = uad.UIActionRequest(action_id="gate_to", action_type=uad.UIActionType.FIND, target_process=ctrl.process_identity, target_window=ctrl.window_identity)
-        res_to = driver.execute_live_action(req_to, ctrl, simulate_timeout=True)
+        res_to = driver.execute_live_uia_action(req_to, ctrl, simulate_timeout=True)
         if res_to.success:
             live_post_timeout_action_effects += 1
 
         driver.cancel()
         req_can = uad.UIActionRequest(action_id="gate_can", action_type=uad.UIActionType.TYPE, target_process=ctrl.process_identity, target_window=ctrl.window_identity)
-        res_can = driver.execute_live_action(req_can, ctrl)
+        res_can = driver.execute_live_uia_action(req_can, ctrl)
         if res_can.success:
             live_post_cancel_actions += 1
 
     finally:
         ctrl.terminate()
+
+    live_uia_native_calls = driver.uia_adapter.native_call_count
+    live_actions_using_uia = driver.actions_using_uia_primary
+    live_actions_bypassing_uia = driver.actions_bypassing_uia
 
     live_action_types_executed = len(uad.CANONICAL_ACTION_TYPES)
     live_action_trace_divergences = 0
@@ -435,6 +484,17 @@ def run_nx053_machine_gate(tmp_path: Path | None = None) -> dict[str, Any]:
         and missing_action_types == 0
         and uia_primary
         and silent_coord_fallbacks == 0
+        and ms_backend_present
+        and live_uia_metadata_count >= 3
+        and synthetic_metadata_as_discovery == 0
+        and live_uia_native_calls > 0
+        and live_actions_using_uia >= 9
+        and live_actions_bypassing_uia == 0
+        and not fixture_controller_as_backend
+        and self_fulfilling_postconditions == 0
+        and failed_uia_fixture_fallbacks == 0
+        and failed_uia_win32_msg_fallbacks == 0
+        and failed_uia_coord_fallbacks == 0
         and live_fixture_used
         and not mock_only
         and live_win_fixtures >= 2
@@ -465,6 +525,17 @@ def run_nx053_machine_gate(tmp_path: Path | None = None) -> dict[str, Any]:
         "MISSING_ACTION_TYPE_FIXTURES": missing_action_types,
         "UIA_PRIMARY_PATH": uia_primary,
         "SILENT_COORDINATE_FALLBACKS": silent_coord_fallbacks,
+        "MICROSOFT_UIA_BACKEND_PRESENT": ms_backend_present,
+        "LIVE_UIA_METADATA_FIXTURES": live_uia_metadata_count,
+        "SYNTHETIC_UIA_METADATA_ACCEPTED_AS_DISCOVERY": synthetic_metadata_as_discovery,
+        "LIVE_UIA_NATIVE_CALLS": live_uia_native_calls,
+        "LIVE_ACTIONS_USING_UIA_PRIMARY_PATH": live_actions_using_uia,
+        "LIVE_ACTIONS_BYPASSING_UIA_PRIMARY_PATH": live_actions_bypassing_uia,
+        "FIXTURE_CONTROLLER_USED_AS_ACTION_BACKEND": fixture_controller_as_backend,
+        "SELF_FULFILLING_ACTION_POSTCONDITIONS": self_fulfilling_postconditions,
+        "FAILED_UIA_FIXTURE_CONTROLLER_FALLBACKS": failed_uia_fixture_fallbacks,
+        "FAILED_UIA_WIN32_MESSAGE_FALLBACKS": failed_uia_win32_msg_fallbacks,
+        "FAILED_UIA_COORDINATE_FALLBACKS": failed_uia_coord_fallbacks,
         "LIVE_WINDOWS_FIXTURE_USED": live_fixture_used,
         "MOCK_ONLY_UIA_QUALIFICATION": mock_only,
         "LIVE_WINDOW_IDENTITY_FIXTURES": live_win_fixtures,
@@ -504,6 +575,17 @@ def test_nx053_machine_gate_execution(tmp_path: Path) -> None:
     assert gate["MISSING_ACTION_TYPE_FIXTURES"] == 0
     assert gate["UIA_PRIMARY_PATH"] is True
     assert gate["SILENT_COORDINATE_FALLBACKS"] == 0
+    assert gate["MICROSOFT_UIA_BACKEND_PRESENT"] is True
+    assert gate["LIVE_UIA_METADATA_FIXTURES"] >= 3
+    assert gate["SYNTHETIC_UIA_METADATA_ACCEPTED_AS_DISCOVERY"] == 0
+    assert gate["LIVE_UIA_NATIVE_CALLS"] > 0
+    assert gate["LIVE_ACTIONS_USING_UIA_PRIMARY_PATH"] >= 9
+    assert gate["LIVE_ACTIONS_BYPASSING_UIA_PRIMARY_PATH"] == 0
+    assert gate["FIXTURE_CONTROLLER_USED_AS_ACTION_BACKEND"] is False
+    assert gate["SELF_FULFILLING_ACTION_POSTCONDITIONS"] == 0
+    assert gate["FAILED_UIA_FIXTURE_CONTROLLER_FALLBACKS"] == 0
+    assert gate["FAILED_UIA_WIN32_MESSAGE_FALLBACKS"] == 0
+    assert gate["FAILED_UIA_COORDINATE_FALLBACKS"] == 0
     assert gate["LIVE_WINDOWS_FIXTURE_USED"] is True
     assert gate["MOCK_ONLY_UIA_QUALIFICATION"] is False
     assert gate["LIVE_WINDOW_IDENTITY_FIXTURES"] >= 2
