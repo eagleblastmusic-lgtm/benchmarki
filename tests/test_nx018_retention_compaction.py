@@ -17,6 +17,7 @@ Tests:
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import sqlite3
 import subprocess
@@ -34,6 +35,7 @@ from bdb_vnext.retention_compaction import (
     ManagedEntity,
     RetentionClass,
     RetentionCompactionController,
+    compute_million_event_artifact_digest,
     run_million_event_synthetic_harness,
 )
 
@@ -340,6 +342,8 @@ def inspect_nx018_gate_for_hardcoded_results() -> tuple[bool, list[str]]:
         "LOST_EVENTS",
         "DUPLICATE_EVENTS",
         "HALT_AT_LEGACY_LIMIT",
+        "MILLION_EVENT_ARTIFACT_SOURCE_BOUND",
+        "MILLION_EVENT_ARTIFACT_DIGEST_VALID",
         "NX018_STATUS",
     }
 
@@ -435,29 +439,7 @@ def run_nx018_machine_gate() -> dict[str, Any]:
     ARCHIVE_RESTORE_CHAIN_VALID = restore_chain_ok
     restore_conn.close()
 
-    # 7. Million-event report verification
-    if report_file.exists():
-        million_rep = json.loads(report_file.read_text(encoding="utf-8"))
-        SYNTHETIC_EVENTS_REQUESTED = int(million_rep.get("synthetic_events_requested", 0))
-        SYNTHETIC_EVENTS_ACCOUNTED = int(million_rep.get("synthetic_events_accounted", 0))
-        LOST_EVENTS = int(million_rep.get("lost_events", 0))
-        DUPLICATE_EVENTS = int(million_rep.get("duplicate_events", 0))
-    else:
-        # Fallback inline execution if report file missing
-        m_res = run_million_event_synthetic_harness(test_conn, "p-gate-m", total_events=100_000, batch_size=20_000)
-        SYNTHETIC_EVENTS_REQUESTED = int(m_res["synthetic_events_requested"])
-        SYNTHETIC_EVENTS_ACCOUNTED = int(m_res["synthetic_events_accounted"])
-        LOST_EVENTS = int(m_res["lost_events"])
-        DUPLICATE_EVENTS = int(m_res["duplicate_events"])
-
-    # 8. Halt at legacy limit check
-    HALT_AT_LEGACY_LIMIT = bool(SYNTHETIC_EVENTS_ACCOUNTED <= 2048)
-
-    # 9. AST check
-    no_hardcoded, hardcoded_fields = inspect_nx018_gate_for_hardcoded_results()
-    NO_HARDCODED_GATE_RESULTS = no_hardcoded
-
-    # 10. Source binding check
+    # 7. Source binding check
     try:
         head_proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo_root), capture_output=True, text=True, check=True)
         head_sha = head_proc.stdout.strip()
@@ -479,6 +461,53 @@ def run_nx018_machine_gate() -> dict[str, Any]:
         source_bound_ok = False
 
     SOURCE_BOUND_MACHINE_GATE = ("PASS" if source_bound_ok else "FAIL")
+
+    # 8. Million-event report verification & source binding
+    million_rep: dict[str, Any] = {}
+    if report_file.exists():
+        try:
+            million_rep = json.loads(report_file.read_text(encoding="utf-8"))
+        except Exception:
+            million_rep = {}
+
+    SYNTHETIC_EVENTS_REQUESTED = int(million_rep.get("SYNTHETIC_EVENTS_REQUESTED", million_rep.get("synthetic_events_requested", 0)))
+    SYNTHETIC_EVENTS_ACCOUNTED = int(million_rep.get("SYNTHETIC_EVENTS_ACCOUNTED", million_rep.get("synthetic_events_accounted", 0)))
+    LOST_EVENTS = int(million_rep.get("LOST_EVENTS", million_rep.get("lost_events", 0)))
+    DUPLICATE_EVENTS = int(million_rep.get("DUPLICATE_EVENTS", million_rep.get("duplicate_events", 0)))
+
+    art_head = str(million_rep.get("SOURCE_HEAD", ""))
+    art_tree = str(million_rep.get("SOURCE_TREE", ""))
+    art_script_hash = str(million_rep.get("HARNESS_SCRIPT_SHA256", ""))
+    art_impl_hash = str(million_rep.get("NX018_IMPLEMENTATION_SHA256", ""))
+    art_digest = str(million_rep.get("MILLION_EVENT_ARTIFACT_DIGEST", ""))
+    expected_art_digest = compute_million_event_artifact_digest(million_rep) if million_rep else ""
+
+    script_file = repo_root / "scripts" / "run_million_event_harness.py"
+    impl_file = repo_root / "bdb_vnext" / "retention_compaction.py"
+    cur_script_sha = hashlib.sha256(script_file.read_bytes()).hexdigest() if script_file.exists() else ""
+    cur_impl_sha = hashlib.sha256(impl_file.read_bytes()).hexdigest() if impl_file.exists() else ""
+
+    MILLION_EVENT_ARTIFACT_SOURCE_BOUND = bool(
+        len(million_rep) > 0
+        and len(art_head) == 40
+        and art_head == head_sha
+        and len(art_tree) == 40
+        and art_tree == tree_sha
+        and art_script_hash == cur_script_sha
+        and art_impl_hash == cur_impl_sha
+    )
+    MILLION_EVENT_ARTIFACT_DIGEST_VALID = bool(
+        len(million_rep) > 0
+        and art_digest == expected_art_digest
+        and len(art_digest) > 10
+    )
+
+    # 9. Halt at legacy limit check
+    HALT_AT_LEGACY_LIMIT = bool(SYNTHETIC_EVENTS_ACCOUNTED <= 2048)
+
+    # 10. AST check
+    no_hardcoded, hardcoded_fields = inspect_nx018_gate_for_hardcoded_results()
+    NO_HARDCODED_GATE_RESULTS = no_hardcoded
 
     all_pass = (
         RETENTION_POLICY_VERSION_EXPLICIT is True
@@ -505,6 +534,8 @@ def run_nx018_machine_gate() -> dict[str, Any]:
         and LOST_EVENTS == 0
         and DUPLICATE_EVENTS == 0
         and HALT_AT_LEGACY_LIMIT is False
+        and MILLION_EVENT_ARTIFACT_SOURCE_BOUND is True
+        and MILLION_EVENT_ARTIFACT_DIGEST_VALID is True
         and NO_HARDCODED_GATE_RESULTS is True
         and SOURCE_BOUND_MACHINE_GATE == "PASS"
     )
@@ -539,6 +570,8 @@ def run_nx018_machine_gate() -> dict[str, Any]:
         "LOST_EVENTS": LOST_EVENTS,
         "DUPLICATE_EVENTS": DUPLICATE_EVENTS,
         "HALT_AT_LEGACY_LIMIT": HALT_AT_LEGACY_LIMIT,
+        "MILLION_EVENT_ARTIFACT_SOURCE_BOUND": MILLION_EVENT_ARTIFACT_SOURCE_BOUND,
+        "MILLION_EVENT_ARTIFACT_DIGEST_VALID": MILLION_EVENT_ARTIFACT_DIGEST_VALID,
         "HARDCODED_GATE_RESULT_FIELDS": hardcoded_fields,
         "NO_HARDCODED_GATE_RESULTS": NO_HARDCODED_GATE_RESULTS,
         "SOURCE_HEAD": head_sha,
@@ -577,6 +610,8 @@ def test_nx018_machine_gate_execution() -> None:
     assert gate["LOST_EVENTS"] == 0
     assert gate["DUPLICATE_EVENTS"] == 0
     assert gate["HALT_AT_LEGACY_LIMIT"] is False
+    assert gate["MILLION_EVENT_ARTIFACT_SOURCE_BOUND"] is True
+    assert gate["MILLION_EVENT_ARTIFACT_DIGEST_VALID"] is True
     assert gate["NO_HARDCODED_GATE_RESULTS"] is True
     assert gate["SOURCE_BOUND_MACHINE_GATE"] == "PASS"
     assert gate["NX018_STATUS"] == "PASS"

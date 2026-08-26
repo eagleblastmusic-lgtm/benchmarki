@@ -1091,3 +1091,10 @@ def run_million_event_synthetic_harness(
         "elapsed_seconds": round(elapsed, 2),
         "events_per_second": round(total_events / max(0.001, elapsed), 0),
     }
+
+
+def compute_million_event_artifact_digest(data: Mapping[str, Any]) -> str:
+    """Computes canonical SHA-256 digest of million-event artifact payload."""
+    payload = {k: v for k, v in data.items() if k != "MILLION_EVENT_ARTIFACT_DIGEST"}
+    canon_str = _canonical_json_str(payload)
+    return f"sha256:{_sha256_hex(canon_str)}"
