@@ -104,6 +104,17 @@ AUTHORITY_INVENTORY: tuple[AuthorityFact, ...] = (
         v2_table="launch_outbox",
     ),
     AuthorityFact(
+        fact_name="send_intent",
+        current_owner="ProjectMemoryStoreV2 (durable continuation outbox)",
+        current_storage="memory.db (send_intents)",
+        mutability="MUTABLE",
+        identity="intent_id / intent_key",
+        revision_generation_rule="monotonic state_revision; PREPARED -> ACKNOWLEDGED or terminal fence",
+        relationships="FK to projects(project_id), FK to execution_bindings(execution_binding_id)",
+        v2_owner="ProjectMemoryStoreV2",
+        v2_table="send_intents",
+    ),
+    AuthorityFact(
         fact_name="milestone_run",
         current_owner="ProjectMemoryStore (state.execution.milestone_runs)",
         current_storage="project-memory/{id}/state.json",
@@ -453,6 +464,45 @@ CREATE TABLE IF NOT EXISTS launch_outbox (
     FOREIGN KEY (execution_binding_id) REFERENCES execution_bindings(execution_binding_id) ON DELETE RESTRICT,
     FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE RESTRICT
 );
+
+-- 10b. Durable Continuation Send Intent (NX-027)
+CREATE TABLE IF NOT EXISTS send_intents (
+    intent_id TEXT PRIMARY KEY,
+    intent_key TEXT NOT NULL UNIQUE,
+    project_id TEXT NOT NULL,
+    continuation_id TEXT NOT NULL,
+    packet_digest TEXT NOT NULL,
+    lease_id TEXT NOT NULL,
+    lease_owner_token_hash TEXT NOT NULL,
+    lease_generation INTEGER NOT NULL CHECK(lease_generation >= 1),
+    scope_epoch INTEGER NOT NULL CHECK(scope_epoch >= 1),
+    run_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    execution_binding_id TEXT NOT NULL,
+    expected_repo_head_before TEXT NOT NULL,
+    conversation_binding_id TEXT,
+    conversation_binding_proof TEXT,
+    message_digest TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    intent_generation INTEGER NOT NULL DEFAULT 1 CHECK(intent_generation >= 1),
+    state_revision INTEGER NOT NULL DEFAULT 1 CHECK(state_revision >= 1),
+    status TEXT NOT NULL CHECK(status IN (
+        'PREPARED', 'SEND_ALLOWED', 'PHYSICAL_SEND_ATTEMPTED',
+        'SEND_CONFIRMED', 'ACKNOWLEDGED', 'UNCERTAIN',
+        'RECONCILIATION_REQUIRED', 'CANCELLED', 'FENCED'
+    )),
+    prepared_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    physical_attempted_at TEXT,
+    confirmed_at TEXT,
+    acknowledged_at TEXT,
+    delivery_evidence_json TEXT NOT NULL DEFAULT '{}',
+    uncertainty_reason TEXT,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE RESTRICT,
+    FOREIGN KEY (execution_binding_id) REFERENCES execution_bindings(execution_binding_id) ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS idx_send_intents_project_state ON send_intents(project_id, status);
+CREATE INDEX IF NOT EXISTS idx_send_intents_continuation ON send_intents(project_id, continuation_id, scope_epoch);
 
 -- 11. Decisions
 CREATE TABLE IF NOT EXISTS decisions (
@@ -861,6 +911,7 @@ V1_TO_V2_FIELD_MAPPING: dict[str, dict[str, str]] = {
         "execution.milestone_runs": "runs (relational rows)",
         "execution.milestone_auto": "scopes (relational rows)",
         "execution.launch_outbox": "launch_outbox (relational rows)",
+        "execution.send_intents": "send_intents (relational rows)",
         "execution.checkpoints": "checkpoints (relational rows)",
         "execution.attempts[].failure_code": "failures.failure_code (relational rows)",
         "execution.attempts[].evidence_refs": "evidence_records.evidence_ref (relational rows)",
@@ -937,6 +988,7 @@ REQUIRED_LOGICAL_ENTITIES: tuple[str, ...] = (
     "attempt",
     "checkpoint",
     "outbox",
+    "send_intent",
     "failure",
     "evidence",
     "lease",
@@ -953,6 +1005,7 @@ ENTITY_TABLE_MAPPING: dict[str, str] = {
     "attempt": "attempts",
     "checkpoint": "checkpoints",
     "outbox": "launch_outbox",
+    "send_intent": "send_intents",
     "failure": "failures",
     "evidence": "evidence_records",
     "lease": "leases",

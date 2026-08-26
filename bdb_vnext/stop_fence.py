@@ -278,6 +278,33 @@ def execute_stop_transaction(
                 (now_iso, project_id),
             )
 
+    # NX-027: durable continuation intents which have not crossed the physical
+    # send boundary are fenced in the same canonical STOP transaction.  An
+    # intent already marked PHYSICAL_SEND_ATTEMPTED is deliberately left for
+    # evidence reconciliation because the effect may already have happened.
+    has_send_intents = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='send_intents'"
+    ).fetchone()
+    if has_send_intents:
+        intent_rows = conn.execute(
+            """
+            SELECT intent_id FROM send_intents
+            WHERE project_id = ? AND status IN ('PREPARED', 'SEND_ALLOWED')
+            """,
+            (project_id,),
+        ).fetchall()
+        cancelled_ids_list.extend(f"send-intent:{row['intent_id']}" for row in intent_rows)
+        if intent_rows:
+            conn.execute(
+                """
+                UPDATE send_intents
+                SET status = 'FENCED', state_revision = state_revision + 1,
+                    updated_at = ?, uncertainty_reason = 'STOP_FENCE'
+                WHERE project_id = ? AND status IN ('PREPARED', 'SEND_ALLOWED')
+                """,
+                (now_iso, project_id),
+            )
+
     fence_id = f"fence-{project_id}-ep{canonical_epoch}-{uuid.uuid4().hex[:8]}"
     committed_rev = source_rev + 1
     cancelled_tuple = tuple(cancelled_ids_list)

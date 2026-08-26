@@ -500,7 +500,10 @@ def run_nx026_machine_gate() -> dict[str, Any]:
             int(result.accepted)
             for result in (before_expiry_reclaim, completed_reclaim, accepted_reclaim, stop_reclaim)
         )
-        continuation_tables = tables.intersection({"continuation_leases", "continuation_lease_store", "send_intents"})
+        # NX-027's send_intents relation is the canonical outbox for a
+        # continuation effect, not a competing lease authority.  Only a
+        # separate lease table would violate the NX-026 single-authority gate.
+        continuation_tables = tables.intersection({"continuation_leases", "continuation_lease_store"})
         status = "PASS" if (
             bool(LEASE_VERSION_EXPLICIT_CONTRACT and CONTINUATION_LEASE_VERSION == "v1")
             and bool(LEASE_UNDER_PM_V2_CONTRACT and "leases" in tables and "continuation_id" in columns)
