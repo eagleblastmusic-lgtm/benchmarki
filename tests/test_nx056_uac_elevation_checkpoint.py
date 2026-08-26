@@ -7,7 +7,9 @@ import hashlib
 import inspect
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Iterable
@@ -610,71 +612,65 @@ def run_nx056_machine_gate() -> dict[str, Any]:
         rc_head == 0 and rc_tree == 0 and rc_status == 0 and not status_out and rc_diff == 0 and not diff_out
     )
 
-    tmp_dir = ROOT / ".tmp_nx056_gate"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
+    tmp_dir = Path(tempfile.mkdtemp(prefix="nx056_gate_"))
 
-    privilege_fixtures = 0
-    accept_fixtures = 0
-    deny_fixtures = 0
-    cancel_fixtures = 0
-    rechecks = 0
+    try:
+        privilege_fixtures = 0
+        accept_fixtures = 0
+        deny_fixtures = 0
+        cancel_fixtures = 0
+        rechecks = 0
 
-    # Test privilege required evaluation
-    req = _sample_request(head=source_head, tree=source_tree)
-    n1, d1, _ = uac.UACElevationCheckpointManager.evaluate_elevation_need(req, ep.PolicyEffectClass.ELEVATED)
-    n2, d2, _ = uac.UACElevationCheckpointManager.evaluate_elevation_need(req, ep.PolicyEffectClass.DESTRUCTIVE)
-    n3, d3, _ = uac.UACElevationCheckpointManager.evaluate_elevation_need(req, ep.PolicyEffectClass.READ_ONLY)
-    if n1 and d1 == uac.ElevationDisposition.PRIVILEGE_REQUIRED:
-        privilege_fixtures += 1
-    if n2 and d2 == uac.ElevationDisposition.PRIVILEGE_REQUIRED:
-        privilege_fixtures += 1
-    if not n3 and d3 == uac.ElevationDisposition.ELEVATION_HANDOFF_READY:
-        privilege_fixtures += 1
+        # Test privilege required evaluation
+        req = _sample_request(head=source_head, tree=source_tree)
+        n1, d1, _ = uac.UACElevationCheckpointManager.evaluate_elevation_need(req, ep.PolicyEffectClass.ELEVATED)
+        n2, d2, _ = uac.UACElevationCheckpointManager.evaluate_elevation_need(req, ep.PolicyEffectClass.DESTRUCTIVE)
+        n3, d3, _ = uac.UACElevationCheckpointManager.evaluate_elevation_need(req, ep.PolicyEffectClass.READ_ONLY)
+        if n1 and d1 == uac.ElevationDisposition.PRIVILEGE_REQUIRED:
+            privilege_fixtures += 1
+        if n2 and d2 == uac.ElevationDisposition.PRIVILEGE_REQUIRED:
+            privilege_fixtures += 1
+        if not n3 and d3 == uac.ElevationDisposition.ELEVATION_HANDOFF_READY:
+            privilege_fixtures += 1
 
-    # Test accept / deny / cancel
-    mgr = uac.UACElevationCheckpointManager(storage_dir=tmp_dir)
-    exe_path = str(ROOT / "tests" / "fixtures" / "app.exe")
-    exe_hash = "sha256:" + hashlib.sha256(b"gate_binary").hexdigest()
+        # Test accept / deny / cancel
+        mgr = uac.UACElevationCheckpointManager(storage_dir=tmp_dir)
+        exe_path = str(ROOT / "tests" / "fixtures" / "app.exe")
+        exe_hash = "sha256:" + hashlib.sha256(b"gate_binary").hexdigest()
 
-    cp_acc = mgr.create_checkpoint("gate_cp:1", "p", "r", "t", "b", req, ep.PolicyEffectClass.ELEVATED, "reason", exe_path, exe_hash)
-    mgr.submit_operator_outcome("gate_cp:1", uac.ElevationOutcome.ACCEPTED)
-    if mgr.checkpoints["gate_cp:1"].operator_outcome == uac.ElevationOutcome.ACCEPTED:
-        accept_fixtures += 1
+        cp_acc = mgr.create_checkpoint("gate_cp:1", "p", "r", "t", "b", req, ep.PolicyEffectClass.ELEVATED, "reason", exe_path, exe_hash)
+        mgr.submit_operator_outcome("gate_cp:1", uac.ElevationOutcome.ACCEPTED)
+        if mgr.checkpoints["gate_cp:1"].operator_outcome == uac.ElevationOutcome.ACCEPTED:
+            accept_fixtures += 1
 
-    cp_den = mgr.create_checkpoint("gate_cp:2", "p", "r", "t", "b", req, ep.PolicyEffectClass.ELEVATED, "reason", exe_path, exe_hash)
-    mgr.submit_operator_outcome("gate_cp:2", uac.ElevationOutcome.DENIED)
-    if mgr.checkpoints["gate_cp:2"].operator_outcome == uac.ElevationOutcome.DENIED:
-        deny_fixtures += 1
+        cp_den = mgr.create_checkpoint("gate_cp:2", "p", "r", "t", "b", req, ep.PolicyEffectClass.ELEVATED, "reason", exe_path, exe_hash)
+        mgr.submit_operator_outcome("gate_cp:2", uac.ElevationOutcome.DENIED)
+        if mgr.checkpoints["gate_cp:2"].operator_outcome == uac.ElevationOutcome.DENIED:
+            deny_fixtures += 1
 
-    cp_can = mgr.create_checkpoint("gate_cp:3", "p", "r", "t", "b", req, ep.PolicyEffectClass.ELEVATED, "reason", exe_path, exe_hash)
-    mgr.submit_operator_outcome("gate_cp:3", uac.ElevationOutcome.CANCELLED)
-    if mgr.checkpoints["gate_cp:3"].operator_outcome == uac.ElevationOutcome.CANCELLED:
-        cancel_fixtures += 1
+        cp_can = mgr.create_checkpoint("gate_cp:3", "p", "r", "t", "b", req, ep.PolicyEffectClass.ELEVATED, "reason", exe_path, exe_hash)
+        mgr.submit_operator_outcome("gate_cp:3", uac.ElevationOutcome.CANCELLED)
+        if mgr.checkpoints["gate_cp:3"].operator_outcome == uac.ElevationOutcome.CANCELLED:
+            cancel_fixtures += 1
 
-    # Post elevation identity rechecks
-    proc_ok = wwc.ProcessIdentity(exe_path, exe_hash, 9999, time.time() + 1.0)
-    ok_v, _, _ = mgr.verify_and_bind_post_elevation_process("gate_cp:1", proc_ok, source_head, source_tree, req)
-    if ok_v:
-        rechecks += 1
+        # Post elevation identity rechecks
+        proc_ok = wwc.ProcessIdentity(exe_path, exe_hash, 9999, time.time() + 1.0)
+        ok_v, _, _ = mgr.verify_and_bind_post_elevation_process("gate_cp:1", proc_ok, source_head, source_tree, req)
+        if ok_v:
+            rechecks += 1
 
-    # Wrong process recheck
-    proc_wrong = wwc.ProcessIdentity(exe_path, "sha256:" + "f" * 64, 9998, time.time() + 1.0)
-    cp_acc2 = mgr.create_checkpoint("gate_cp:4", "p", "r", "t", "b", req, ep.PolicyEffectClass.ELEVATED, "reason", exe_path, exe_hash)
-    mgr.submit_operator_outcome("gate_cp:4", uac.ElevationOutcome.ACCEPTED)
-    ok_wrong, _, _ = mgr.verify_and_bind_post_elevation_process("gate_cp:4", proc_wrong, source_head, source_tree, req)
-    if not ok_wrong:
-        rechecks += 1
+        # Wrong process recheck
+        proc_wrong = wwc.ProcessIdentity(exe_path, "sha256:" + "f" * 64, 9998, time.time() + 1.0)
+        cp_acc2 = mgr.create_checkpoint("gate_cp:4", "p", "r", "t", "b", req, ep.PolicyEffectClass.ELEVATED, "reason", exe_path, exe_hash)
+        mgr.submit_operator_outcome("gate_cp:4", uac.ElevationOutcome.ACCEPTED)
+        ok_wrong, _, _ = mgr.verify_and_bind_post_elevation_process("gate_cp:4", proc_wrong, source_head, source_tree, req)
+        if not ok_wrong:
+            rechecks += 1
+
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
     hardcoded = _hardcoded_gate_fields()
-
-    # Clean up tmp
-    try:
-        for f in (tmp_dir / "checkpoints_uac").glob("*.json"):
-            f.unlink(missing_ok=True)
-        (tmp_dir / "checkpoints_uac").rmdir()
-        tmp_dir.rmdir()
-    except Exception:
-        pass
 
     gate_pass = bool(
         uac.ELEVATION_CHECKPOINT_VERSION_EXPLICIT

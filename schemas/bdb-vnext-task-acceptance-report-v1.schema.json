@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-task-acceptance-report-v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "version",
+    "report_id",
+    "project_id",
+    "run_id",
+    "task_id",
+    "binding_id",
+    "source_head",
+    "source_tree",
+    "criterion_set_digest",
+    "criterion_results",
+    "overall_disposition",
+    "machine_pass_eligible",
+    "operator_qualification_present",
+    "created_at_epoch",
+    "report_digest"
+  ],
+  "properties": {
+    "schema": {"const": "bdb-vnext-task-acceptance-report-v1"},
+    "version": {"type": "string"},
+    "report_id": {"type": "string"},
+    "project_id": {"type": "string"},
+    "run_id": {"type": "string"},
+    "task_id": {"type": "string"},
+    "binding_id": {"type": "string"},
+    "source_head": {"type": "string"},
+    "source_tree": {"type": "string"},
+    "criterion_set_digest": {"type": "string"},
+    "criterion_results": {
+      "type": "array",
+      "items": {"type": "object"}
+    },
+    "overall_disposition": {"type": "string"},
+    "machine_pass_eligible": {"type": "boolean"},
+    "operator_qualification_present": {"type": "boolean"},
+    "created_at_epoch": {"type": "number"},
+    "report_digest": {"type": "string"}
+  },
+  "additionalProperties": false
+}
