@@ -3,7 +3,7 @@
     "RUNSPACE",
     "FRAMED_PWSH"
   ],
-  "decision_artifact_digest": "sha256:8dfdced19e850d7428d22f5e4a6a156cd4bc85c9e5d55252563f5764aa00a64a",
+  "decision_artifact_digest": "sha256:a2df6f67f2ea2411f211999af85a399406b869025e9f9af887d4ec915e64437d",
   "framed_pwsh_safety_floor": "PASS",
   "known_limitations": [
     "Process startup overhead on new session initialization",
@@ -20,8 +20,8 @@
   "schema": "bdb-vnext-powershell-backend-spike-v1",
   "selected_backend": "FRAMED_PWSH",
   "selection_reason": "Runspace failed criteria ['packaging_feasibility']; fallback to FRAMED_PWSH per S-015",
-  "source_head": "a9f0c4486df853971d40a435d9d05ad94a0f6679",
-  "source_tree": "c452462f46a496e31f5261c38a6e16401dc8c42f",
+  "source_head": "78063b16ba87e75a3cd7b315c1f863601592bfa6",
+  "source_tree": "2d0ee29b8ededf8981b1f6b3f66632eb8ccd3d92",
   "threat_matrix_summary": [
     {
       "candidate": "BOTH",
