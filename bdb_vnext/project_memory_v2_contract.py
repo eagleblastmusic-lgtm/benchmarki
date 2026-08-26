@@ -656,6 +656,7 @@ CREATE TABLE IF NOT EXISTS scope_cursors (
     stop_requested_at TEXT,
     stop_reason TEXT,
     explanation_json TEXT NOT NULL DEFAULT '{}',
+    scope_selection_explicit INTEGER NOT NULL DEFAULT 0 CHECK(scope_selection_explicit IN (0, 1)),
     updated_at TEXT NOT NULL,
     FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE RESTRICT
 );
@@ -713,6 +714,7 @@ CREATE TABLE IF NOT EXISTS scope_cursors (
     stop_requested_at TEXT,
     stop_reason TEXT,
     explanation_json TEXT NOT NULL DEFAULT '{}',
+    scope_selection_explicit INTEGER NOT NULL DEFAULT 0 CHECK(scope_selection_explicit IN (0, 1)),
     updated_at TEXT NOT NULL,
     FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE RESTRICT
 );

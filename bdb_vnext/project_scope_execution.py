@@ -206,6 +206,7 @@ class ProjectScopeCoordinator:
             stop_reason=cursor.stop_reason,
             explanation_json=cursor.explanation_json,
             updated_at=_now_iso(),
+            scope_selection_explicit=cursor.scope_selection_explicit,
         )
         orch.update_cursor_cas(updated_cursor, cursor.state_revision)
 
@@ -455,6 +456,7 @@ class ProjectScopeCoordinator:
             stop_reason=current_cursor.stop_reason,
             explanation_json=json.dumps({"transition": f"{cur_ms_id}->{next_ms_id}", "task": first_tid}),
             updated_at=_now_iso(),
+            scope_selection_explicit=current_cursor.scope_selection_explicit,
         )
         orch.update_cursor_cas(new_cursor, current_cursor.state_revision)
 

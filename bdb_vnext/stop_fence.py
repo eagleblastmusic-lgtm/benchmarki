@@ -448,6 +448,11 @@ def execute_resume_transaction(
     new_epoch = prior_epoch + 1
     new_rev = source_rev + 1
     run_id = new_run_id or cursor_row["run_id"]
+    resumed_disposition = (
+        "WAITING_FOR_PLAN"
+        if cursor_row["disposition"] == "WAITING_FOR_PLAN"
+        else "INITIALIZED"
+    )
 
     conn.execute(
         """
@@ -455,14 +460,14 @@ def execute_resume_transaction(
         SET run_id = ?,
             scope_epoch = ?,
             state_revision = ?,
-            disposition = 'INITIALIZED',
+            disposition = ?,
             status = 'ACTIVE',
             stop_requested_at = NULL,
             stop_reason = NULL,
             updated_at = ?
         WHERE project_id = ? AND state_revision = ?
         """,
-        (run_id, new_epoch, new_rev, now_iso, project_id, source_rev),
+        (run_id, new_epoch, new_rev, resumed_disposition, now_iso, project_id, source_rev),
     )
 
     # Append-only audit event for resume

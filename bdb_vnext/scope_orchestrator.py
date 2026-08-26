@@ -60,6 +60,7 @@ class ScopeCursor:
     stop_reason: str | None = None
     explanation_json: str = "{}"
     updated_at: str = field(default_factory=_now_iso)
+    scope_selection_explicit: bool = False
 
 
 @dataclass(frozen=True)
@@ -107,6 +108,51 @@ class CanonicalPlanGraph:
     plan_version: int
     milestones: tuple[PlanMilestoneNode, ...]
     tasks: tuple[PlanTaskNode, ...]
+    plan_digest: str | None = None
+
+    def canonical_document(self) -> dict[str, Any]:
+        """Return the bounded, deterministic representation of this plan graph."""
+        return {
+            "plan_identity": self.plan_identity,
+            "plan_version": self.plan_version,
+            "milestones": [
+                {
+                    "milestone_id": milestone.milestone_id,
+                    "gate_id": milestone.gate_id,
+                    "dependencies": list(milestone.dependencies),
+                    "task_ids": list(milestone.task_ids),
+                }
+                for milestone in self.milestones
+            ],
+            "tasks": [
+                {
+                    "task_id": task.task_id,
+                    "milestone_id": task.milestone_id,
+                    "dependencies": list(task.dependencies),
+                    "is_gate": task.is_gate,
+                    "requires_manual_approval": task.requires_manual_approval,
+                    "requires_policy_approval": task.requires_policy_approval,
+                }
+                for task in self.tasks
+            ],
+        }
+
+    def computed_plan_digest(self) -> str:
+        """Return a content digest for the exact graph and identity."""
+        payload = json.dumps(
+            self.canonical_document(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+    def canonical_plan_digest(self) -> str:
+        """Return the declared digest only when it matches the graph bytes."""
+        computed = self.computed_plan_digest()
+        if self.plan_digest is not None and self.plan_digest != computed:
+            raise ValueError("plan_digest does not match canonical plan graph")
+        return self.plan_digest or computed
 
     def get_task(self, task_id: str) -> PlanTaskNode | None:
         for t in self.tasks:
@@ -190,6 +236,10 @@ class ScopeOrchestrator:
             self.conn.execute("ALTER TABLE scope_cursors ADD COLUMN stop_requested_at TEXT")
         if "stop_reason" not in columns:
             self.conn.execute("ALTER TABLE scope_cursors ADD COLUMN stop_reason TEXT")
+        if "scope_selection_explicit" not in columns:
+            self.conn.execute(
+                "ALTER TABLE scope_cursors ADD COLUMN scope_selection_explicit INTEGER NOT NULL DEFAULT 0"
+            )
         self.conn.commit()
 
     def get_or_create_cursor(
@@ -198,6 +248,7 @@ class ScopeOrchestrator:
         scope: AutoScope = DEFAULT_AUTO_SCOPE,
         plan_identity: str = "plan:v1",
         plan_version: int = 1,
+        scope_selection_explicit: bool = False,
     ) -> ScopeCursor:
         row = self.conn.execute(
             "SELECT * FROM scope_cursors WHERE project_id = ?",
@@ -209,6 +260,11 @@ class ScopeOrchestrator:
             status = row["status"] if "status" in keys else "ACTIVE"
             stop_requested_at = row["stop_requested_at"] if "stop_requested_at" in keys else None
             stop_reason = row["stop_reason"] if "stop_reason" in keys else None
+            explicit_selection = bool(
+                row["scope_selection_explicit"]
+                if "scope_selection_explicit" in keys
+                else False
+            )
             return ScopeCursor(
                 cursor_id=row["cursor_id"],
                 project_id=row["project_id"],
@@ -228,6 +284,7 @@ class ScopeOrchestrator:
                 stop_reason=stop_reason,
                 explanation_json=row["explanation_json"],
                 updated_at=row["updated_at"],
+                scope_selection_explicit=explicit_selection,
             )
 
         now_iso = _now_iso()
@@ -238,10 +295,20 @@ class ScopeOrchestrator:
                 cursor_id, project_id, run_id, scope, scope_epoch,
                 current_milestone_id, current_task_id, last_accepted_task_id,
                 last_accepted_gate, plan_identity, plan_version, state_revision,
-                disposition, status, stop_requested_at, stop_reason, explanation_json, updated_at
-            ) VALUES (?, ?, ?, ?, 1, NULL, NULL, NULL, NULL, ?, ?, 1, 'INITIALIZED', 'ACTIVE', NULL, NULL, '{}', ?)
+                disposition, status, stop_requested_at, stop_reason, explanation_json,
+                scope_selection_explicit, updated_at
+            ) VALUES (?, ?, ?, ?, 1, NULL, NULL, NULL, NULL, ?, ?, 1, 'INITIALIZED', 'ACTIVE', NULL, NULL, '{}', ?, ?)
             """,
-            (cursor_id, self.project_id, run_id, scope.value, plan_identity, plan_version, now_iso),
+            (
+                cursor_id,
+                self.project_id,
+                run_id,
+                scope.value,
+                plan_identity,
+                plan_version,
+                int(scope_selection_explicit),
+                now_iso,
+            ),
         )
         self.conn.commit()
 
@@ -259,9 +326,16 @@ class ScopeOrchestrator:
             stop_requested_at=None,
             stop_reason=None,
             updated_at=now_iso,
+            scope_selection_explicit=scope_selection_explicit,
         )
 
-    def update_cursor_cas(self, cursor: ScopeCursor, expected_revision: int) -> bool:
+    def update_cursor_cas(
+        self,
+        cursor: ScopeCursor,
+        expected_revision: int,
+        *,
+        commit: bool = True,
+    ) -> bool:
         """Optimistic CAS update of durable cursor."""
         new_revision = expected_revision + 1
         now_iso = _now_iso()
@@ -284,6 +358,7 @@ class ScopeOrchestrator:
                 stop_requested_at = ?,
                 stop_reason = ?,
                 explanation_json = ?,
+                scope_selection_explicit = ?,
                 updated_at = ?
             WHERE project_id = ? AND state_revision = ?
             """,
@@ -303,6 +378,7 @@ class ScopeOrchestrator:
                 cursor.stop_requested_at,
                 cursor.stop_reason,
                 cursor.explanation_json,
+                int(cursor.scope_selection_explicit),
                 now_iso,
                 self.project_id,
                 expected_revision,
@@ -312,7 +388,8 @@ class ScopeOrchestrator:
             # Concurrency conflict / stale cursor
             return False
 
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return True
 
     def resolve_next_runnable_task(
@@ -573,6 +650,7 @@ class ScopeOrchestrator:
             stop_reason=cursor.stop_reason,
             explanation_json=json.dumps(asdict(explanation)),
             updated_at=_now_iso(),
+            scope_selection_explicit=cursor.scope_selection_explicit,
         )
 
         return decision, explanation, updated_cursor
