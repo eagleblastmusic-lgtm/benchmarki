@@ -11,6 +11,7 @@ import json
 import os
 import re
 import secrets
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -268,9 +269,22 @@ class ProjectMemoryState:
     # project state.  The execution coordinator owns its shape and keeps
     # large receipts out of this document.
     execution: Mapping[str, Any] = field(default_factory=dict)
+    revision: int = 1
 
     def to_dict(self) -> dict[str, Any]:
-        return {"schema": PROJECT_MEMORY_SCHEMA, "project_id": self.project_id, "events": [item.to_dict() for item in self.events], "decisions": [item.to_dict() for item in self.decisions], "inbox": [item.to_dict() for item in self.inbox], "risks": [item.to_dict() for item in self.risks], "technical_debt": [item.to_dict() for item in self.technical_debt], "attention": [item.to_dict() for item in self.attention], "checkpoints": [item.to_dict() for item in self.checkpoints], "execution": dict(self.execution)}
+        return {
+            "schema": PROJECT_MEMORY_SCHEMA,
+            "project_id": self.project_id,
+            "revision": self.revision,
+            "events": [item.to_dict() for item in self.events],
+            "decisions": [item.to_dict() for item in self.decisions],
+            "inbox": [item.to_dict() for item in self.inbox],
+            "risks": [item.to_dict() for item in self.risks],
+            "technical_debt": [item.to_dict() for item in self.technical_debt],
+            "attention": [item.to_dict() for item in self.attention],
+            "checkpoints": [item.to_dict() for item in self.checkpoints],
+            "execution": dict(self.execution),
+        }
 
 
 @dataclass(frozen=True)
@@ -459,6 +473,7 @@ class ProjectMemoryStore:
         self.plans = self.root / "plans"
         self.memory_path = self.root / "memory.json"
         self.current_pointer = self.plans / "current-plan.json"
+        self._thread_lock = threading.Lock()
         if self.root.exists() and self.root.is_symlink():
             _fail("memory_path_invalid", "project memory root must be a regular directory")
 
@@ -503,53 +518,94 @@ class ProjectMemoryStore:
         execution = dict(execution)
         if any(event.project_id != self.project_id for event in events) or any(event.event_id != f"{self.project_id}:e{index:06d}" for index, event in enumerate(events, 1)):
             _fail("memory_event_order_invalid", "project events must form one append-only sequence")
-        return ProjectMemoryState(self.project_id, events, decisions, inbox, risks, debt, attention, checkpoints, execution)
+        revision_raw = document.get("revision", 1)
+        try:
+            revision = int(revision_raw)
+            if revision < 1:
+                _fail("memory_revision_invalid", "revision must be >= 1")
+        except (TypeError, ValueError) as exc:
+            _fail("memory_revision_invalid", "revision must be an integer >= 1")
+        return ProjectMemoryState(self.project_id, events, decisions, inbox, risks, debt, attention, checkpoints, execution, revision=revision)
 
     def _write_state(self, state: ProjectMemoryState) -> None:
         _atomic_write(self.memory_path, state.to_dict())
 
     @contextmanager
     def _execution_lock(self) -> Iterator[None]:
-        """Bounded cross-process lock for execution transitions.
+        """Bounded cross-process and in-process lock for execution transitions.
 
-        A live lock is never overwritten.  A lock older than the bounded
+        A live lock is never overwritten. A lock older than the bounded
         transition lease is treated as a crashed writer marker and reclaimed;
         the state document itself is never deleted or repaired implicitly.
         """
-        self.root.mkdir(parents=True, exist_ok=True)
-        lock = self.root / "execution.lock"
-        descriptor: int | None = None
-        deadline = time.monotonic() + 3.0
-        while descriptor is None:
-            try:
-                descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            except FileExistsError:
+        with self._thread_lock:
+            self.root.mkdir(parents=True, exist_ok=True)
+            lock = self.root / "execution.lock"
+            descriptor: int | None = None
+            deadline = time.monotonic() + 5.0
+            backoff = 0.002
+            owner_token = uuid.uuid4().hex
+            while descriptor is None:
                 try:
-                    if time.time() - lock.stat().st_mtime > 120:
-                        lock.unlink()
-                        continue
-                except FileNotFoundError:
-                    continue
-                if time.monotonic() >= deadline:
-                    _fail("memory_busy", "project execution memory is busy")
-                time.sleep(0.01)
-        try:
-            yield
-        finally:
-            os.close(descriptor)
-            lock.unlink(missing_ok=True)
+                    descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    os.write(descriptor, f"{os.getpid()}:{owner_token}".encode("ascii"))
+                    os.close(descriptor)
+                    descriptor = None
+                    break
+                except (FileExistsError, PermissionError):
+                    try:
+                        if time.time() - lock.stat().st_mtime > 120:
+                            lock.unlink(missing_ok=True)
+                            continue
+                    except (FileNotFoundError, PermissionError, OSError):
+                        pass
+                    if time.monotonic() >= deadline:
+                        _fail("memory_busy", "project execution memory is busy")
+                    time.sleep(backoff)
+                    backoff = min(0.02, backoff * 1.5)
+            try:
+                yield
+            finally:
+                try:
+                    if lock.exists():
+                        content = lock.read_text(encoding="ascii")
+                        if content.endswith(f":{owner_token}"):
+                            lock.unlink(missing_ok=True)
+                except (FileNotFoundError, PermissionError, OSError):
+                    pass
 
     _T = TypeVar("_T")
 
-    def execution_transaction(self, operation: Callable[[ProjectMemoryState], tuple[ProjectMemoryState, _T]]) -> _T:
-        """Commit one bounded execution transition atomically with its events."""
+    def write_transaction(
+        self,
+        operation: Callable[[ProjectMemoryState], tuple[ProjectMemoryState, _T]],
+        *,
+        expected_revision: int | None = None,
+    ) -> _T:
+        """Commit one bounded state transition atomically with monotonic revision CAS."""
         with self._execution_lock():
             current = self.read_state()
+            if expected_revision is not None and current.revision != expected_revision:
+                _fail(
+                    "stale_revision_rejected",
+                    f"expected revision {expected_revision}, but current revision is {current.revision}",
+                )
             updated, result = operation(current)
             if updated.project_id != self.project_id:
-                _fail("memory_project_mismatch", "execution transition changed project identity")
-            self._write_state(updated)
+                _fail("memory_project_mismatch", "transition changed project identity")
+            next_rev = current.revision + 1
+            final_state = replace(updated, revision=next_rev)
+            self._write_state(final_state)
             return result
+
+    def execution_transaction(
+        self,
+        operation: Callable[[ProjectMemoryState], tuple[ProjectMemoryState, _T]],
+        *,
+        expected_revision: int | None = None,
+    ) -> _T:
+        """Commit one bounded execution transition atomically with its events (delegates to write_transaction)."""
+        return self.write_transaction(operation, expected_revision=expected_revision)
 
     def _append_event(self, state: ProjectMemoryState, event_type: str, summary: str, *, task_id: str | None = None, milestone_id: str | None = None, plan_version: str | None = None, git_head: str | None = None, correlation_id: str | None = None, prerequisite_id: str | None = None, prerequisite_kind: str | None = None) -> ProjectMemoryState:
         if event_type not in _EVENT_TYPES:
@@ -566,74 +622,116 @@ class ProjectMemoryStore:
         return replace(state, events=state.events + (event,))
 
     def append_event(self, event_type: str, human_summary: str, **bindings: str | None) -> ProjectEvent:
-        state = self.read_state()
-        updated = self._append_event(state, event_type, human_summary, **bindings)
-        self._write_state(updated)
-        return updated.events[-1]
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, ProjectEvent]:
+            updated = self._append_event(state, event_type, human_summary, **bindings)
+            return updated, updated.events[-1]
+        return self.write_transaction(transition)
 
     def add_decision(self, *, title: str, decision: str, reason: str, plan_version: str | None = None, related_task_ids: Iterable[str] = (), supersedes_decision_id: str | None = None) -> DecisionRecord:
-        state = self.read_state(); identifier = f"D-{len(state.decisions) + 1:03d}"
-        if len(state.decisions) >= MAX_ITEMS: _fail("memory_collection_bounded", "decision history reached its bound")
-        if supersedes_decision_id and not any(item.decision_id == supersedes_decision_id for item in state.decisions):
-            _fail("decision_supersedes_missing", "superseded decision does not exist")
-        record = DecisionRecord(identifier, self.project_id, _text(title, "decision.title", max_length=300), _text(decision, "decision.decision", max_length=4_000), _text(reason, "decision.reason", max_length=4_000), "active", _now(), tuple(related_task_ids), plan_version, supersedes_decision_id)
-        decisions = tuple(replace(item, status="superseded") if item.decision_id == supersedes_decision_id else item for item in state.decisions) + (record,)
-        updated = replace(state, decisions=decisions); updated = self._append_event(updated, "DECISION_ADDED", f"Dodano decyzję: {record.title}", plan_version=plan_version)
-        if supersedes_decision_id:
-            updated = self._append_event(updated, "DECISION_SUPERSEDED", f"Decyzja {supersedes_decision_id} została zastąpiona przez {identifier}")
-        self._write_state(updated); return record
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, DecisionRecord]:
+            identifier = f"D-{len(state.decisions) + 1:03d}"
+            if len(state.decisions) >= MAX_ITEMS: _fail("memory_collection_bounded", "decision history reached its bound")
+            if supersedes_decision_id and not any(item.decision_id == supersedes_decision_id for item in state.decisions):
+                _fail("decision_supersedes_missing", "superseded decision does not exist")
+            record = DecisionRecord(identifier, self.project_id, _text(title, "decision.title", max_length=300), _text(decision, "decision.decision", max_length=4_000), _text(reason, "decision.reason", max_length=4_000), "active", _now(), tuple(related_task_ids), plan_version, supersedes_decision_id)
+            decisions = tuple(replace(item, status="superseded") if item.decision_id == supersedes_decision_id else item for item in state.decisions) + (record,)
+            updated = replace(state, decisions=decisions)
+            updated = self._append_event(updated, "DECISION_ADDED", f"Dodano decyzję: {record.title}", plan_version=plan_version)
+            if supersedes_decision_id:
+                updated = self._append_event(updated, "DECISION_SUPERSEDED", f"Decyzja {supersedes_decision_id} została zastąpiona przez {identifier}")
+            return updated, record
+        return self.write_transaction(transition)
 
     def add_inbox(self, *, title: str, description: str) -> InboxItem:
-        state = self.read_state()
-        if len(state.inbox) >= MAX_ITEMS: _fail("memory_collection_bounded", "inbox reached its bound")
-        record = InboxItem(f"I-{len(state.inbox) + 1:03d}", self.project_id, _text(title, "inbox.title", max_length=300), _text(description, "inbox.description", max_length=4_000), _now())
-        updated = replace(state, inbox=state.inbox + (record,)); updated = self._append_event(updated, "INBOX_ITEM_ADDED", f"Dodano pomysł: {record.title}"); self._write_state(updated); return record
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, InboxItem]:
+            if len(state.inbox) >= MAX_ITEMS: _fail("memory_collection_bounded", "inbox reached its bound")
+            record = InboxItem(f"I-{len(state.inbox) + 1:03d}", self.project_id, _text(title, "inbox.title", max_length=300), _text(description, "inbox.description", max_length=4_000), _now())
+            updated = replace(state, inbox=state.inbox + (record,))
+            updated = self._append_event(updated, "INBOX_ITEM_ADDED", f"Dodano pomysł: {record.title}")
+            return updated, record
+        return self.write_transaction(transition)
 
     def update_inbox(self, inbox_id: str, status: str) -> InboxItem:
-        state = self.read_state(); allowed = {"new", "discuss", "later", "accepted", "rejected", "resolved"}
+        allowed = {"new", "discuss", "later", "accepted", "rejected", "resolved"}
         if status not in allowed: _fail("inbox_status_invalid", "inbox status is unsupported")
-        found = next((item for item in state.inbox if item.inbox_id == inbox_id), None)
-        if found is None: _fail("inbox_not_found", "inbox item does not exist")
-        updated_item = replace(found, status=status); updated = replace(state, inbox=tuple(updated_item if item.inbox_id == inbox_id else item for item in state.inbox)); updated = self._append_event(updated, "INBOX_ITEM_RESOLVED" if status == "resolved" else "INBOX_ITEM_ADDED", f"Inbox {inbox_id}: {status}"); self._write_state(updated); return updated_item
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, InboxItem]:
+            found = next((item for item in state.inbox if item.inbox_id == inbox_id), None)
+            if found is None: _fail("inbox_not_found", "inbox item does not exist")
+            updated_item = replace(found, status=status)
+            updated = replace(state, inbox=tuple(updated_item if item.inbox_id == inbox_id else item for item in state.inbox))
+            updated = self._append_event(updated, "INBOX_ITEM_RESOLVED" if status == "resolved" else "INBOX_ITEM_ADDED", f"Inbox {inbox_id}: {status}")
+            return updated, updated_item
+        return self.write_transaction(transition)
 
     def add_risk(self, *, title: str, description: str, severity: str = "medium") -> RiskRecord:
         if severity not in {"low", "medium", "high"}: _fail("risk_severity_invalid", "risk severity is unsupported")
-        state = self.read_state()
-        if len(state.risks) >= MAX_ITEMS: _fail("memory_collection_bounded", "risk history reached its bound")
-        record = RiskRecord(f"R-{len(state.risks) + 1:03d}", self.project_id, _text(title, "risk.title", max_length=300), _text(description, "risk.description", max_length=4_000), severity, "open", _now()); updated = replace(state, risks=state.risks + (record,)); updated = self._append_event(updated, "RISK_ADDED", f"Dodano ryzyko: {record.title}"); self._write_state(updated); return record
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, RiskRecord]:
+            if len(state.risks) >= MAX_ITEMS: _fail("memory_collection_bounded", "risk history reached its bound")
+            record = RiskRecord(f"R-{len(state.risks) + 1:03d}", self.project_id, _text(title, "risk.title", max_length=300), _text(description, "risk.description", max_length=4_000), severity, "open", _now())
+            updated = replace(state, risks=state.risks + (record,))
+            updated = self._append_event(updated, "RISK_ADDED", f"Dodano ryzyko: {record.title}")
+            return updated, record
+        return self.write_transaction(transition)
 
     def resolve_risk(self, risk_id: str, status: str = "resolved") -> RiskRecord:
         if status not in {"mitigated", "resolved", "accepted"}: _fail("risk_status_invalid", "risk status is unsupported")
-        state = self.read_state(); found = next((item for item in state.risks if item.risk_id == risk_id), None)
-        if found is None: _fail("risk_not_found", "risk does not exist")
-        result = replace(found, status=status); updated = replace(state, risks=tuple(result if item.risk_id == risk_id else item for item in state.risks)); updated = self._append_event(updated, "RISK_RESOLVED", f"Ryzyko {risk_id}: {status}"); self._write_state(updated); return result
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, RiskRecord]:
+            found = next((item for item in state.risks if item.risk_id == risk_id), None)
+            if found is None: _fail("risk_not_found", "risk does not exist")
+            result = replace(found, status=status)
+            updated = replace(state, risks=tuple(result if item.risk_id == risk_id else item for item in state.risks))
+            updated = self._append_event(updated, "RISK_RESOLVED", f"Ryzyko {risk_id}: {status}")
+            return updated, result
+        return self.write_transaction(transition)
 
     def add_debt(self, *, title: str, description: str, related_task_ids: Iterable[str] = (), suggested_review_milestone: str | None = None) -> DebtRecord:
-        state = self.read_state()
-        if len(state.technical_debt) >= MAX_ITEMS: _fail("memory_collection_bounded", "technical debt history reached its bound")
-        record = DebtRecord(f"TD-{len(state.technical_debt) + 1:03d}", self.project_id, _text(title, "debt.title", max_length=300), _text(description, "debt.description", max_length=4_000), _now(), "open", tuple(related_task_ids), suggested_review_milestone); updated = replace(state, technical_debt=state.technical_debt + (record,)); updated = self._append_event(updated, "TECH_DEBT_ADDED", f"Dodano dług techniczny: {record.title}"); self._write_state(updated); return record
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, DebtRecord]:
+            if len(state.technical_debt) >= MAX_ITEMS: _fail("memory_collection_bounded", "technical debt history reached its bound")
+            record = DebtRecord(f"TD-{len(state.technical_debt) + 1:03d}", self.project_id, _text(title, "debt.title", max_length=300), _text(description, "debt.description", max_length=4_000), _now(), "open", tuple(related_task_ids), suggested_review_milestone)
+            updated = replace(state, technical_debt=state.technical_debt + (record,))
+            updated = self._append_event(updated, "TECH_DEBT_ADDED", f"Dodano dług techniczny: {record.title}")
+            return updated, record
+        return self.write_transaction(transition)
 
     def resolve_debt(self, debt_id: str, status: str = "resolved") -> DebtRecord:
         if status not in {"planned", "resolved", "accepted"}: _fail("debt_status_invalid", "technical debt status is unsupported")
-        state = self.read_state(); found = next((item for item in state.technical_debt if item.debt_id == debt_id), None)
-        if found is None: _fail("debt_not_found", "technical debt does not exist")
-        result = replace(found, status=status); updated = replace(state, technical_debt=tuple(result if item.debt_id == debt_id else item for item in state.technical_debt)); updated = self._append_event(updated, "TECH_DEBT_RESOLVED", f"Dług {debt_id}: {status}"); self._write_state(updated); return result
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, DebtRecord]:
+            found = next((item for item in state.technical_debt if item.debt_id == debt_id), None)
+            if found is None: _fail("debt_not_found", "technical debt does not exist")
+            result = replace(found, status=status)
+            updated = replace(state, technical_debt=tuple(result if item.debt_id == debt_id else item for item in state.technical_debt))
+            updated = self._append_event(updated, "TECH_DEBT_RESOLVED", f"Dług {debt_id}: {status}")
+            return updated, result
+        return self.write_transaction(transition)
 
     def add_attention(self, *, type: str, title: str, description: str) -> AttentionItem:
         if type not in {"decision_required", "blocked", "review_required", "plan_review_required"}: _fail("attention_type_invalid", "attention type is unsupported")
-        state = self.read_state()
-        if len(state.attention) >= MAX_ITEMS: _fail("memory_collection_bounded", "attention history reached its bound")
-        record = AttentionItem(f"A-{len(state.attention) + 1:03d}", self.project_id, type, _text(title, "attention.title", max_length=300), _text(description, "attention.description", max_length=4_000), _now()); updated = replace(state, attention=state.attention + (record,)); updated = self._append_event(updated, "ATTENTION_ADDED", f"Dodano uwagę: {record.title}"); self._write_state(updated); return record
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, AttentionItem]:
+            if len(state.attention) >= MAX_ITEMS: _fail("memory_collection_bounded", "attention history reached its bound")
+            record = AttentionItem(f"A-{len(state.attention) + 1:03d}", self.project_id, type, _text(title, "attention.title", max_length=300), _text(description, "attention.description", max_length=4_000), _now())
+            updated = replace(state, attention=state.attention + (record,))
+            updated = self._append_event(updated, "ATTENTION_ADDED", f"Dodano uwagę: {record.title}")
+            return updated, record
+        return self.write_transaction(transition)
 
     def resolve_attention(self, attention_id: str) -> AttentionItem:
-        state = self.read_state(); found = next((item for item in state.attention if item.attention_id == attention_id), None)
-        if found is None: _fail("attention_not_found", "attention item does not exist")
-        result = replace(found, status="resolved"); updated = replace(state, attention=tuple(result if item.attention_id == attention_id else item for item in state.attention)); updated = self._append_event(updated, "ATTENTION_RESOLVED", f"Uwaga {attention_id} rozwiązana"); self._write_state(updated); return result
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, AttentionItem]:
+            found = next((item for item in state.attention if item.attention_id == attention_id), None)
+            if found is None: _fail("attention_not_found", "attention item does not exist")
+            result = replace(found, status="resolved")
+            updated = replace(state, attention=tuple(result if item.attention_id == attention_id else item for item in state.attention))
+            updated = self._append_event(updated, "ATTENTION_RESOLVED", f"Uwaga {attention_id} rozwiązana")
+            return updated, result
+        return self.write_transaction(transition)
 
     def create_checkpoint(self, *, label: str, plan_version: str | None, git_head: str | None, completed_task_ids: Iterable[str], current_task_id: str | None, active_decision_ids: Iterable[str] = (), open_blocker_ids: Iterable[str] = (), human_summary: str | None = None) -> Checkpoint:
-        state = self.read_state()
-        if len(state.checkpoints) >= MAX_ITEMS: _fail("memory_collection_bounded", "checkpoint history reached its bound")
-        record = Checkpoint(f"CP-{len(state.checkpoints) + 1:03d}", self.project_id, _now(), _text(label, "checkpoint.label", max_length=300), plan_version, git_head, tuple(completed_task_ids), current_task_id, tuple(active_decision_ids), tuple(open_blocker_ids), human_summary); updated = replace(state, checkpoints=state.checkpoints + (record,)); updated = self._append_event(updated, "CHECKPOINT_CREATED", f"Utworzono checkpoint: {record.label}", plan_version=plan_version, git_head=git_head); self._write_state(updated); return record
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, Checkpoint]:
+            if len(state.checkpoints) >= MAX_ITEMS: _fail("memory_collection_bounded", "checkpoint history reached its bound")
+            record = Checkpoint(f"CP-{len(state.checkpoints) + 1:03d}", self.project_id, _now(), _text(label, "checkpoint.label", max_length=300), plan_version, git_head, tuple(completed_task_ids), current_task_id, tuple(active_decision_ids), tuple(open_blocker_ids), human_summary)
+            updated = replace(state, checkpoints=state.checkpoints + (record,))
+            updated = self._append_event(updated, "CHECKPOINT_CREATED", f"Utworzono checkpoint: {record.label}", plan_version=plan_version, git_head=git_head)
+            return updated, record
+        return self.write_transaction(transition)
 
     def ensure_initial_plan(self, plan: ProjectPlan) -> ProjectPlan:
         if plan_version_number(plan.plan_version) != 1: _fail("plan_initial_version_invalid", "the first plan must be v1")

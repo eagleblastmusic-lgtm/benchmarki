@@ -11,11 +11,14 @@ import json
 import os
 import re
 import secrets
+import threading
+import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Iterator, Mapping
 
 from bdb_shared.evidence import canonical_json_bytes, semantic_digest
 
@@ -569,6 +572,7 @@ class ProjectRecord:
     last_launch_id: str | None = None
     last_session_id: str | None = None
     last_correlation_id: str | None = None
+    projection_cursor: int | None = None
 
     def __post_init__(self) -> None:
         if not _ID_RE.fullmatch(self.project_id):
@@ -585,9 +589,11 @@ class ProjectRecord:
             _fail("project_status_invalid", "project_status is unsupported")
         if self.total_tasks < 0 or self.completed_tasks < 0 or self.completed_tasks > self.total_tasks:
             _fail("project_progress_invalid", "project progress is invalid")
+        if self.projection_cursor is not None and self.projection_cursor < 1:
+            _fail("projection_cursor_invalid", "projection_cursor must be positive integer")
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        document = {
             "project_id": self.project_id,
             "display_name": self.display_name,
             "repo_alias": self.repo_alias,
@@ -611,6 +617,9 @@ class ProjectRecord:
                 "last_correlation_id": self.last_correlation_id,
             },
         }
+        if self.projection_cursor is not None:
+            document["projection_cursor"] = self.projection_cursor
+        return document
 
     @classmethod
     def from_dict(cls, value: object) -> "ProjectRecord":
@@ -618,6 +627,8 @@ class ProjectRecord:
             _fail("catalog_project_invalid", "catalog project must be an object")
         plan = value.get("plan") if isinstance(value.get("plan"), Mapping) else {}
         conversation = value.get("conversation") if isinstance(value.get("conversation"), Mapping) else {}
+        raw_cursor = value.get("projection_cursor")
+        cursor = int(raw_cursor) if raw_cursor is not None else None
         return cls(
             project_id=_text(value.get("project_id"), "project_id", max_length=96),
             display_name=_text(value.get("display_name"), "display_name", max_length=200),
@@ -637,6 +648,7 @@ class ProjectRecord:
             last_launch_id=conversation.get("last_launch_id") if conversation.get("last_launch_id") is None else _text(conversation.get("last_launch_id"), "conversation.last_launch_id", max_length=96),
             last_session_id=conversation.get("last_session_id") if conversation.get("last_session_id") is None else _text(conversation.get("last_session_id"), "conversation.last_session_id", max_length=200),
             last_correlation_id=conversation.get("last_correlation_id") if conversation.get("last_correlation_id") is None else _text(conversation.get("last_correlation_id"), "conversation.last_correlation_id", max_length=200),
+            projection_cursor=cursor,
         )
 
 
@@ -663,11 +675,50 @@ def _atomic_write(path: Path, document: Mapping[str, Any]) -> None:
 
 
 class ProjectCatalog:
-    """Single bounded writer for vNext project metadata."""
+    """Single bounded writer and projection maintainer for vNext project metadata."""
 
     def __init__(self, runtime_root: str | Path) -> None:
         self.runtime_root = Path(runtime_root).expanduser().absolute()
         self.path = catalog_path(self.runtime_root)
+        self._thread_lock = threading.Lock()
+
+    @contextmanager
+    def _lock(self) -> Iterator[None]:
+        with self._thread_lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            lock = self.path.parent / "project-catalog.json.lock"
+            descriptor: int | None = None
+            deadline = time.monotonic() + 5.0
+            backoff = 0.002
+            owner_token = uuid.uuid4().hex
+            while descriptor is None:
+                try:
+                    descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    os.write(descriptor, f"{os.getpid()}:{owner_token}".encode("ascii"))
+                    os.close(descriptor)
+                    descriptor = None
+                    break
+                except (FileExistsError, PermissionError):
+                    try:
+                        if time.time() - lock.stat().st_mtime > 120:
+                            lock.unlink(missing_ok=True)
+                            continue
+                    except (FileNotFoundError, PermissionError, OSError):
+                        pass
+                    if time.monotonic() >= deadline:
+                        _fail("catalog_busy", "project catalog is busy")
+                    time.sleep(backoff)
+                    backoff = min(0.02, backoff * 1.5)
+            try:
+                yield
+            finally:
+                try:
+                    if lock.exists():
+                        content = lock.read_text(encoding="ascii")
+                        if content.endswith(f":{owner_token}"):
+                            lock.unlink(missing_ok=True)
+                except (FileNotFoundError, PermissionError, OSError):
+                    pass
 
     def read(self) -> tuple[ProjectRecord, ...]:
         if not self.path.exists():
@@ -695,21 +746,174 @@ class ProjectCatalog:
             _fail("catalog_digest_mismatch", "project catalog digest differs")
         return projects
 
-    def write(self, projects: Iterable[ProjectRecord]) -> None:
+    def _write_unlocked(self, projects: Iterable[ProjectRecord]) -> None:
         ordered = tuple(sorted(projects, key=lambda item: (item.display_name.casefold(), item.project_id)))
         if len(ordered) > 256:
             _fail("catalog_size_invalid", "project catalog is bounded to 256 projects")
         base = {"schema": PROJECT_CATALOG_SCHEMA, "projects": [project.to_dict() for project in ordered]}
         _atomic_write(self.path, {**base, "catalog_digest": semantic_digest(base)})
 
+    def write(self, projects: Iterable[ProjectRecord]) -> None:
+        with self._lock():
+            self._write_unlocked(projects)
+
     def get(self, project_id: str) -> ProjectRecord | None:
         return next((project for project in self.read() if project.project_id == project_id), None)
 
     def upsert(self, project: ProjectRecord) -> ProjectRecord:
-        projects = [item for item in self.read() if item.project_id != project.project_id]
-        projects.append(project)
-        self.write(projects)
-        return project
+        with self._lock():
+            projects = [item for item in self.read() if item.project_id != project.project_id]
+            projects.append(project)
+            self._write_unlocked(projects)
+            return project
+
+    def sync_projection(self, project_id: str, *, memory_state: Any = None, plan: Any = None) -> ProjectRecord | None:
+        """Deterministically synchronize the catalog projection for one project from canonical memory authority."""
+        from .project_memory import ProjectMemoryStore
+        with self._lock():
+            project = self.get(project_id)
+            if project is None:
+                return None
+            memory = ProjectMemoryStore(self.runtime_root, project_id)
+            state = memory_state or memory.read_state()
+            if project.projection_cursor is not None and state.revision < project.projection_cursor:
+                _fail("stale_projection_cursor", f"projection cursor {project.projection_cursor} is newer than state revision {state.revision}")
+            current_plan = plan or memory.current_plan()
+            if current_plan is None:
+                plan_imported = False
+                plan_version = None
+                total_tasks = 0
+                completed_tasks = 0
+                current_milestone = None
+                current_task = None
+                plan_path = None
+            else:
+                plan_imported = True
+                plan_version = str(current_plan.plan_version)
+                total_tasks = len(current_plan.tasks)
+                task_statuses = state.execution.get("task_statuses", {}) if isinstance(state.execution, Mapping) else {}
+                completed_tasks = sum(1 for t in current_plan.tasks if task_statuses.get(t.task_id, t.status) in {"completed", "skipped"})
+                current_task_id = state.execution.get("current_task_id") or current_plan.current_task_id
+                curr_t = next((t for t in current_plan.tasks if t.task_id == current_task_id), None)
+                current_milestone = curr_t.milestone_id if curr_t else (current_plan.current_milestone.milestone_id if current_plan.current_milestone else None)
+                current_task = current_task_id
+                plan_path = str(memory.current_pointer)
+            conversation = state.execution.get("conversation", {}) if isinstance(state.execution, Mapping) else {}
+            last_launch = state.execution.get("last_launch_id") or conversation.get("last_launch_id") or project.last_launch_id
+            last_session = state.execution.get("last_session_id") or conversation.get("last_session_id") or project.last_session_id
+            last_corr = state.execution.get("last_correlation_id") or conversation.get("last_correlation_id") or project.last_correlation_id
+            updated = ProjectRecord(
+                project_id=project.project_id,
+                display_name=project.display_name,
+                repo_alias=project.repo_alias,
+                local_repo_path=project.local_repo_path,
+                github_repo=project.github_repo,
+                created_at=project.created_at,
+                project_status=project.project_status,
+                brief=project.brief,
+                plan_imported=plan_imported,
+                plan_version=plan_version,
+                total_tasks=total_tasks,
+                completed_tasks=completed_tasks,
+                current_milestone=current_milestone,
+                current_task=current_task,
+                plan_path=plan_path,
+                last_launch_id=last_launch,
+                last_session_id=last_session,
+                last_correlation_id=last_corr,
+                projection_cursor=state.revision,
+            )
+            projects = [item for item in self.read() if item.project_id != project_id]
+            projects.append(updated)
+            self._write_unlocked(projects)
+            return updated
+
+    def rebuild(self) -> tuple[ProjectRecord, ...]:
+        """Rebuild the entire catalog projection from canonical project memory roots."""
+        from .project_memory import ProjectMemoryStore
+        with self._lock():
+            try:
+                existing = {p.project_id: p for p in self.read()}
+            except Exception:
+                existing = {}
+            mem_root = self.runtime_root / "control" / "project-memory"
+            projects: list[ProjectRecord] = []
+            if mem_root.exists() and mem_root.is_dir():
+                for entry in sorted(mem_root.iterdir()):
+                    if not entry.is_dir() or entry.name.startswith("."):
+                        continue
+                    pid = entry.name
+                    if not _ID_RE.fullmatch(pid):
+                        continue
+                    memory = ProjectMemoryStore(self.runtime_root, pid)
+                    try:
+                        state = memory.read_state()
+                    except Exception:
+                        continue
+                    plan = memory.current_plan()
+                    existing_proj = existing.get(pid)
+                    if existing_proj is not None:
+                        base = existing_proj
+                    else:
+                        proj_name = plan.project_name if plan else pid
+                        base = new_project_record(
+                            project_id=pid,
+                            display_name=proj_name,
+                            repo_alias=pid.lower()[:32],
+                            local_repo_path=str(self.runtime_root),
+                            github_repo=None,
+                            brief=ProjectBrief(proj_name, "Imported project", "Imported project", "tool"),
+                        )
+                    if plan is None:
+                        plan_imported = False
+                        plan_version = None
+                        total_tasks = 0
+                        completed_tasks = 0
+                        current_milestone = None
+                        current_task = None
+                        plan_path = None
+                    else:
+                        plan_imported = True
+                        plan_version = str(plan.plan_version)
+                        total_tasks = len(plan.tasks)
+                        task_statuses = state.execution.get("task_statuses", {}) if isinstance(state.execution, Mapping) else {}
+                        completed_tasks = sum(1 for t in plan.tasks if task_statuses.get(t.task_id, t.status) in {"completed", "skipped"})
+                        current_task_id = state.execution.get("current_task_id") or plan.current_task_id
+                        curr_t = next((t for t in plan.tasks if t.task_id == current_task_id), None)
+                        current_milestone = curr_t.milestone_id if curr_t else (plan.current_milestone.milestone_id if plan.current_milestone else None)
+                        current_task = current_task_id
+                        plan_path = str(memory.current_pointer)
+                    conversation = state.execution.get("conversation", {}) if isinstance(state.execution, Mapping) else {}
+                    last_launch = state.execution.get("last_launch_id") or conversation.get("last_launch_id") or base.last_launch_id
+                    last_session = state.execution.get("last_session_id") or conversation.get("last_session_id") or base.last_session_id
+                    last_corr = state.execution.get("last_correlation_id") or conversation.get("last_correlation_id") or base.last_correlation_id
+                    rec = ProjectRecord(
+                        project_id=pid,
+                        display_name=base.display_name,
+                        repo_alias=base.repo_alias,
+                        local_repo_path=base.local_repo_path,
+                        github_repo=base.github_repo,
+                        created_at=base.created_at,
+                        project_status=base.project_status,
+                        brief=base.brief,
+                        plan_imported=plan_imported,
+                        plan_version=plan_version,
+                        total_tasks=total_tasks,
+                        completed_tasks=completed_tasks,
+                        current_milestone=current_milestone,
+                        current_task=current_task,
+                        plan_path=plan_path,
+                        last_launch_id=last_launch,
+                        last_session_id=last_session,
+                        last_correlation_id=last_corr,
+                        projection_cursor=state.revision,
+                    )
+                    projects.append(rec)
+            for pid, p in existing.items():
+                if not any(item.project_id == pid for item in projects):
+                    projects.append(p)
+            self._write_unlocked(projects)
+            return tuple(projects)
 
     def import_plan(self, project_id: str, plan_path: str | Path) -> tuple[ProjectRecord, ProjectPlan]:
         project = self.get(project_id)
