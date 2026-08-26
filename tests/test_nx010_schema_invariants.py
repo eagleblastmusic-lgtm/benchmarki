@@ -33,10 +33,12 @@ from bdb_vnext.project_memory_v2_contract import (
     PROJECT_MEMORY_V2_DDL,
     PROJECT_MEMORY_V2_SCHEMA_IDENTIFIER,
     PROJECT_MEMORY_V2_SCHEMA_VERSION,
+    REQUIRED_LOGICAL_ENTITIES,
     UPGRADE_STATE_POLICIES,
     V1_TO_V2_FIELD_MAPPING,
     UpgradeState,
     count_multi_authority_mutable_facts,
+    inspect_required_entities,
     validate_upgrade_state_transition,
     verify_v1_v2_mapping_completeness,
 )
@@ -573,6 +575,117 @@ class TestSingleAuthority:
 
 
 # ============================================================
+# 12. Failure Model
+# ============================================================
+
+class TestFailureModel:
+    def test_failure_record_insert_and_retrieval(self, v2_db: sqlite3.Connection) -> None:
+        _insert_project(v2_db)
+        _insert_plan(v2_db)
+        bid = _insert_binding(v2_db)
+        v2_db.execute(
+            "INSERT INTO failures (failure_id, project_id, task_id, execution_binding_id, failure_code, failure_class, message, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("f1", "p-test", "t1", bid, "compilation_error", "BUILD", "Syntax error", _now()),
+        )
+        v2_db.commit()
+        row = v2_db.execute("SELECT failure_id, failure_code, message FROM failures WHERE failure_id='f1'").fetchone()
+        assert row == ("f1", "compilation_error", "Syntax error")
+
+    def test_orphan_failure_rejected(self, v2_db: sqlite3.Connection) -> None:
+        _insert_project(v2_db)
+        v2_db.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            v2_db.execute(
+                "INSERT INTO failures (failure_id, project_id, task_id, execution_binding_id, failure_code, message, created_at) VALUES (?,?,?,?,?,?,?)",
+                ("f-orphan", "p-test", "t1", "nonexistent-binding", "err", "fail", _now()),
+            )
+            v2_db.commit()
+
+
+# ============================================================
+# 13. Evidence Model
+# ============================================================
+
+class TestEvidenceModel:
+    def test_evidence_record_insert_and_retrieval(self, v2_db: sqlite3.Connection) -> None:
+        _insert_project(v2_db)
+        _insert_plan(v2_db)
+        bid = _insert_binding(v2_db)
+        v2_db.execute(
+            "INSERT INTO evidence_records (evidence_id, project_id, task_id, execution_binding_id, evidence_ref, evidence_type, digest, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("ev1", "p-test", "t1", bid, "ref/log.txt", "log", "sha256:123456", _now()),
+        )
+        v2_db.commit()
+        row = v2_db.execute("SELECT evidence_id, evidence_ref, digest FROM evidence_records WHERE evidence_id='ev1'").fetchone()
+        assert row == ("ev1", "ref/log.txt", "sha256:123456")
+
+    def test_orphan_evidence_rejected(self, v2_db: sqlite3.Connection) -> None:
+        _insert_project(v2_db)
+        v2_db.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            v2_db.execute(
+                "INSERT INTO evidence_records (evidence_id, project_id, task_id, execution_binding_id, evidence_ref, digest, created_at) VALUES (?,?,?,?,?,?,?)",
+                ("ev-orphan", "p-test", "t1", "nonexistent-binding", "ref/x", "sha256:xyz", _now()),
+            )
+            v2_db.commit()
+
+
+# ============================================================
+# 14. Lease Model & Active Lease Uniqueness
+# ============================================================
+
+class TestLeaseModel:
+    def test_single_active_lease_allowed(self, v2_db: sqlite3.Connection) -> None:
+        _insert_project(v2_db)
+        v2_db.execute(
+            "INSERT INTO leases (lease_id, project_id, resource_type, resource_id, holder_token, status, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("l1", "p-test", "EXECUTION", "res-1", "tok-1", "ACTIVE", _now(), _now()),
+        )
+        v2_db.commit()
+        count = v2_db.execute("SELECT COUNT(*) FROM leases WHERE status='ACTIVE'").fetchone()[0]
+        assert count == 1
+
+    def test_duplicate_active_lease_rejected(self, v2_db: sqlite3.Connection) -> None:
+        _insert_project(v2_db)
+        v2_db.execute(
+            "INSERT INTO leases (lease_id, project_id, resource_type, resource_id, holder_token, status, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("l1", "p-test", "EXECUTION", "res-1", "tok-1", "ACTIVE", _now(), _now()),
+        )
+        v2_db.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            v2_db.execute(
+                "INSERT INTO leases (lease_id, project_id, resource_type, resource_id, holder_token, status, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?,?)",
+                ("l2", "p-test", "EXECUTION", "res-1", "tok-2", "ACTIVE", _now(), _now()),
+            )
+            v2_db.commit()
+
+    def test_released_plus_active_lease_allowed(self, v2_db: sqlite3.Connection) -> None:
+        _insert_project(v2_db)
+        v2_db.execute(
+            "INSERT INTO leases (lease_id, project_id, resource_type, resource_id, holder_token, status, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("l1", "p-test", "EXECUTION", "res-1", "tok-1", "RELEASED", _now(), _now()),
+        )
+        v2_db.execute(
+            "INSERT INTO leases (lease_id, project_id, resource_type, resource_id, holder_token, status, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("l2", "p-test", "EXECUTION", "res-1", "tok-2", "ACTIVE", _now(), _now()),
+        )
+        v2_db.commit()
+        count = v2_db.execute("SELECT COUNT(*) FROM leases WHERE resource_id='res-1'").fetchone()[0]
+        assert count == 2
+
+
+# ============================================================
+# 15. Required Logical Entity Completeness
+# ============================================================
+
+class TestRequiredEntityCompleteness:
+    def test_all_required_entities_present(self, v2_db: sqlite3.Connection) -> None:
+        required, missing = inspect_required_entities(v2_db)
+        assert len(required) >= 11
+        assert missing == []
+
+
+# ============================================================
 # NX-010 Machine Gate
 # ============================================================
 
@@ -596,6 +709,10 @@ def inspect_nx010_gate_for_hardcoded_results() -> tuple[bool, list[str]]:
         "MUTABLE_AUTHORITY_FACTS_CHECKED", "MULTI_AUTHORITY_MUTABLE_FACTS",
         "REQUIRED_ENTITIES_COMPLETE", "REQUIRED_FOREIGN_KEYS_COMPLETE",
         "ACTIVE_BINDING_UNIQUENESS_ENFORCED", "ACTIVE_SCOPE_UNIQUENESS_ENFORCED",
+        "ACTIVE_LEASE_UNIQUENESS_ENFORCED", "DUPLICATE_ACTIVE_LEASE_ACCEPTED",
+        "FAILURE_MODEL_PRESENT", "FAILURE_IDENTITY_DEFINED", "FAILURE_OWNER_DEFINED", "FAILURE_REFERENTIAL_INTEGRITY",
+        "EVIDENCE_MODEL_PRESENT", "EVIDENCE_IDENTITY_DEFINED", "ORPHAN_EVIDENCE_ACCEPTED",
+        "LEASE_MODEL_PRESENT",
         "REVISION_MONOTONIC_CONTRACT", "APPEND_ONLY_AUDIT_CONTRACT",
         "ORPHAN_BINDING_ACCEPTED", "ORPHAN_ATTEMPT_ACCEPTED", "ORPHAN_OUTBOX_ACCEPTED",
         "PARTIAL_UPGRADE_STATES_DEFINED", "AMBIGUOUS_AUTHORITY_STATE_ACCEPTED",
@@ -647,7 +764,7 @@ def run_nx010_machine_gate(tmp_path: Path) -> dict[str, Any]:
         "schema_migrations", "projects", "project_plans", "runs", "scopes",
         "task_execution_states", "execution_bindings", "attempts", "checkpoints",
         "launch_outbox", "decisions", "inbox_items", "risks", "technical_debt",
-        "attention_items", "audit_events",
+        "attention_items", "audit_events", "failures", "evidence_records", "leases",
     }
     SCHEMA_VERSION_EXPLICIT = (PROJECT_MEMORY_V2_SCHEMA_VERSION == "2.0.0" and len(PROJECT_MEMORY_V2_SCHEMA_IDENTIFIER) > 0)
     SCHEMA_LINTER = ("PASS" if ddl_ok and required_tables.issubset(tables) else "FAIL")
@@ -659,7 +776,7 @@ def run_nx010_machine_gate(tmp_path: Path) -> dict[str, Any]:
     # Domain: Entity completeness
     inventory_tables = {fact.v2_table for fact in AUTHORITY_INVENTORY}
     entity_tables = tables - {"schema_migrations"}
-    REQUIRED_ENTITIES_COMPLETE = entity_tables.issubset(inventory_tables) and len(entity_tables) >= 15
+    REQUIRED_ENTITIES_COMPLETE = entity_tables.issubset(inventory_tables) and len(entity_tables) >= 18
 
     # Domain: FK completeness — test actual FK enforcement
     fk_tested = True
@@ -790,6 +907,70 @@ def run_nx010_machine_gate(tmp_path: Path) -> dict[str, Any]:
         conn.rollback()
     ORPHAN_OUTBOX_ACCEPTED = orphan_outbox_accepted
 
+    # Domain: Failure Model
+    failure_table_info = conn.execute("PRAGMA table_info(failures)").fetchall()
+    FAILURE_MODEL_PRESENT = bool(len(failure_table_info) >= 8 and any(c[1] == "failure_id" for c in failure_table_info))
+    FAILURE_IDENTITY_DEFINED = bool(any(c[1] == "failure_id" and c[5] == 1 for c in failure_table_info))
+    failure_fact = next((f for f in AUTHORITY_INVENTORY if f.v2_table == "failures"), None)
+    FAILURE_OWNER_DEFINED = bool(failure_fact is not None and len(failure_fact.v2_owner) > 0)
+
+    orphan_failure_accepted = True
+    try:
+        conn.execute(
+            "INSERT INTO failures (failure_id, project_id, task_id, execution_binding_id, failure_code, message, created_at) VALUES (?,?,?,?,?,?,?)",
+            ("f-orph", "nonexistent-p", "t1", "nonexistent-b", "err", "msg", _now()),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        orphan_failure_accepted = False
+    FAILURE_REFERENTIAL_INTEGRITY = not orphan_failure_accepted
+
+    # Domain: Evidence Model
+    evidence_table_info = conn.execute("PRAGMA table_info(evidence_records)").fetchall()
+    EVIDENCE_MODEL_PRESENT = bool(len(evidence_table_info) >= 7 and any(c[1] == "evidence_id" for c in evidence_table_info))
+    EVIDENCE_IDENTITY_DEFINED = bool(any(c[1] == "evidence_id" and c[5] == 1 for c in evidence_table_info))
+
+    orphan_evidence_accepted = True
+    try:
+        conn.execute(
+            "INSERT INTO evidence_records (evidence_id, project_id, task_id, execution_binding_id, evidence_ref, digest, created_at) VALUES (?,?,?,?,?,?,?)",
+            ("ev-orph", "nonexistent-p", "t1", "nonexistent-b", "ref/log", "sha256:abc", _now()),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        orphan_evidence_accepted = False
+    ORPHAN_EVIDENCE_ACCEPTED = orphan_evidence_accepted
+
+    # Domain: Lease Model & Active Lease Uniqueness
+    lease_table_info = conn.execute("PRAGMA table_info(leases)").fetchall()
+    LEASE_MODEL_PRESENT = bool(len(lease_table_info) >= 7 and any(c[1] == "lease_id" for c in lease_table_info))
+
+    duplicate_lease_accepted = True
+    try:
+        conn.execute(
+            "INSERT INTO leases (lease_id, project_id, resource_type, resource_id, holder_token, status, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("l-gate-1", "uniq-test", "EXECUTION", "res-gate-1", "tok-1", "ACTIVE", _now(), _now()),
+        )
+        conn.commit()
+        try:
+            conn.execute(
+                "INSERT INTO leases (lease_id, project_id, resource_type, resource_id, holder_token, status, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?,?)",
+                ("l-gate-2", "uniq-test", "EXECUTION", "res-gate-1", "tok-2", "ACTIVE", _now(), _now()),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            duplicate_lease_accepted = False
+    except Exception:
+        duplicate_lease_accepted = True
+    ACTIVE_LEASE_UNIQUENESS_ENFORCED = not duplicate_lease_accepted
+    DUPLICATE_ACTIVE_LEASE_ACCEPTED = duplicate_lease_accepted
+
+    # Domain: Required Logical Entities Completeness
+    REQUIRED_LOGICAL_ENTITIES_LIST, MISSING_REQUIRED_LOGICAL_ENTITIES = inspect_required_entities(conn)
+
     # Domain: Partial upgrade
     PARTIAL_UPGRADE_STATES_DEFINED = (
         len(UPGRADE_STATE_POLICIES) == 4
@@ -813,6 +994,17 @@ def run_nx010_machine_gate(tmp_path: Path) -> dict[str, Any]:
         REQUIRED_FOREIGN_KEYS_COMPLETE,
         ACTIVE_BINDING_UNIQUENESS_ENFORCED,
         ACTIVE_SCOPE_UNIQUENESS_ENFORCED,
+        ACTIVE_LEASE_UNIQUENESS_ENFORCED,
+        not DUPLICATE_ACTIVE_LEASE_ACCEPTED,
+        FAILURE_MODEL_PRESENT,
+        FAILURE_IDENTITY_DEFINED,
+        FAILURE_OWNER_DEFINED,
+        FAILURE_REFERENTIAL_INTEGRITY,
+        EVIDENCE_MODEL_PRESENT,
+        EVIDENCE_IDENTITY_DEFINED,
+        not ORPHAN_EVIDENCE_ACCEPTED,
+        LEASE_MODEL_PRESENT,
+        len(MISSING_REQUIRED_LOGICAL_ENTITIES) == 0,
         REVISION_MONOTONIC_CONTRACT,
         APPEND_ONLY_AUDIT_CONTRACT,
         not ORPHAN_BINDING_ACCEPTED,
@@ -862,6 +1054,17 @@ def run_nx010_machine_gate(tmp_path: Path) -> dict[str, Any]:
         and REQUIRED_FOREIGN_KEYS_COMPLETE is True
         and ACTIVE_BINDING_UNIQUENESS_ENFORCED is True
         and ACTIVE_SCOPE_UNIQUENESS_ENFORCED is True
+        and LEASE_MODEL_PRESENT is True
+        and ACTIVE_LEASE_UNIQUENESS_ENFORCED is True
+        and DUPLICATE_ACTIVE_LEASE_ACCEPTED is False
+        and FAILURE_MODEL_PRESENT is True
+        and FAILURE_IDENTITY_DEFINED is True
+        and FAILURE_OWNER_DEFINED is True
+        and FAILURE_REFERENTIAL_INTEGRITY is True
+        and EVIDENCE_MODEL_PRESENT is True
+        and EVIDENCE_IDENTITY_DEFINED is True
+        and ORPHAN_EVIDENCE_ACCEPTED is False
+        and len(MISSING_REQUIRED_LOGICAL_ENTITIES) == 0
         and REVISION_MONOTONIC_CONTRACT is True
         and APPEND_ONLY_AUDIT_CONTRACT is True
         and ORPHAN_BINDING_ACCEPTED is False
@@ -886,6 +1089,18 @@ def run_nx010_machine_gate(tmp_path: Path) -> dict[str, Any]:
         "REQUIRED_FOREIGN_KEYS_COMPLETE": REQUIRED_FOREIGN_KEYS_COMPLETE,
         "ACTIVE_BINDING_UNIQUENESS_ENFORCED": ACTIVE_BINDING_UNIQUENESS_ENFORCED,
         "ACTIVE_SCOPE_UNIQUENESS_ENFORCED": ACTIVE_SCOPE_UNIQUENESS_ENFORCED,
+        "ACTIVE_LEASE_UNIQUENESS_ENFORCED": ACTIVE_LEASE_UNIQUENESS_ENFORCED,
+        "DUPLICATE_ACTIVE_LEASE_ACCEPTED": DUPLICATE_ACTIVE_LEASE_ACCEPTED,
+        "FAILURE_MODEL_PRESENT": FAILURE_MODEL_PRESENT,
+        "FAILURE_IDENTITY_DEFINED": FAILURE_IDENTITY_DEFINED,
+        "FAILURE_OWNER_DEFINED": FAILURE_OWNER_DEFINED,
+        "FAILURE_REFERENTIAL_INTEGRITY": FAILURE_REFERENTIAL_INTEGRITY,
+        "EVIDENCE_MODEL_PRESENT": EVIDENCE_MODEL_PRESENT,
+        "EVIDENCE_IDENTITY_DEFINED": EVIDENCE_IDENTITY_DEFINED,
+        "ORPHAN_EVIDENCE_ACCEPTED": ORPHAN_EVIDENCE_ACCEPTED,
+        "LEASE_MODEL_PRESENT": LEASE_MODEL_PRESENT,
+        "REQUIRED_LOGICAL_ENTITIES": REQUIRED_LOGICAL_ENTITIES_LIST,
+        "MISSING_REQUIRED_LOGICAL_ENTITIES": MISSING_REQUIRED_LOGICAL_ENTITIES,
         "REVISION_MONOTONIC_CONTRACT": REVISION_MONOTONIC_CONTRACT,
         "APPEND_ONLY_AUDIT_CONTRACT": APPEND_ONLY_AUDIT_CONTRACT,
         "ORPHAN_BINDING_ACCEPTED": ORPHAN_BINDING_ACCEPTED,
@@ -918,6 +1133,18 @@ def test_nx010_machine_gate_execution(tmp_path: Path) -> None:
     assert gate["REQUIRED_FOREIGN_KEYS_COMPLETE"] is True
     assert gate["ACTIVE_BINDING_UNIQUENESS_ENFORCED"] is True
     assert gate["ACTIVE_SCOPE_UNIQUENESS_ENFORCED"] is True
+    assert gate["ACTIVE_LEASE_UNIQUENESS_ENFORCED"] is True
+    assert gate["DUPLICATE_ACTIVE_LEASE_ACCEPTED"] is False
+    assert gate["FAILURE_MODEL_PRESENT"] is True
+    assert gate["FAILURE_IDENTITY_DEFINED"] is True
+    assert gate["FAILURE_OWNER_DEFINED"] is True
+    assert gate["FAILURE_REFERENTIAL_INTEGRITY"] is True
+    assert gate["EVIDENCE_MODEL_PRESENT"] is True
+    assert gate["EVIDENCE_IDENTITY_DEFINED"] is True
+    assert gate["ORPHAN_EVIDENCE_ACCEPTED"] is False
+    assert gate["LEASE_MODEL_PRESENT"] is True
+    assert len(gate["REQUIRED_LOGICAL_ENTITIES"]) >= 11
+    assert gate["MISSING_REQUIRED_LOGICAL_ENTITIES"] == []
     assert gate["REVISION_MONOTONIC_CONTRACT"] is True
     assert gate["APPEND_ONLY_AUDIT_CONTRACT"] is True
     assert gate["ORPHAN_BINDING_ACCEPTED"] is False

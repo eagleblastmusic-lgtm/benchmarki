@@ -202,6 +202,39 @@ AUTHORITY_INVENTORY: tuple[AuthorityFact, ...] = (
         v2_owner="ProjectMemoryStoreV2",
         v2_table="audit_events",
     ),
+    AuthorityFact(
+        fact_name="failure_record",
+        current_owner="ProjectMemoryStore (state.execution.attempts[].failure_code)",
+        current_storage="project-memory/{id}/state.json",
+        mutability="IMMUTABLE",
+        identity="failure_id",
+        revision_generation_rule="linked to execution_binding generation",
+        relationships="FK to projects(project_id), execution_bindings, attempts",
+        v2_owner="ProjectMemoryStoreV2",
+        v2_table="failures",
+    ),
+    AuthorityFact(
+        fact_name="evidence_record",
+        current_owner="ProjectMemoryStore (state.execution.attempts[].evidence_refs)",
+        current_storage="project-memory/{id}/state.json",
+        mutability="IMMUTABLE",
+        identity="evidence_id",
+        revision_generation_rule="immutable cryptographic digest",
+        relationships="FK to projects(project_id), execution_bindings, attempts",
+        v2_owner="ProjectMemoryStoreV2",
+        v2_table="evidence_records",
+    ),
+    AuthorityFact(
+        fact_name="lease_record",
+        current_owner="ProjectExecution / ProjectLaunchQueueAdapter",
+        current_storage="execution.lock / queue.lock",
+        mutability="MUTABLE",
+        identity="lease_id",
+        revision_generation_rule="at most 1 active lease per resource",
+        relationships="FK to projects(project_id)",
+        v2_owner="ProjectMemoryStoreV2",
+        v2_table="leases",
+    ),
 )
 
 
@@ -471,6 +504,54 @@ BEFORE DELETE ON audit_events
 BEGIN
     SELECT RAISE(FAIL, 'audit_events is append-only: deletes are prohibited');
 END;
+
+-- 17. Failure Records (NX-010)
+CREATE TABLE IF NOT EXISTS failures (
+    failure_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    execution_binding_id TEXT,
+    attempt_id TEXT,
+    failure_code TEXT NOT NULL,
+    failure_class TEXT,
+    message TEXT NOT NULL,
+    details_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE RESTRICT,
+    FOREIGN KEY (execution_binding_id) REFERENCES execution_bindings(execution_binding_id) ON DELETE RESTRICT,
+    FOREIGN KEY (attempt_id) REFERENCES attempts(attempt_id) ON DELETE RESTRICT
+);
+
+-- 18. Evidence Records (NX-010)
+CREATE TABLE IF NOT EXISTS evidence_records (
+    evidence_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    execution_binding_id TEXT NOT NULL,
+    attempt_id TEXT,
+    evidence_ref TEXT NOT NULL,
+    evidence_type TEXT NOT NULL DEFAULT 'artifact',
+    digest TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE RESTRICT,
+    FOREIGN KEY (execution_binding_id) REFERENCES execution_bindings(execution_binding_id) ON DELETE RESTRICT,
+    FOREIGN KEY (attempt_id) REFERENCES attempts(attempt_id) ON DELETE RESTRICT
+);
+
+-- 19. Leases (NX-010)
+CREATE TABLE IF NOT EXISTS leases (
+    lease_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    resource_type TEXT NOT NULL,
+    resource_id TEXT NOT NULL,
+    holder_token TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'RELEASED', 'EXPIRED')),
+    acquired_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    fence INTEGER NOT NULL DEFAULT 1 CHECK(fence >= 1),
+    FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_active_lease ON leases(resource_type, resource_id) WHERE status = 'ACTIVE';
 """
 
 
@@ -561,6 +642,9 @@ V1_TO_V2_FIELD_MAPPING: dict[str, dict[str, str]] = {
         "execution.milestone_auto": "scopes (relational rows)",
         "execution.launch_outbox": "launch_outbox (relational rows)",
         "execution.checkpoints": "checkpoints (relational rows)",
+        "execution.attempts[].failure_code": "failures.failure_code (relational rows)",
+        "execution.attempts[].evidence_refs": "evidence_records.evidence_ref (relational rows)",
+        "execution.lock": "leases (relational rows)",
     },
     "ProjectEvent": {
         "event_id": "audit_events.event_id",
@@ -617,3 +701,56 @@ def verify_v1_v2_mapping_completeness() -> tuple[bool, int]:
             if not target_column:
                 unmapped += 1
     return (unmapped == 0, unmapped)
+
+
+# ==============================================================================
+# 5. REQUIRED LOGICAL ENTITIES INVENTORY & SCHEMA INSPECTION
+# ==============================================================================
+
+REQUIRED_LOGICAL_ENTITIES: tuple[str, ...] = (
+    "project",
+    "plan",
+    "run",
+    "scope",
+    "task",
+    "binding",
+    "attempt",
+    "checkpoint",
+    "outbox",
+    "failure",
+    "evidence",
+    "lease",
+    "audit_event",
+)
+
+ENTITY_TABLE_MAPPING: dict[str, str] = {
+    "project": "projects",
+    "plan": "project_plans",
+    "run": "runs",
+    "scope": "scopes",
+    "task": "task_execution_states",
+    "binding": "execution_bindings",
+    "attempt": "attempts",
+    "checkpoint": "checkpoints",
+    "outbox": "launch_outbox",
+    "failure": "failures",
+    "evidence": "evidence_records",
+    "lease": "leases",
+    "audit_event": "audit_events",
+}
+
+
+def inspect_required_entities(conn: sqlite3.Connection) -> tuple[list[str], list[str]]:
+    """Derives required logical entities and any missing entities from the SQLite schema."""
+    existing_tables = {
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    missing = [
+        entity
+        for entity, table in ENTITY_TABLE_MAPPING.items()
+        if table not in existing_tables
+    ]
+    return list(REQUIRED_LOGICAL_ENTITIES), missing
