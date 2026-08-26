@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-machine-probe-registry-v1",
+  "title": "BDB vNext Machine Inventory Probe Registry v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version", "definitions"],
+  "properties": {
+    "schema": { "const": "bdb-vnext-machine-probe-registry-v1" },
+    "version": { "const": "v1" },
+    "definitions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/probe" }
+    }
+  },
+  "$defs": {
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "probe_id",
+        "fact_class",
+        "source_kind",
+        "timeout_class",
+        "parser_strategy",
+        "parser_version",
+        "candidate_strategy",
+        "sensitivity",
+        "redaction_behavior",
+        "argv",
+        "shell_enabled"
+      ],
+      "properties": {
+        "probe_id": { "type": "string", "minLength": 1 },
+        "fact_class": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]*$" },
+        "source_kind": {
+          "enum": ["OS_API", "ENVIRONMENT", "REGISTRY", "FILESYSTEM", "COMMAND"]
+        },
+        "timeout_class": { "enum": ["NONE", "SHORT", "MEDIUM", "LONG"] },
+        "parser_strategy": { "type": "string", "minLength": 1 },
+        "parser_version": { "type": "string", "minLength": 1 },
+        "candidate_strategy": { "type": "string", "minLength": 1 },
+        "sensitivity": { "enum": ["PUBLIC", "SENSITIVE", "SECRET"] },
+        "redaction_behavior": { "type": "string", "minLength": 1 },
+        "argv": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "shell_enabled": { "const": false }
+      }
+    }
+  }
+}

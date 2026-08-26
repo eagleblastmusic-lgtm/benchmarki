@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-machine-inventory-v1",
+  "title": "BDB vNext Machine Inventory v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "inventory_id",
+    "collected_at",
+    "path_identity",
+    "facts",
+    "redaction"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-vnext-machine-inventory-v1" },
+    "version": { "const": "v1" },
+    "inventory_id": { "type": "string", "minLength": 1 },
+    "collected_at": { "type": "string", "format": "date-time" },
+    "path_identity": { "$ref": "#/$defs/path_identity" },
+    "facts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/fact" }
+    },
+    "redaction": { "$ref": "#/$defs/redaction" }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "absolute_windows_path": {
+      "type": "string",
+      "pattern": "^(?:[A-Za-z]:[\\\\/]|\\\\\\\\).+"
+    },
+    "path_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entries",
+        "duplicate_entries",
+        "digest",
+        "canonicalization_version",
+        "case_semantics",
+        "separator",
+        "duplicate_policy"
+      ],
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/absolute_windows_path" }
+        },
+        "duplicate_entries": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/absolute_windows_path" }
+        },
+        "digest": { "$ref": "#/$defs/digest" },
+        "canonicalization_version": { "const": "v1" },
+        "case_semantics": { "const": "WINDOWS_CASE_INSENSITIVE" },
+        "separator": { "const": "\\" },
+        "duplicate_policy": { "const": "FIRST_WINS" }
+      }
+    },
+    "executable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "resolved_path",
+        "content_digest",
+        "reported_version",
+        "source",
+        "probe_id",
+        "status",
+        "verification"
+      ],
+      "properties": {
+        "resolved_path": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/absolute_windows_path" }
+          ]
+        },
+        "content_digest": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/digest" }
+          ]
+        },
+        "reported_version": {
+          "anyOf": [
+            { "type": "null" },
+            { "type": "string", "minLength": 1 }
+          ]
+        },
+        "source": {
+          "enum": ["OS_API", "ENVIRONMENT", "REGISTRY", "FILESYSTEM", "COMMAND", "FIXTURE"]
+        },
+        "probe_id": { "type": "string", "minLength": 1 },
+        "status": {
+          "enum": ["AVAILABLE", "MISSING", "UNVERIFIABLE", "MALFORMED", "ERROR", "TIMEOUT"]
+        },
+        "verification": {
+          "enum": ["VERIFIED", "DECLARED", "UNVERIFIED", "REJECTED"]
+        }
+      }
+    },
+    "fact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fact_class",
+        "subject",
+        "status",
+        "source",
+        "collected_at",
+        "confidence",
+        "verification",
+        "probe_id",
+        "value",
+        "resolved_path",
+        "version",
+        "digest",
+        "executable",
+        "details"
+      ],
+      "properties": {
+        "fact_class": {
+          "enum": [
+            "os_identity",
+            "windows_build",
+            "architecture",
+            "path_identity",
+            "tool.node",
+            "tool.npm",
+            "tool.git",
+            "tool.python",
+            "tool.rust",
+            "tool.rustup",
+            "tool.cargo",
+            "tool.pwsh",
+            "tool.windows_powershell",
+            "tool.msvc",
+            "tool.windows_sdk",
+            "tool.webview2"
+          ]
+        },
+        "subject": { "type": "string", "minLength": 1 },
+        "status": {
+          "enum": ["AVAILABLE", "MISSING", "UNVERIFIABLE", "MALFORMED", "ERROR", "TIMEOUT"]
+        },
+        "source": {
+          "enum": ["OS_API", "ENVIRONMENT", "REGISTRY", "FILESYSTEM", "COMMAND", "FIXTURE"]
+        },
+        "collected_at": { "type": "string", "format": "date-time" },
+        "confidence": { "enum": ["HIGH", "MEDIUM", "LOW", "NONE"] },
+        "verification": {
+          "enum": ["VERIFIED", "DECLARED", "UNVERIFIED", "REJECTED"]
+        },
+        "probe_id": { "type": "string", "minLength": 1 },
+        "value": {
+          "anyOf": [
+            { "type": "null" },
+            { "type": "object" }
+          ]
+        },
+        "resolved_path": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/absolute_windows_path" }
+          ]
+        },
+        "version": {
+          "anyOf": [
+            { "type": "null" },
+            { "type": "string", "minLength": 1 }
+          ]
+        },
+        "digest": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/digest" }
+          ]
+        },
+        "executable": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/executable" }
+          ]
+        },
+        "details": {
+          "anyOf": [
+            { "type": "null" },
+            { "type": "object" }
+          ]
+        }
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_version",
+        "raw_environment_included",
+        "sensitive_values_redacted"
+      ],
+      "properties": {
+        "policy_version": { "const": "bdb-vnext-machine-redaction-v1" },
+        "raw_environment_included": { "const": false },
+        "sensitive_values_redacted": { "const": true }
+      }
+    }
+  }
+}
