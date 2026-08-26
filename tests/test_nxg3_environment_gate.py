@@ -129,21 +129,31 @@ def compute_g3_manifest_digest() -> str:
     return "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
 
 
-def measure_g3_test_counts() -> dict[str, int]:
-    """Measure test files and test counts across the explicit manifest."""
-    files_count = len(G3_CORE_TEST_FILES)
+def measure_g3_test_counts(manifest: Sequence[str] = G3_CORE_TEST_FILES) -> dict[str, int]:
+    """Measure test files and test counts across the explicit manifest using pytest collection."""
+    files_count = len(manifest)
+    cmd = [sys.executable, "-m", "pytest", "--collect-only", "-q", *manifest]
+    proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, check=False)
     collected = 0
-    # AST parse test files to count test functions
-    for rel_path in G3_CORE_TEST_FILES:
-        full_path = ROOT / rel_path
-        if full_path.exists():
-            try:
-                tree = ast.parse(full_path.read_text(encoding="utf-8"))
-                for node in ast.walk(tree):
-                    if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
-                        collected += 1
-            except Exception:
-                pass
+    if proc.returncode == 0:
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            if ":" in line:
+                parts = line.split(":")
+                if len(parts) == 2 and parts[1].strip().isdigit():
+                    collected += int(parts[1].strip())
+
+    if collected == 0:
+        for rel_path in manifest:
+            full_path = ROOT / rel_path
+            if full_path.exists():
+                try:
+                    tree = ast.parse(full_path.read_text(encoding="utf-8"))
+                    for node in ast.walk(tree):
+                        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
+                            collected += 1
+                except Exception:
+                    pass
 
     return {
         "files": files_count,
@@ -354,6 +364,17 @@ def test_nxg3_manifest_and_test_collection() -> None:
     assert counts["collected"] >= 75
     assert counts["failed"] == 0
     assert counts["skipped"] == 0
+    assert counts["passed"] == counts["collected"]
+
+    # Negative fixtures:
+    # 1. Truncated 7-file manifest must be rejected as an 8-file qualification
+    counts_7 = measure_g3_test_counts(G3_CORE_TEST_FILES[:7])
+    omitted_manifest_file_count_accepted = bool(counts_7["files"] == 8 or counts_7["collected"] == counts["collected"])
+    assert omitted_manifest_file_count_accepted is False
+
+    # 2. Test file count must never be reported as test count
+    test_file_count_reported_as_test_count = bool(counts["files"] == counts["collected"])
+    assert test_file_count_reported_as_test_count is False
 
 
 def test_nxg3_cross_subsystem_trace_execution(tmp_path: Path) -> None:
