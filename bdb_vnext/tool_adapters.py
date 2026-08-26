@@ -170,7 +170,7 @@ class GitToolAdapter(TypedToolAdapter):
             effect_class = ExecutionEffectClass.READ_ONLY
             idempotency = IdempotencyClass.IDEMPOTENT_REPLAYABLE
         else:
-            effect_class = ExecutionEffectClass.SAFE_PROJECT_LOCAL_MUTATION
+            effect_class = ExecutionEffectClass.PROJECT_MUTATION
             idempotency = IdempotencyClass.RECONCILE_ONLY
 
         # Build clean argv: git <op_subcommand> <args>

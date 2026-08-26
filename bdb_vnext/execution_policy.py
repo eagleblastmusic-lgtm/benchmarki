@@ -375,8 +375,12 @@ class ExecutionPolicyEvaluator:
             resolved_cwd = raw_cwd
 
         canon_cwd = canonicalize_path(resolved_cwd)
-        if not is_path_contained(canon_cwd, canon_project):
-            return deny("DENY_CWD_ESCAPE", str(effect_class), str(canon_cwd))
+        if effect_class is PolicyEffectClass.PROJECT_MUTATION:
+            if canon_candidate == canon_project or not is_path_contained(canon_cwd, canon_candidate):
+                return deny("DENY_PROJECT_MUTATION_OUTSIDE_CANDIDATE", str(effect_class), str(canon_cwd))
+        else:
+            if not is_path_contained(canon_cwd, canon_project):
+                return deny("DENY_CWD_ESCAPE", str(effect_class), str(canon_cwd))
 
         # 5. Filesystem Targets Validation
         if filesystem_targets:

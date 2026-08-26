@@ -95,7 +95,7 @@ def _make_mutation_req(exec_id: str = "exec:cand-1", **kwargs: Any) -> lec.Local
         "argv": (sys.executable, "-c", "print('candidate-mutation-ok')"),
         "cwd": ".",
         "env_id": "env:default",
-        "effect_class": lec.ExecutionEffectClass.SAFE_PROJECT_LOCAL_MUTATION,
+        "effect_class": lec.ExecutionEffectClass.PROJECT_MUTATION,
         "expected_source_head": "a" * 40,
         "expected_source_tree": "b" * 40,
     }
@@ -206,6 +206,83 @@ def test_candidate_rollback_preserves_active(tmp_path: Path) -> None:
 
     # ACTIVE remains intact
     assert (active_repo / "main.txt").read_text(encoding="utf-8") == "ACTIVE_BASELINE"
+
+
+def test_git_mutation_routing_qualification(tmp_path: Path) -> None:
+    """Every Git mutation operation requires Candidate boundary and cannot execute against ACTIVE."""
+    from bdb_vnext import tool_adapters as ta
+    from bdb_vnext import execution_policy as ep
+
+    registry = ta.ToolAdapterRegistry()
+    git_adapter = registry.get_adapter("adapter.git")
+    policy_evaluator = ep.ExecutionPolicyEvaluator()
+    bridge = ceb.CandidateExecutionBridge(policy_evaluator=policy_evaluator)
+
+    active_repo = tmp_path / "active_git_repo"
+    active_repo.mkdir()
+    (active_repo / ".git").mkdir()
+    (active_repo / "active_file.txt").write_text("ACTIVE_CONTENT", encoding="utf-8")
+
+    candidate_root = tmp_path / "candidate_git_ws"
+    candidate_root.mkdir()
+    (candidate_root / ".git").mkdir()
+    (candidate_root / "candidate_file.txt").write_text("CANDIDATE_CONTENT", encoding="utf-8")
+
+    git_mutations = sorted(list(ta.GitToolAdapter.MUTATION_OPS))
+    assert len(git_mutations) == 5  # git.add, git.apply, git.branch, git.checkout, git.commit
+
+    for op in git_mutations:
+        req = git_adapter.build_request(
+            op,
+            f"exec:{op}",
+            "proj:git-test",
+            cwd=str(active_repo),
+            expected_head="a" * 40,
+            expected_tree="b" * 40,
+        )
+        assert req.effect_class is lec.ExecutionEffectClass.PROJECT_MUTATION
+
+        # 1. NX-042 Policy evaluation with candidate_root = active_repo (direct active write attempt)
+        decision_active = policy_evaluator.evaluate(
+            req,
+            candidate_root=active_repo,
+            project_root=active_repo,
+            current_head="a" * 40,
+            current_tree="b" * 40,
+        )
+        assert decision_active.decision == "DENY"
+        assert decision_active.reason_code == "DENY_PROJECT_MUTATION_OUTSIDE_CANDIDATE"
+
+        # 2. Bridge execution against ACTIVE directly -> blocked before process start
+        with pytest.raises(lec.LocalExecutionContractError) as exc_blocked:
+            bridge.execute_in_candidate(
+                request=req,
+                candidate_root=active_repo,
+                active_repo_root=active_repo,
+                current_head="a" * 40,
+                current_tree="b" * 40,
+                candidate_id="cand:git-active",
+            )
+        assert "direct_active_write_blocked" in str(exc_blocked.value)
+
+        # 3. Running with proper Candidate workspace -> Policy ALLOW
+        req_cand = git_adapter.build_request(
+            op,
+            f"exec:cand-{op}",
+            "proj:git-test",
+            cwd=str(candidate_root),
+            args=["--version"],
+            expected_head="a" * 40,
+            expected_tree="b" * 40,
+        )
+        decision_cand_proper = policy_evaluator.evaluate(
+            req_cand,
+            candidate_root=candidate_root,
+            project_root=active_repo,
+            current_head="a" * 40,
+            current_tree="b" * 40,
+        )
+        assert decision_cand_proper.decision == "ALLOW"
 
 
 # ==============================================================================

@@ -99,7 +99,7 @@ def test_tool_adapter_registry_families() -> None:
 
 
 def test_git_adapter_read_vs_mutation_split() -> None:
-    """Git read operations are classified as READ_ONLY; mutations as SAFE_PROJECT_LOCAL_MUTATION."""
+    """Git read operations are classified as READ_ONLY; mutations as PROJECT_MUTATION."""
     adapter = ta.GitToolAdapter()
 
     # Read op: git.status
@@ -109,7 +109,7 @@ def test_git_adapter_read_vs_mutation_split() -> None:
 
     # Mutation op: git.commit
     req_commit = adapter.build_request("git.commit", "exec:git-2", "proj:1", "c:/repo", args=["-m", "msg"])
-    assert req_commit.effect_class is lec.ExecutionEffectClass.SAFE_PROJECT_LOCAL_MUTATION
+    assert req_commit.effect_class is lec.ExecutionEffectClass.PROJECT_MUTATION
     assert req_commit.argv == ("git", "commit", "-m", "msg")
 
 

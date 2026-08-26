@@ -194,7 +194,7 @@ class CandidateExecutionBridge:
         decision = self.policy_evaluator.evaluate(
             request,
             candidate_root=canon_candidate,
-            project_root=canon_candidate,
+            project_root=canon_active,
             current_head=current_head,
             current_tree=current_tree,
         )
