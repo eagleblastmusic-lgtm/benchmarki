@@ -79,6 +79,7 @@ class ScopeInputSnapshot:
     next_task_in_milestone_id: str | None = None
     next_task_dependencies_satisfied: bool = True
     next_milestone_id: str | None = None
+    first_task_in_next_milestone_id: str | None = None
     next_milestone_dependencies_satisfied: bool = True
     all_project_milestones_completed: bool = False
     manual_gate_required: bool = False
@@ -130,8 +131,8 @@ def evaluate_scope_transition(snapshot: ScopeInputSnapshot) -> ScopeDecision:
             is_terminal=True,
         )
 
-    # 3. Whole Project already completed
-    if snapshot.all_project_milestones_completed:
+    # 3. Whole Project already completed (applicable to PROJECT and UNTIL_STOPPED)
+    if snapshot.all_project_milestones_completed and snapshot.current_scope in (AutoScope.PROJECT, AutoScope.UNTIL_STOPPED):
         return ScopeDecision(
             action=ScopeAction.STOP_PROJECT_COMPLETE,
             canonical_work_state=CanonicalWorkState.COMPLETED,
@@ -352,6 +353,7 @@ def evaluate_scope_transition(snapshot: ScopeInputSnapshot) -> ScopeDecision:
                 return ScopeDecision(
                     action=ScopeAction.LAUNCH_TASK,
                     canonical_work_state=CanonicalWorkState.RUNNABLE,
+                    selected_task_id=snapshot.first_task_in_next_milestone_id or snapshot.next_task_in_milestone_id,
                     selected_milestone_id=snapshot.next_milestone_id,
                     reason_code="ADVANCE_TO_NEXT_MILESTONE",
                     explanation=f"Previous milestone gate passed. Advancing to next milestone {snapshot.next_milestone_id}.",
