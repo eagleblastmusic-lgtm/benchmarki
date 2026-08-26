@@ -750,3 +750,9 @@ class ProjectMemoryStoreV2:
         shutil.copy2(str(backup_path), str(dest_path))
         digest = hashlib.sha256(dest_path.read_bytes()).hexdigest()
         return f"sha256:{digest}"
+
+    def get_scope_orchestrator(self) -> Any:
+        """Returns a ScopeOrchestrator bound directly to this canonical ProjectMemoryStoreV2 authority."""
+        from .scope_orchestrator import ScopeOrchestrator
+        self._ensure_initialized()
+        return ScopeOrchestrator(self._connect(), self.project_id)

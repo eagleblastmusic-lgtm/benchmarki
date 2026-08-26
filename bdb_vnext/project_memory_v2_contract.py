@@ -257,6 +257,17 @@ AUTHORITY_INVENTORY: tuple[AuthorityFact, ...] = (
         v2_owner="ProjectMemoryStoreV2",
         v2_table="budget_overrides",
     ),
+    AuthorityFact(
+        fact_name="scope_cursor",
+        current_owner="ProjectMemoryStoreV2 / ScopeOrchestrator",
+        current_storage="memory.db (scope_cursors)",
+        mutability="MUTABLE",
+        identity="project_id",
+        revision_generation_rule="monotonic state_revision with optimistic CAS",
+        relationships="FK to projects(project_id)",
+        v2_owner="ProjectMemoryStoreV2",
+        v2_table="scope_cursors",
+    ),
 )
 
 
@@ -614,6 +625,49 @@ BEFORE DELETE ON budget_overrides
 BEGIN
     SELECT RAISE(FAIL, 'budget_overrides is append-only: deletes are prohibited');
 END;
+
+-- 22. Scope Cursors (NX-021)
+CREATE TABLE IF NOT EXISTS scope_cursors (
+    cursor_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    scope_epoch INTEGER NOT NULL DEFAULT 1,
+    current_milestone_id TEXT,
+    current_task_id TEXT,
+    last_accepted_task_id TEXT,
+    last_accepted_gate TEXT,
+    plan_identity TEXT NOT NULL,
+    plan_version INTEGER NOT NULL DEFAULT 1,
+    state_revision INTEGER NOT NULL DEFAULT 1,
+    disposition TEXT NOT NULL DEFAULT 'INITIALIZED',
+    explanation_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_scope_cursors_project ON scope_cursors(project_id);
+"""
+
+SCOPE_CURSORS_DDL = """
+CREATE TABLE IF NOT EXISTS scope_cursors (
+    cursor_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    scope_epoch INTEGER NOT NULL DEFAULT 1,
+    current_milestone_id TEXT,
+    current_task_id TEXT,
+    last_accepted_task_id TEXT,
+    last_accepted_gate TEXT,
+    plan_identity TEXT NOT NULL,
+    plan_version INTEGER NOT NULL DEFAULT 1,
+    state_revision INTEGER NOT NULL DEFAULT 1,
+    disposition TEXT NOT NULL DEFAULT 'INITIALIZED',
+    explanation_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_scope_cursors_project ON scope_cursors(project_id);
 """
 
 

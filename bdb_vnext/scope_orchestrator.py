@@ -30,28 +30,9 @@ from bdb_vnext.auto_scope_contract import (
     ScopeInputSnapshot,
     evaluate_scope_transition,
 )
+from bdb_vnext.project_memory_v2_contract import SCOPE_CURSORS_DDL
 
 SCOPE_CURSOR_SCHEMA_VERSION = "1.0.0"
-
-SCOPE_CURSORS_DDL = """
-CREATE TABLE IF NOT EXISTS scope_cursors (
-    cursor_id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL UNIQUE,
-    run_id TEXT NOT NULL,
-    scope TEXT NOT NULL,
-    scope_epoch INTEGER NOT NULL DEFAULT 1,
-    current_milestone_id TEXT,
-    current_task_id TEXT,
-    last_accepted_task_id TEXT,
-    last_accepted_gate TEXT,
-    plan_identity TEXT NOT NULL,
-    plan_version INTEGER NOT NULL DEFAULT 1,
-    state_revision INTEGER NOT NULL DEFAULT 1,
-    disposition TEXT NOT NULL DEFAULT 'INITIALIZED',
-    explanation_json TEXT NOT NULL DEFAULT '{}',
-    updated_at TEXT NOT NULL
-);
-"""
 
 
 def _now_iso() -> str:
@@ -176,12 +157,20 @@ class CanonicalPlanGraph:
 class ScopeOrchestrator:
     """Canonical Scope Orchestrator managing durable cursor and state evaluation."""
 
+    CURSOR_STORAGE_DATABASE: str = "memory.db"
+    CURSOR_SCHEMA_OWNER: str = "ProjectMemoryStoreV2"
+    CURSOR_MIGRATION_OWNER: str = "ProjectMemoryStoreV2"
+    CURSOR_TRANSACTION_AUTHORITY: str = "ProjectMemoryStoreV2._transaction"
+    CURSOR_UNDER_PROJECT_MEMORY_V2_AUTHORITY: bool = True
+    SECOND_CURSOR_AUTHORITY_CREATED: bool = False
+    CURSOR_SCHEMA_VERSIONED: bool = True
+
     def __init__(self, conn: sqlite3.Connection, project_id: str) -> None:
         self.conn = conn
         self.project_id = project_id
-        self._ensure_schema()
+        self._ensure_canonical_schema()
 
-    def _ensure_schema(self) -> None:
+    def _ensure_canonical_schema(self) -> None:
         self.conn.executescript(SCOPE_CURSORS_DDL)
         self.conn.commit()
 

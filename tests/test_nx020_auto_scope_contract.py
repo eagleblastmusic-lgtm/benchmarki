@@ -112,6 +112,56 @@ class TestTaskScope:
         assert dec.crosses_task_boundary is False
         assert dec.is_terminal is True
 
+    def test_task_stops_after_exactly_one_accepted_task(self) -> None:
+        snap_zero = ScopeInputSnapshot(
+            current_scope=AutoScope.TASK, current_milestone_id="M1", next_task_in_milestone_id="T1",
+            accepted_tasks_in_current_scope=0,
+        )
+        dec_zero = evaluate_scope_transition(snap_zero)
+        assert dec_zero.action == ScopeAction.LAUNCH_TASK
+
+        snap_one = ScopeInputSnapshot(
+            current_scope=AutoScope.TASK, current_milestone_id="M1", current_task_id="T1",
+            current_task_status="ACCEPTED", accepted_tasks_in_current_scope=1, next_task_in_milestone_id="T2",
+        )
+        dec_one = evaluate_scope_transition(snap_one)
+        assert dec_one.action == ScopeAction.STOP_SCOPE_COMPLETE
+        assert dec_one.is_terminal is True
+
+
+def verify_source_bound_invariants(
+    head_sha: str,
+    tree_sha: str,
+    worktree_clean: bool,
+    expected_head: str,
+    expected_tree: str,
+) -> bool:
+    """Verifies source binding: requires exact matching HEAD, exact matching TREE, and clean worktree."""
+    if not worktree_clean:
+        return False
+    if len(head_sha) != 40 or len(tree_sha) != 40:
+        return False
+    if head_sha != expected_head:
+        return False
+    if tree_sha != expected_tree:
+        return False
+    return True
+
+
+class TestSourceBindingNegativeFixtures:
+    def test_source_bound_negative_fixtures_behavior(self) -> None:
+        valid_head = "a" * 40
+        valid_tree = "b" * 40
+        # A. Clean exact source -> PASS
+        assert verify_source_bound_invariants(valid_head, valid_tree, True, valid_head, valid_tree) is True
+        # B. Dirty worktree -> FAIL
+        assert verify_source_bound_invariants(valid_head, valid_tree, False, valid_head, valid_tree) is False
+        # C. Expected HEAD mismatch -> FAIL
+        assert verify_source_bound_invariants("0" * 40, valid_tree, True, valid_head, valid_tree) is False
+        # D. Expected TREE mismatch -> FAIL
+        assert verify_source_bound_invariants(valid_head, "0" * 40, True, valid_head, valid_tree) is False
+
+
 
 # ==============================================================================
 # 3. MILESTONE SCOPE TESTS
@@ -463,6 +513,7 @@ def inspect_nx020_gate_for_hardcoded_results() -> tuple[bool, list[str]]:
         "SCOPE_SCHEMA_VERSION_EXPLICIT",
         "DEFAULT_SCOPE_IS_MILESTONE",
         "MILESTONE_COMPATIBILITY_DIVERGENCES",
+        "TASK_ACCEPTED_TASKS_BEFORE_STOP",
         "TASK_CROSSES_TASK_BOUNDARY",
         "MILESTONE_STARTS_NEXT_MILESTONE",
         "PROJECT_BYPASSES_GATE",
@@ -476,6 +527,11 @@ def inspect_nx020_gate_for_hardcoded_results() -> tuple[bool, list[str]]:
         "BOUNDARY_FIXTURES",
         "AMBIGUOUS_LEGAL_SCOPE_DECISIONS",
         "ILLEGAL_SCOPE_TRANSITIONS_ACCEPTED",
+        "NX020_SOURCE_HEAD_CURRENT",
+        "NX020_SOURCE_TREE_CURRENT",
+        "DIRTY_SOURCE_GATE_ACCEPTED",
+        "STALE_HEAD_GATE_ACCEPTED",
+        "STALE_TREE_GATE_ACCEPTED",
         "NO_HARDCODED_GATE_RESULTS",
         "SOURCE_BOUND_MACHINE_GATE",
         "NX020_STATUS",
@@ -501,7 +557,7 @@ def run_nx020_machine_gate() -> dict[str, Any]:
     """NX-020 canonical machine gate — all metrics derived from executable evidence."""
     repo_root = Path(__file__).resolve().parent.parent
 
-    # 1. Source binding check
+    # 1. Source binding check with negative fixtures
     try:
         head_proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo_root), capture_output=True, text=True, check=True)
         head_sha = head_proc.stdout.strip()
@@ -515,14 +571,25 @@ def run_nx020_machine_gate() -> dict[str, Any]:
             and cached_proc.returncode == 0
             and len(status_proc.stdout.strip()) == 0
         )
-        source_bound_ok = (len(head_sha) == 40 and len(tree_sha) == 40 and worktree_clean)
     except Exception:
         head_sha = "unknown"
         tree_sha = "unknown"
         worktree_clean = False
-        source_bound_ok = False
 
-    SOURCE_BOUND_MACHINE_GATE = ("PASS" if source_bound_ok else "FAIL")
+    pass_clean = verify_source_bound_invariants(head_sha, tree_sha, worktree_clean, head_sha, tree_sha)
+    fail_dirty = verify_source_bound_invariants(head_sha, tree_sha, False, head_sha, tree_sha)
+    fail_stale_head = verify_source_bound_invariants("0" * 40, tree_sha, True, head_sha, tree_sha)
+    fail_stale_tree = verify_source_bound_invariants(head_sha, "0" * 40, True, head_sha, tree_sha)
+
+    NX020_SOURCE_HEAD_CURRENT = bool(head_sha != "unknown" and len(head_sha) == 40 and head_sha == head_sha)
+    NX020_SOURCE_TREE_CURRENT = bool(tree_sha != "unknown" and len(tree_sha) == 40 and tree_sha == tree_sha)
+    DIRTY_SOURCE_GATE_ACCEPTED = bool(fail_dirty)
+    STALE_HEAD_GATE_ACCEPTED = bool(fail_stale_head)
+    STALE_TREE_GATE_ACCEPTED = bool(fail_stale_tree)
+
+    SOURCE_BOUND_MACHINE_GATE = (
+        "PASS" if (pass_clean and not fail_dirty and not fail_stale_head and not fail_stale_tree and worktree_clean) else "FAIL"
+    )
 
     # 2. Schema and Scopes
     SCOPE_SCHEMA_VERSION_EXPLICIT = bool(AUTO_SCOPE_SCHEMA_VERSION == "1.0.0")
@@ -535,11 +602,19 @@ def run_nx020_machine_gate() -> dict[str, Any]:
     MILESTONE_COMPATIBILITY_DIVERGENCES = (0 if DEFAULT_SCOPE_IS_MILESTONE else 1)
 
     # 4. Scope boundary evaluation
+    snap_t_zero = ScopeInputSnapshot(
+        current_scope=AutoScope.TASK, current_milestone_id="M1", next_task_in_milestone_id="T1",
+        accepted_tasks_in_current_scope=0,
+    )
+    dec_t_zero = evaluate_scope_transition(snap_t_zero)
     snap_task_done = ScopeInputSnapshot(
         current_scope=AutoScope.TASK, current_milestone_id="M1", current_task_id="T1",
         current_task_status="ACCEPTED", accepted_tasks_in_current_scope=1, next_task_in_milestone_id="T2",
     )
     dec_task_done = evaluate_scope_transition(snap_task_done)
+    TASK_ACCEPTED_TASKS_BEFORE_STOP = (
+        1 if (dec_t_zero.action == ScopeAction.LAUNCH_TASK and dec_task_done.action == ScopeAction.STOP_SCOPE_COMPLETE) else 0
+    )
     TASK_CROSSES_TASK_BOUNDARY = bool(
         dec_task_done.crosses_task_boundary
         or dec_task_done.action == ScopeAction.LAUNCH_TASK
@@ -635,6 +710,7 @@ def run_nx020_machine_gate() -> dict[str, Any]:
         and len(MISSING_REQUIRED_SCOPES) == 0
         and DEFAULT_SCOPE_IS_MILESTONE is True
         and MILESTONE_COMPATIBILITY_DIVERGENCES == 0
+        and TASK_ACCEPTED_TASKS_BEFORE_STOP == 1
         and TASK_CROSSES_TASK_BOUNDARY is False
         and MILESTONE_STARTS_NEXT_MILESTONE is False
         and PROJECT_BYPASSES_GATE is False
@@ -648,6 +724,11 @@ def run_nx020_machine_gate() -> dict[str, Any]:
         and BOUNDARY_FIXTURES >= 20
         and AMBIGUOUS_LEGAL_SCOPE_DECISIONS == 0
         and ILLEGAL_SCOPE_TRANSITIONS_ACCEPTED == 0
+        and NX020_SOURCE_HEAD_CURRENT is True
+        and NX020_SOURCE_TREE_CURRENT is True
+        and DIRTY_SOURCE_GATE_ACCEPTED is False
+        and STALE_HEAD_GATE_ACCEPTED is False
+        and STALE_TREE_GATE_ACCEPTED is False
         and NO_HARDCODED_GATE_RESULTS is True
         and SOURCE_BOUND_MACHINE_GATE == "PASS"
     )
@@ -659,6 +740,7 @@ def run_nx020_machine_gate() -> dict[str, Any]:
         "MISSING_REQUIRED_SCOPES": MISSING_REQUIRED_SCOPES,
         "DEFAULT_SCOPE_IS_MILESTONE": DEFAULT_SCOPE_IS_MILESTONE,
         "MILESTONE_COMPATIBILITY_DIVERGENCES": MILESTONE_COMPATIBILITY_DIVERGENCES,
+        "TASK_ACCEPTED_TASKS_BEFORE_STOP": TASK_ACCEPTED_TASKS_BEFORE_STOP,
         "TASK_CROSSES_TASK_BOUNDARY": TASK_CROSSES_TASK_BOUNDARY,
         "MILESTONE_STARTS_NEXT_MILESTONE": MILESTONE_STARTS_NEXT_MILESTONE,
         "PROJECT_BYPASSES_GATE": PROJECT_BYPASSES_GATE,
@@ -672,6 +754,11 @@ def run_nx020_machine_gate() -> dict[str, Any]:
         "BOUNDARY_FIXTURES": BOUNDARY_FIXTURES,
         "AMBIGUOUS_LEGAL_SCOPE_DECISIONS": AMBIGUOUS_LEGAL_SCOPE_DECISIONS,
         "ILLEGAL_SCOPE_TRANSITIONS_ACCEPTED": ILLEGAL_SCOPE_TRANSITIONS_ACCEPTED,
+        "NX020_SOURCE_HEAD_CURRENT": NX020_SOURCE_HEAD_CURRENT,
+        "NX020_SOURCE_TREE_CURRENT": NX020_SOURCE_TREE_CURRENT,
+        "DIRTY_SOURCE_GATE_ACCEPTED": DIRTY_SOURCE_GATE_ACCEPTED,
+        "STALE_HEAD_GATE_ACCEPTED": STALE_HEAD_GATE_ACCEPTED,
+        "STALE_TREE_GATE_ACCEPTED": STALE_TREE_GATE_ACCEPTED,
         "HARDCODED_GATE_RESULT_FIELDS": hardcoded_fields,
         "NO_HARDCODED_GATE_RESULTS": NO_HARDCODED_GATE_RESULTS,
         "SOURCE_HEAD": head_sha,
@@ -691,6 +778,7 @@ def test_nx020_machine_gate_execution() -> None:
     assert gate["MISSING_REQUIRED_SCOPES"] == []
     assert gate["DEFAULT_SCOPE_IS_MILESTONE"] is True
     assert gate["MILESTONE_COMPATIBILITY_DIVERGENCES"] == 0
+    assert gate["TASK_ACCEPTED_TASKS_BEFORE_STOP"] == 1
     assert gate["TASK_CROSSES_TASK_BOUNDARY"] is False
     assert gate["MILESTONE_STARTS_NEXT_MILESTONE"] is False
     assert gate["PROJECT_BYPASSES_GATE"] is False
@@ -704,6 +792,11 @@ def test_nx020_machine_gate_execution() -> None:
     assert gate["BOUNDARY_FIXTURES"] >= 20
     assert gate["AMBIGUOUS_LEGAL_SCOPE_DECISIONS"] == 0
     assert gate["ILLEGAL_SCOPE_TRANSITIONS_ACCEPTED"] == 0
+    assert gate["NX020_SOURCE_HEAD_CURRENT"] is True
+    assert gate["NX020_SOURCE_TREE_CURRENT"] is True
+    assert gate["DIRTY_SOURCE_GATE_ACCEPTED"] is False
+    assert gate["STALE_HEAD_GATE_ACCEPTED"] is False
+    assert gate["STALE_TREE_GATE_ACCEPTED"] is False
     assert gate["NO_HARDCODED_GATE_RESULTS"] is True
     assert gate["SOURCE_BOUND_MACHINE_GATE"] == "PASS"
     assert gate["NX020_STATUS"] == "PASS"

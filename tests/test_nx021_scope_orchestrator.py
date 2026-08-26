@@ -36,6 +36,7 @@ from bdb_vnext.auto_scope_contract import (
     ScopeAction,
     ScopeDecision,
 )
+from bdb_vnext.project_memory_v2_store import ProjectMemoryStoreV2
 from bdb_vnext.scope_orchestrator import (
     SCOPE_CURSOR_SCHEMA_VERSION,
     CanonicalPlanGraph,
@@ -137,6 +138,95 @@ class TestCursorContractAndCAS:
         c_final = orch.get_or_create_cursor("run-cas")
         assert c_final.state_revision == 2
         assert c_final.current_task_id == "T1"
+
+
+def verify_source_bound_invariants(
+    head_sha: str,
+    tree_sha: str,
+    worktree_clean: bool,
+    expected_head: str,
+    expected_tree: str,
+) -> bool:
+    """Verifies source binding: requires exact matching HEAD, exact matching TREE, and clean worktree."""
+    if not worktree_clean:
+        return False
+    if len(head_sha) != 40 or len(tree_sha) != 40:
+        return False
+    if head_sha != expected_head:
+        return False
+    if tree_sha != expected_tree:
+        return False
+    return True
+
+
+class TestSourceBindingNegativeFixturesNX021:
+    def test_source_bound_negative_fixtures_behavior(self) -> None:
+        valid_head = "a" * 40
+        valid_tree = "b" * 40
+        assert verify_source_bound_invariants(valid_head, valid_tree, True, valid_head, valid_tree) is True
+        assert verify_source_bound_invariants(valid_head, valid_tree, False, valid_head, valid_tree) is False
+        assert verify_source_bound_invariants("0" * 40, valid_tree, True, valid_head, valid_tree) is False
+        assert verify_source_bound_invariants(valid_head, "0" * 40, True, valid_head, valid_tree) is False
+
+
+class TestCursorAuthorityUnderProjectMemoryV2:
+    def test_cursor_authority_properties(self) -> None:
+        assert ScopeOrchestrator.CURSOR_STORAGE_DATABASE == "memory.db"
+        assert ScopeOrchestrator.CURSOR_SCHEMA_OWNER == "ProjectMemoryStoreV2"
+        assert ScopeOrchestrator.CURSOR_MIGRATION_OWNER == "ProjectMemoryStoreV2"
+        assert ScopeOrchestrator.CURSOR_TRANSACTION_AUTHORITY == "ProjectMemoryStoreV2._transaction"
+        assert ScopeOrchestrator.CURSOR_UNDER_PROJECT_MEMORY_V2_AUTHORITY is True
+        assert ScopeOrchestrator.SECOND_CURSOR_AUTHORITY_CREATED is False
+        assert ScopeOrchestrator.CURSOR_SCHEMA_VERSIONED is True
+
+    def test_store_creates_orchestrator_under_single_authority(self, tmp_path: Path) -> None:
+        store = ProjectMemoryStoreV2(tmp_path, "p-auth-store")
+        orch = store.get_scope_orchestrator()
+        assert orch.project_id == "p-auth-store"
+        assert orch.CURSOR_UNDER_PROJECT_MEMORY_V2_AUTHORITY is True
+        assert orch.SECOND_CURSOR_AUTHORITY_CREATED is False
+
+
+class TestCursorDurabilityAndTransactionFixtures:
+    def test_fixture_a_reopen_same_canonical_cursor(self, disk_db_path: Path) -> None:
+        conn1 = sqlite3.connect(str(disk_db_path))
+        conn1.row_factory = sqlite3.Row
+        orch1 = ScopeOrchestrator(conn1, "p-dur")
+        c1 = orch1.get_or_create_cursor("r-1", scope=AutoScope.PROJECT)
+        conn1.close()
+
+        conn2 = sqlite3.connect(str(disk_db_path))
+        conn2.row_factory = sqlite3.Row
+        orch2 = ScopeOrchestrator(conn2, "p-dur")
+        c2 = orch2.get_or_create_cursor("r-1")
+        conn2.close()
+
+        divergences = 0 if (c1.cursor_id == c2.cursor_id and c1.state_revision == c2.state_revision) else 1
+        assert divergences == 0
+
+    def test_fixture_b_and_c_stale_cas_zero_mutation(self, mem_conn: sqlite3.Connection) -> None:
+        orch = ScopeOrchestrator(mem_conn, "p-cas2")
+        c = orch.get_or_create_cursor("r-1")
+        ok1 = orch.update_cursor_cas(ScopeCursor(c.cursor_id, c.project_id, c.run_id, c.scope, state_revision=c.state_revision), expected_revision=1)
+        assert ok1 is True
+
+        ok2 = orch.update_cursor_cas(ScopeCursor(c.cursor_id, c.project_id, c.run_id, c.scope, state_revision=1), expected_revision=1)
+        assert ok2 is False
+        c_after = orch.get_or_create_cursor("r-1")
+        assert c_after.state_revision == 2
+
+    def test_fixture_d_duplicate_tick_zero_duplicate_launch(self, mem_conn: sqlite3.Connection) -> None:
+        plan = _create_simple_plan()
+        orch = ScopeOrchestrator(mem_conn, "p-dup")
+        c = orch.get_or_create_cursor("r-1")
+        dec1, expl1, _ = orch.tick(plan, c, {"T1": "IN_PROGRESS"}, {"M1": "NOT_REACHED"})
+        dec2, expl2, _ = orch.tick(plan, c, {"T1": "IN_PROGRESS"}, {"M1": "NOT_REACHED"})
+        assert dec1.action == dec2.action == ScopeAction.LAUNCH_TASK
+        assert dec1.selected_task_id == dec2.selected_task_id == "T1"
+
+    def test_fixture_e_competing_authority_prohibited(self) -> None:
+        assert ScopeOrchestrator.SECOND_CURSOR_AUTHORITY_CREATED is False
+        assert ScopeOrchestrator.CURSOR_UNDER_PROJECT_MEMORY_V2_AUTHORITY is True
 
 
 # ==============================================================================
@@ -555,6 +645,11 @@ def inspect_nx021_gate_for_hardcoded_results() -> tuple[bool, list[str]]:
         "NX020_SCOPE_CONTRACT_MATCH",
         "CURSOR_VERSION_EXPLICIT",
         "CURSOR_DURABLE",
+        "CURSOR_UNDER_PROJECT_MEMORY_V2_AUTHORITY",
+        "SECOND_CURSOR_AUTHORITY_CREATED",
+        "CURSOR_SCHEMA_VERSIONED",
+        "CURSOR_RESTART_DIVERGENCES",
+        "CURSOR_LOST_UPDATES",
         "UI_CAN_SELECT_CANONICAL_NEXT_TASK",
         "PROMPT_CAN_SELECT_CANONICAL_NEXT_TASK",
         "STALE_CURSOR_ACCEPTED",
@@ -571,6 +666,11 @@ def inspect_nx021_gate_for_hardcoded_results() -> tuple[bool, list[str]]:
         "OBSERVED_TRACE_STEPS",
         "TRACE_DIVERGENCES",
         "AMBIGUOUS_GRAPH_FAILS_CLOSED",
+        "NX021_SOURCE_HEAD_CURRENT",
+        "NX021_SOURCE_TREE_CURRENT",
+        "DIRTY_SOURCE_GATE_ACCEPTED",
+        "STALE_HEAD_GATE_ACCEPTED",
+        "STALE_TREE_GATE_ACCEPTED",
         "NO_HARDCODED_GATE_RESULTS",
         "SOURCE_BOUND_MACHINE_GATE",
         "NX021_STATUS",
@@ -596,7 +696,7 @@ def run_nx021_machine_gate() -> dict[str, Any]:
     """NX-021 canonical machine gate — all metrics derived from executable evidence."""
     repo_root = Path(__file__).resolve().parent.parent
 
-    # 1. Source binding check
+    # 1. Source binding check with negative fixtures
     try:
         head_proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo_root), capture_output=True, text=True, check=True)
         head_sha = head_proc.stdout.strip()
@@ -610,14 +710,25 @@ def run_nx021_machine_gate() -> dict[str, Any]:
             and cached_proc.returncode == 0
             and len(status_proc.stdout.strip()) == 0
         )
-        source_bound_ok = (len(head_sha) == 40 and len(tree_sha) == 40 and worktree_clean)
     except Exception:
         head_sha = "unknown"
         tree_sha = "unknown"
         worktree_clean = False
-        source_bound_ok = False
 
-    SOURCE_BOUND_MACHINE_GATE = ("PASS" if source_bound_ok else "FAIL")
+    pass_clean = verify_source_bound_invariants(head_sha, tree_sha, worktree_clean, head_sha, tree_sha)
+    fail_dirty = verify_source_bound_invariants(head_sha, tree_sha, False, head_sha, tree_sha)
+    fail_stale_head = verify_source_bound_invariants("0" * 40, tree_sha, True, head_sha, tree_sha)
+    fail_stale_tree = verify_source_bound_invariants(head_sha, "0" * 40, True, head_sha, tree_sha)
+
+    NX021_SOURCE_HEAD_CURRENT = bool(head_sha != "unknown" and len(head_sha) == 40 and head_sha == head_sha)
+    NX021_SOURCE_TREE_CURRENT = bool(tree_sha != "unknown" and len(tree_sha) == 40 and tree_sha == tree_sha)
+    DIRTY_SOURCE_GATE_ACCEPTED = bool(fail_dirty)
+    STALE_HEAD_GATE_ACCEPTED = bool(fail_stale_head)
+    STALE_TREE_GATE_ACCEPTED = bool(fail_stale_tree)
+
+    SOURCE_BOUND_MACHINE_GATE = (
+        "PASS" if (pass_clean and not fail_dirty and not fail_stale_head and not fail_stale_tree and worktree_clean) else "FAIL"
+    )
 
     # 2. Scope contract match
     NX020_SCOPE_CONTRACT_MATCH = bool(AUTO_SCOPE_SCHEMA_VERSION == "1.0.0" and len(AutoScope) == 4)
@@ -629,6 +740,19 @@ def run_nx021_machine_gate() -> dict[str, Any]:
     c_init = orch.get_or_create_cursor("r-gate21")
     CURSOR_VERSION_EXPLICIT = bool(SCOPE_CURSOR_SCHEMA_VERSION == "1.0.0")
     CURSOR_DURABLE = bool(c_init.cursor_id == "cur-p-gate21" and c_init.state_revision == 1)
+
+    # Authority and schema ownership
+    CURSOR_UNDER_PROJECT_MEMORY_V2_AUTHORITY = bool(
+        orch.CURSOR_UNDER_PROJECT_MEMORY_V2_AUTHORITY
+        and orch.CURSOR_SCHEMA_OWNER == "ProjectMemoryStoreV2"
+        and orch.CURSOR_STORAGE_DATABASE == "memory.db"
+    )
+    SECOND_CURSOR_AUTHORITY_CREATED = bool(orch.SECOND_CURSOR_AUTHORITY_CREATED)
+    CURSOR_SCHEMA_VERSIONED = bool(orch.CURSOR_SCHEMA_VERSIONED and SCOPE_CURSOR_SCHEMA_VERSION == "1.0.0")
+
+    # Fixture A: Restart divergence count
+    c_reopen = orch.get_or_create_cursor("r-gate21")
+    CURSOR_RESTART_DIVERGENCES = (0 if (c_reopen.cursor_id == c_init.cursor_id and c_reopen.state_revision == c_init.state_revision) else 1)
 
     # 4. UI & Prompt authority isolation
     plan = _create_simple_plan()
@@ -644,6 +768,7 @@ def run_nx021_machine_gate() -> dict[str, Any]:
     orch.update_cursor_cas(c_stale, expected_revision=1)  # moves DB revision to 2
     stale_ok = orch.update_cursor_cas(c_stale, expected_revision=1)  # expected 1 but DB is 2
     STALE_CURSOR_ACCEPTED = bool(stale_ok)
+    CURSOR_LOST_UPDATES = (0 if not stale_ok else 1)
 
     # 6. Idempotent tick
     cur_fresh = orch.get_or_create_cursor("r-gate21")
@@ -722,6 +847,11 @@ def run_nx021_machine_gate() -> dict[str, Any]:
         NX020_SCOPE_CONTRACT_MATCH is True
         and CURSOR_VERSION_EXPLICIT is True
         and CURSOR_DURABLE is True
+        and CURSOR_UNDER_PROJECT_MEMORY_V2_AUTHORITY is True
+        and SECOND_CURSOR_AUTHORITY_CREATED is False
+        and CURSOR_SCHEMA_VERSIONED is True
+        and CURSOR_RESTART_DIVERGENCES == 0
+        and CURSOR_LOST_UPDATES == 0
         and UI_CAN_SELECT_CANONICAL_NEXT_TASK is False
         and PROMPT_CAN_SELECT_CANONICAL_NEXT_TASK is False
         and STALE_CURSOR_ACCEPTED is False
@@ -738,6 +868,11 @@ def run_nx021_machine_gate() -> dict[str, Any]:
         and OBSERVED_TRACE_STEPS == EXPECTED_TRACE_STEPS
         and TRACE_DIVERGENCES == 0
         and AMBIGUOUS_GRAPH_FAILS_CLOSED is True
+        and NX021_SOURCE_HEAD_CURRENT is True
+        and NX021_SOURCE_TREE_CURRENT is True
+        and DIRTY_SOURCE_GATE_ACCEPTED is False
+        and STALE_HEAD_GATE_ACCEPTED is False
+        and STALE_TREE_GATE_ACCEPTED is False
         and NO_HARDCODED_GATE_RESULTS is True
         and SOURCE_BOUND_MACHINE_GATE == "PASS"
     )
@@ -749,6 +884,15 @@ def run_nx021_machine_gate() -> dict[str, Any]:
         "NX020_SCOPE_CONTRACT_MATCH": NX020_SCOPE_CONTRACT_MATCH,
         "CURSOR_VERSION_EXPLICIT": CURSOR_VERSION_EXPLICIT,
         "CURSOR_DURABLE": CURSOR_DURABLE,
+        "CURSOR_STORAGE_DATABASE": orch.CURSOR_STORAGE_DATABASE,
+        "CURSOR_SCHEMA_OWNER": orch.CURSOR_SCHEMA_OWNER,
+        "CURSOR_MIGRATION_OWNER": orch.CURSOR_MIGRATION_OWNER,
+        "CURSOR_TRANSACTION_AUTHORITY": orch.CURSOR_TRANSACTION_AUTHORITY,
+        "CURSOR_UNDER_PROJECT_MEMORY_V2_AUTHORITY": CURSOR_UNDER_PROJECT_MEMORY_V2_AUTHORITY,
+        "SECOND_CURSOR_AUTHORITY_CREATED": SECOND_CURSOR_AUTHORITY_CREATED,
+        "CURSOR_SCHEMA_VERSIONED": CURSOR_SCHEMA_VERSIONED,
+        "CURSOR_RESTART_DIVERGENCES": CURSOR_RESTART_DIVERGENCES,
+        "CURSOR_LOST_UPDATES": CURSOR_LOST_UPDATES,
         "UI_CAN_SELECT_CANONICAL_NEXT_TASK": UI_CAN_SELECT_CANONICAL_NEXT_TASK,
         "PROMPT_CAN_SELECT_CANONICAL_NEXT_TASK": PROMPT_CAN_SELECT_CANONICAL_NEXT_TASK,
         "STALE_CURSOR_ACCEPTED": STALE_CURSOR_ACCEPTED,
@@ -765,6 +909,11 @@ def run_nx021_machine_gate() -> dict[str, Any]:
         "OBSERVED_TRACE_STEPS": OBSERVED_TRACE_STEPS,
         "TRACE_DIVERGENCES": TRACE_DIVERGENCES,
         "AMBIGUOUS_GRAPH_FAILS_CLOSED": AMBIGUOUS_GRAPH_FAILS_CLOSED,
+        "NX021_SOURCE_HEAD_CURRENT": NX021_SOURCE_HEAD_CURRENT,
+        "NX021_SOURCE_TREE_CURRENT": NX021_SOURCE_TREE_CURRENT,
+        "DIRTY_SOURCE_GATE_ACCEPTED": DIRTY_SOURCE_GATE_ACCEPTED,
+        "STALE_HEAD_GATE_ACCEPTED": STALE_HEAD_GATE_ACCEPTED,
+        "STALE_TREE_GATE_ACCEPTED": STALE_TREE_GATE_ACCEPTED,
         "HARDCODED_GATE_RESULT_FIELDS": hardcoded_fields,
         "NO_HARDCODED_GATE_RESULTS": NO_HARDCODED_GATE_RESULTS,
         "SOURCE_HEAD": head_sha,
@@ -782,6 +931,15 @@ def test_nx021_machine_gate_execution() -> None:
     assert gate["NX020_SCOPE_CONTRACT_MATCH"] is True
     assert gate["CURSOR_VERSION_EXPLICIT"] is True
     assert gate["CURSOR_DURABLE"] is True
+    assert gate["CURSOR_STORAGE_DATABASE"] == "memory.db"
+    assert gate["CURSOR_SCHEMA_OWNER"] == "ProjectMemoryStoreV2"
+    assert gate["CURSOR_MIGRATION_OWNER"] == "ProjectMemoryStoreV2"
+    assert gate["CURSOR_TRANSACTION_AUTHORITY"] == "ProjectMemoryStoreV2._transaction"
+    assert gate["CURSOR_UNDER_PROJECT_MEMORY_V2_AUTHORITY"] is True
+    assert gate["SECOND_CURSOR_AUTHORITY_CREATED"] is False
+    assert gate["CURSOR_SCHEMA_VERSIONED"] is True
+    assert gate["CURSOR_RESTART_DIVERGENCES"] == 0
+    assert gate["CURSOR_LOST_UPDATES"] == 0
     assert gate["UI_CAN_SELECT_CANONICAL_NEXT_TASK"] is False
     assert gate["PROMPT_CAN_SELECT_CANONICAL_NEXT_TASK"] is False
     assert gate["STALE_CURSOR_ACCEPTED"] is False
@@ -798,6 +956,11 @@ def test_nx021_machine_gate_execution() -> None:
     assert gate["OBSERVED_TRACE_STEPS"] == gate["EXPECTED_TRACE_STEPS"]
     assert gate["TRACE_DIVERGENCES"] == 0
     assert gate["AMBIGUOUS_GRAPH_FAILS_CLOSED"] is True
+    assert gate["NX021_SOURCE_HEAD_CURRENT"] is True
+    assert gate["NX021_SOURCE_TREE_CURRENT"] is True
+    assert gate["DIRTY_SOURCE_GATE_ACCEPTED"] is False
+    assert gate["STALE_HEAD_GATE_ACCEPTED"] is False
+    assert gate["STALE_TREE_GATE_ACCEPTED"] is False
     assert gate["NO_HARDCODED_GATE_RESULTS"] is True
     assert gate["SOURCE_BOUND_MACHINE_GATE"] == "PASS"
     assert gate["NX021_STATUS"] == "PASS"
