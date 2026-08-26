@@ -756,3 +756,72 @@ class ProjectMemoryStoreV2:
         from .scope_orchestrator import ScopeOrchestrator
         self._ensure_initialized()
         return ScopeOrchestrator(self._connect(), self.project_id)
+
+    def request_stop(
+        self,
+        *,
+        expected_epoch: int | None = None,
+        reason: str = "External STOP requested",
+        actor_class: str = "operator",
+    ) -> tuple[Any, bool, int, int]:
+        """Requests canonical STOP under Project Memory v2 authority."""
+        from .stop_fence import execute_stop_transaction
+        self._ensure_initialized()
+        with self._transaction() as conn:
+            return execute_stop_transaction(
+                conn,
+                self.project_id,
+                expected_epoch=expected_epoch,
+                reason=reason,
+                actor_class=actor_class,
+            )
+
+    def resume_scope(
+        self,
+        *,
+        expected_prior_epoch: int | None = None,
+        new_run_id: str | None = None,
+        actor_class: str = "operator",
+    ) -> Any:
+        """Resumes scope under Project Memory v2 authority into a new epoch."""
+        from .stop_fence import execute_resume_transaction
+        self._ensure_initialized()
+        with self._transaction() as conn:
+            return execute_resume_transaction(
+                conn,
+                self.project_id,
+                expected_prior_epoch=expected_prior_epoch,
+                new_run_id=new_run_id,
+                actor_class=actor_class,
+            )
+
+    def get_stop_fence(self, epoch: int) -> Any | None:
+        """Reads a stop fence record from Project Memory v2 if exists."""
+        self._ensure_initialized()
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM stop_fences WHERE project_id = ? AND scope_epoch = ?",
+                (self.project_id, epoch),
+            ).fetchone()
+            if not row:
+                return None
+            from .stop_fence import StopFenceRecord
+            return StopFenceRecord(
+                fence_id=row["fence_id"],
+                project_id=row["project_id"],
+                run_id=row["run_id"],
+                scope=row["scope"],
+                scope_epoch=row["scope_epoch"],
+                cursor_id=row["cursor_id"],
+                stop_requested_at=row["stop_requested_at"],
+                stop_reason=row["stop_reason"],
+                actor_class=row["actor_class"],
+                prior_disposition=row["prior_disposition"],
+                source_state_revision=row["source_state_revision"],
+                committed_revision=row["committed_revision"],
+                cancelled_work_ids=tuple(json.loads(row["cancelled_work_ids_json"])),
+                created_at=row["created_at"],
+            )
+        finally:
+            conn.close()

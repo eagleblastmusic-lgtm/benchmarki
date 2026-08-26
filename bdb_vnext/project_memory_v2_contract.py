@@ -268,6 +268,17 @@ AUTHORITY_INVENTORY: tuple[AuthorityFact, ...] = (
         v2_owner="ProjectMemoryStoreV2",
         v2_table="scope_cursors",
     ),
+    AuthorityFact(
+        fact_name="stop_fence",
+        current_owner="ProjectMemoryStoreV2 / ScopeOrchestrator",
+        current_storage="memory.db (stop_fences)",
+        mutability="APPEND_ONLY",
+        identity="(project_id, scope_epoch)",
+        revision_generation_rule="monotonic epoch sequence",
+        relationships="FK to projects(project_id)",
+        v2_owner="ProjectMemoryStoreV2",
+        v2_table="stop_fences",
+    ),
 )
 
 
@@ -626,7 +637,7 @@ BEGIN
     SELECT RAISE(FAIL, 'budget_overrides is append-only: deletes are prohibited');
 END;
 
--- 22. Scope Cursors (NX-021)
+-- 22. Scope Cursors (NX-021 / NX-022)
 CREATE TABLE IF NOT EXISTS scope_cursors (
     cursor_id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
@@ -641,11 +652,46 @@ CREATE TABLE IF NOT EXISTS scope_cursors (
     plan_version INTEGER NOT NULL DEFAULT 1,
     state_revision INTEGER NOT NULL DEFAULT 1,
     disposition TEXT NOT NULL DEFAULT 'INITIALIZED',
+    status TEXT NOT NULL DEFAULT 'ACTIVE',
+    stop_requested_at TEXT,
+    stop_reason TEXT,
     explanation_json TEXT NOT NULL DEFAULT '{}',
     updated_at TEXT NOT NULL,
     FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE RESTRICT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_scope_cursors_project ON scope_cursors(project_id);
+
+-- 23. Stop Fences (NX-022)
+CREATE TABLE IF NOT EXISTS stop_fences (
+    fence_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    scope_epoch INTEGER NOT NULL,
+    cursor_id TEXT NOT NULL,
+    stop_requested_at TEXT NOT NULL,
+    stop_reason TEXT NOT NULL,
+    actor_class TEXT NOT NULL DEFAULT 'operator',
+    prior_disposition TEXT NOT NULL,
+    source_state_revision INTEGER NOT NULL,
+    committed_revision INTEGER NOT NULL,
+    cancelled_work_ids_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_stop_fences_project_epoch ON stop_fences(project_id, scope_epoch);
+
+CREATE TRIGGER IF NOT EXISTS trg_stop_fences_no_update
+BEFORE UPDATE ON stop_fences
+BEGIN
+    SELECT RAISE(FAIL, 'stop_fences is immutable: updates are prohibited');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_stop_fences_no_delete
+BEFORE DELETE ON stop_fences
+BEGIN
+    SELECT RAISE(FAIL, 'stop_fences is immutable: deletes are prohibited');
+END;
 """
 
 SCOPE_CURSORS_DDL = """
@@ -663,11 +709,47 @@ CREATE TABLE IF NOT EXISTS scope_cursors (
     plan_version INTEGER NOT NULL DEFAULT 1,
     state_revision INTEGER NOT NULL DEFAULT 1,
     disposition TEXT NOT NULL DEFAULT 'INITIALIZED',
+    status TEXT NOT NULL DEFAULT 'ACTIVE',
+    stop_requested_at TEXT,
+    stop_reason TEXT,
     explanation_json TEXT NOT NULL DEFAULT '{}',
     updated_at TEXT NOT NULL,
     FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE RESTRICT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_scope_cursors_project ON scope_cursors(project_id);
+"""
+
+STOP_FENCES_DDL = """
+CREATE TABLE IF NOT EXISTS stop_fences (
+    fence_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    scope_epoch INTEGER NOT NULL,
+    cursor_id TEXT NOT NULL,
+    stop_requested_at TEXT NOT NULL,
+    stop_reason TEXT NOT NULL,
+    actor_class TEXT NOT NULL DEFAULT 'operator',
+    prior_disposition TEXT NOT NULL,
+    source_state_revision INTEGER NOT NULL,
+    committed_revision INTEGER NOT NULL,
+    cancelled_work_ids_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_stop_fences_project_epoch ON stop_fences(project_id, scope_epoch);
+
+CREATE TRIGGER IF NOT EXISTS trg_stop_fences_no_update
+BEFORE UPDATE ON stop_fences
+BEGIN
+    SELECT RAISE(FAIL, 'stop_fences is immutable: updates are prohibited');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_stop_fences_no_delete
+BEFORE DELETE ON stop_fences
+BEGIN
+    SELECT RAISE(FAIL, 'stop_fences is immutable: deletes are prohibited');
+END;
 """
 
 

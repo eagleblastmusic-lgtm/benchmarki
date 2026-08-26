@@ -55,6 +55,9 @@ class ScopeCursor:
     plan_version: int = 1
     state_revision: int = 1
     disposition: str = "INITIALIZED"
+    status: str = "ACTIVE"
+    stop_requested_at: str | None = None
+    stop_reason: str | None = None
     explanation_json: str = "{}"
     updated_at: str = field(default_factory=_now_iso)
 
@@ -165,13 +168,28 @@ class ScopeOrchestrator:
     SECOND_CURSOR_AUTHORITY_CREATED: bool = False
     CURSOR_SCHEMA_VERSIONED: bool = True
 
+    # NX-022 Authority Declarations
+    STOP_FENCE_UNDER_PROJECT_MEMORY_V2_AUTHORITY: bool = True
+    SECOND_STOP_AUTHORITY_CREATED: bool = False
+    STOP_FENCE_SCHEMA_VERSION: str = "1.0.0"
+
     def __init__(self, conn: sqlite3.Connection, project_id: str) -> None:
         self.conn = conn
         self.project_id = project_id
         self._ensure_canonical_schema()
 
     def _ensure_canonical_schema(self) -> None:
+        from bdb_vnext.project_memory_v2_contract import STOP_FENCES_DDL
         self.conn.executescript(SCOPE_CURSORS_DDL)
+        self.conn.executescript(STOP_FENCES_DDL)
+        # Migrate existing table if status / stop columns are missing
+        columns = {row[1] for row in self.conn.execute("PRAGMA table_info(scope_cursors)").fetchall()}
+        if "status" not in columns:
+            self.conn.execute("ALTER TABLE scope_cursors ADD COLUMN status TEXT NOT NULL DEFAULT 'ACTIVE'")
+        if "stop_requested_at" not in columns:
+            self.conn.execute("ALTER TABLE scope_cursors ADD COLUMN stop_requested_at TEXT")
+        if "stop_reason" not in columns:
+            self.conn.execute("ALTER TABLE scope_cursors ADD COLUMN stop_reason TEXT")
         self.conn.commit()
 
     def get_or_create_cursor(
@@ -187,6 +205,10 @@ class ScopeOrchestrator:
         ).fetchone()
 
         if row:
+            keys = row.keys()
+            status = row["status"] if "status" in keys else "ACTIVE"
+            stop_requested_at = row["stop_requested_at"] if "stop_requested_at" in keys else None
+            stop_reason = row["stop_reason"] if "stop_reason" in keys else None
             return ScopeCursor(
                 cursor_id=row["cursor_id"],
                 project_id=row["project_id"],
@@ -201,6 +223,9 @@ class ScopeOrchestrator:
                 plan_version=row["plan_version"],
                 state_revision=row["state_revision"],
                 disposition=row["disposition"],
+                status=status,
+                stop_requested_at=stop_requested_at,
+                stop_reason=stop_reason,
                 explanation_json=row["explanation_json"],
                 updated_at=row["updated_at"],
             )
@@ -213,8 +238,8 @@ class ScopeOrchestrator:
                 cursor_id, project_id, run_id, scope, scope_epoch,
                 current_milestone_id, current_task_id, last_accepted_task_id,
                 last_accepted_gate, plan_identity, plan_version, state_revision,
-                disposition, explanation_json, updated_at
-            ) VALUES (?, ?, ?, ?, 1, NULL, NULL, NULL, NULL, ?, ?, 1, 'INITIALIZED', '{}', ?)
+                disposition, status, stop_requested_at, stop_reason, explanation_json, updated_at
+            ) VALUES (?, ?, ?, ?, 1, NULL, NULL, NULL, NULL, ?, ?, 1, 'INITIALIZED', 'ACTIVE', NULL, NULL, '{}', ?)
             """,
             (cursor_id, self.project_id, run_id, scope.value, plan_identity, plan_version, now_iso),
         )
@@ -230,6 +255,9 @@ class ScopeOrchestrator:
             plan_version=plan_version,
             state_revision=1,
             disposition="INITIALIZED",
+            status="ACTIVE",
+            stop_requested_at=None,
+            stop_reason=None,
             updated_at=now_iso,
         )
 
@@ -252,6 +280,9 @@ class ScopeOrchestrator:
                 plan_version = ?,
                 state_revision = ?,
                 disposition = ?,
+                status = ?,
+                stop_requested_at = ?,
+                stop_reason = ?,
                 explanation_json = ?,
                 updated_at = ?
             WHERE project_id = ? AND state_revision = ?
@@ -268,6 +299,9 @@ class ScopeOrchestrator:
                 cursor.plan_version,
                 new_revision,
                 cursor.disposition,
+                cursor.status,
+                cursor.stop_requested_at,
+                cursor.stop_reason,
                 cursor.explanation_json,
                 now_iso,
                 self.project_id,
@@ -458,6 +492,11 @@ class ScopeOrchestrator:
         # Build snapshot
         cur_tid_status = task_statuses.get(cursor.current_task_id or "") if cursor.current_task_id else None
         accepted_count = 1 if (cur_tid_status == "ACCEPTED") else 0
+        effective_stop = (
+            stop_requested
+            or cursor.status == "STOPPED"
+            or cursor.disposition == "STOPPED"
+        )
 
         snapshot = ScopeInputSnapshot(
             current_scope=cursor.scope,
@@ -477,7 +516,7 @@ class ScopeOrchestrator:
             manual_gate_approved=man_ok,
             policy_gate_required=pol_req,
             policy_gate_approved=pol_ok,
-            stop_requested=stop_requested,
+            stop_requested=effective_stop,
             ci_waiting=bool(cursor.current_task_id and cursor.current_task_id in ci_waiting_tasks),
             transient_backoff=bool(cursor.current_task_id and cursor.current_task_id in transient_backoff_tasks),
             approved_plan_exhausted=approved_plan_exhausted,
@@ -529,8 +568,45 @@ class ScopeOrchestrator:
             plan_version=plan.plan_version,
             state_revision=cursor.state_revision,  # update_cursor_cas increments this
             disposition=decision.action.value,
+            status=cursor.status,
+            stop_requested_at=cursor.stop_requested_at,
+            stop_reason=cursor.stop_reason,
             explanation_json=json.dumps(asdict(explanation)),
             updated_at=_now_iso(),
         )
 
         return decision, explanation, updated_cursor
+
+    def request_stop(
+        self,
+        *,
+        expected_epoch: int | None = None,
+        reason: str = "External STOP requested",
+        actor_class: str = "operator",
+    ) -> tuple[Any, bool, int, int]:
+        """Atomically executes a STOP transaction under Project Memory v2 authority."""
+        from bdb_vnext.stop_fence import execute_stop_transaction
+        return execute_stop_transaction(
+            self.conn,
+            self.project_id,
+            expected_epoch=expected_epoch,
+            reason=reason,
+            actor_class=actor_class,
+        )
+
+    def resume_scope(
+        self,
+        *,
+        expected_prior_epoch: int | None = None,
+        new_run_id: str | None = None,
+        actor_class: str = "operator",
+    ) -> Any:
+        """Atomically resumes execution into a new monotonic epoch (N -> N+1)."""
+        from bdb_vnext.stop_fence import execute_resume_transaction
+        return execute_resume_transaction(
+            self.conn,
+            self.project_id,
+            expected_prior_epoch=expected_prior_epoch,
+            new_run_id=new_run_id,
+            actor_class=actor_class,
+        )
