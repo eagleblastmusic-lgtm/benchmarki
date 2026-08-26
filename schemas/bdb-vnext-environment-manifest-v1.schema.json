@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-environment-manifest-v1",
+  "title": "BDB vNext Deterministic Environment Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "version", "plan_id", "plan_digest", "project_id", "task_id",
+    "requirement_digest", "inventory_digest", "source_head", "source_tree",
+    "platform_identity", "provisioning_adapter_version", "components", "entries",
+    "manifest_digest"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-vnext-environment-manifest-v1" },
+    "version": { "const": "v1" },
+    "plan_id": { "$ref": "#/$defs/identity" },
+    "plan_digest": { "$ref": "#/$defs/digest" },
+    "project_id": { "$ref": "#/$defs/identity" },
+    "task_id": { "$ref": "#/$defs/identity" },
+    "requirement_digest": { "$ref": "#/$defs/digest" },
+    "inventory_digest": { "$ref": "#/$defs/digest" },
+    "source_head": { "$ref": "#/$defs/source" },
+    "source_tree": { "$ref": "#/$defs/source" },
+    "platform_identity": { "$ref": "#/$defs/platform" },
+    "provisioning_adapter_version": { "$ref": "#/$defs/identity" },
+    "components": { "type": "array", "items": { "$ref": "#/$defs/component" } },
+    "entries": { "type": "array", "items": { "$ref": "#/$defs/entry" } },
+    "manifest_digest": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "identity": { "type": "string", "pattern": "^[a-z][a-z0-9_.:-]*$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "source": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "relative_path": { "type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//).+" },
+    "tool": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "path", "digest", "version"],
+      "properties": {
+        "name": { "$ref": "#/$defs/identity" },
+        "path": { "type": "string", "pattern": "^(?:[A-Za-z]:[\\\\/]|\\\\\\\\|/).+" },
+        "digest": { "$ref": "#/$defs/digest" },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "package": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "version", "digest"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9_.:@/-]*$" },
+        "version": { "type": "string", "minLength": 1 },
+        "digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "platform": {
+      "type": "object", "additionalProperties": false,
+      "required": ["os_name", "architecture", "machine_id", "path_digest", "python_implementation"],
+      "properties": {
+        "os_name": { "type": "string", "minLength": 1 },
+        "architecture": { "type": "string", "minLength": 1 },
+        "machine_id": { "type": "string", "minLength": 1 },
+        "path_digest": { "$ref": "#/$defs/digest" },
+        "python_implementation": { "type": "string", "minLength": 1 }
+      }
+    },
+    "component": {
+      "type": "object", "additionalProperties": false,
+      "required": ["component", "tool_identities", "package_identities", "output_paths", "manifest_digests", "lockfile_digests"],
+      "properties": {
+        "component": { "$ref": "#/$defs/identity" },
+        "tool_identities": { "type": "array", "items": { "$ref": "#/$defs/tool" } },
+        "package_identities": { "type": "array", "items": { "$ref": "#/$defs/package" } },
+        "output_paths": { "type": "array", "items": { "$ref": "#/$defs/relative_path" } },
+        "manifest_digests": { "type": "object", "additionalProperties": { "$ref": "#/$defs/digest" } },
+        "lockfile_digests": { "type": "object", "additionalProperties": { "$ref": "#/$defs/digest" } }
+      }
+    },
+    "entry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["relative_path", "digest", "size_bytes", "kind"],
+      "properties": {
+        "relative_path": { "$ref": "#/$defs/relative_path" },
+        "digest": { "$ref": "#/$defs/digest" },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "kind": { "const": "FILE" }
+      }
+    }
+  }
+}

@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-environment-result-v1",
+  "title": "BDB vNext Environment Result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "version", "plan_id", "plan_digest", "project_id", "task_id",
+    "source_head", "source_tree", "status", "approval_class", "actual_effects",
+    "created_or_reused_paths", "tool_identities", "manifest_digests",
+    "lockfile_digests", "final_readiness", "manifest_digest", "diagnostics",
+    "result_digest"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-vnext-environment-result-v1" },
+    "version": { "const": "v1" },
+    "plan_id": { "$ref": "#/$defs/identity" },
+    "plan_digest": { "$ref": "#/$defs/digest" },
+    "project_id": { "$ref": "#/$defs/identity" },
+    "task_id": { "$ref": "#/$defs/identity" },
+    "source_head": { "$ref": "#/$defs/source" },
+    "source_tree": { "$ref": "#/$defs/source" },
+    "status": { "enum": ["PROVISIONED", "ALREADY_READY", "REBUILT", "BLOCKED", "OFFLINE_CACHE_MISS", "STALE_PLAN", "POLICY_DENIED"] },
+    "approval_class": { "$ref": "#/$defs/effect_class" },
+    "actual_effects": { "type": "array", "items": { "$ref": "#/$defs/actual_effect" } },
+    "created_or_reused_paths": { "type": "array", "items": { "$ref": "#/$defs/relative_path" } },
+    "tool_identities": { "type": "array", "items": { "$ref": "#/$defs/tool" } },
+    "manifest_digests": { "$ref": "#/$defs/digest_map" },
+    "lockfile_digests": { "$ref": "#/$defs/digest_map" },
+    "final_readiness": { "type": "boolean" },
+    "manifest_digest": { "anyOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+    "diagnostics": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "result_digest": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "identity": { "type": "string", "pattern": "^[a-z][a-z0-9_.:-]*$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "source": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "relative_path": { "type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//).+" },
+    "effect_class": { "enum": ["NO_MUTATION", "SAFE_PROJECT_LOCAL_MUTATION", "SHARED_RESOURCE_MUTATION", "PRIVILEGE_REQUIRED", "POLICY_DENIED"] },
+    "tool": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "path", "digest", "version"],
+      "properties": {
+        "name": { "$ref": "#/$defs/identity" },
+        "path": { "type": "string", "pattern": "^(?:[A-Za-z]:[\\\\/]|\\\\\\\\|/).+" },
+        "digest": { "$ref": "#/$defs/digest" },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "digest_map": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/digest" }
+    },
+    "actual_effect": {
+      "type": "object", "additionalProperties": false,
+      "required": ["component", "effect_class", "approval_class", "target_relative_path", "operation", "artifact_digest", "source_head", "source_tree"],
+      "properties": {
+        "component": { "$ref": "#/$defs/identity" },
+        "effect_class": { "$ref": "#/$defs/effect_class" },
+        "approval_class": { "$ref": "#/$defs/effect_class" },
+        "target_relative_path": { "$ref": "#/$defs/relative_path" },
+        "operation": { "$ref": "#/$defs/identity" },
+        "artifact_digest": { "anyOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+        "source_head": { "$ref": "#/$defs/source" },
+        "source_tree": { "$ref": "#/$defs/source" }
+      }
+    }
+  }
+}

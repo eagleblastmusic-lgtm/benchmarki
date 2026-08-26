@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-environment-plan-v1",
+  "title": "BDB vNext Environment Plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "version", "plan_id", "project_id", "task_id",
+    "requirement_set_id", "requirement_digest", "inventory_digest",
+    "source_head", "source_tree", "platform_identity",
+    "provisioning_adapter_version", "approval_class",
+    "project_environment_relative_root", "requested_effects",
+    "python", "node", "rust", "plan_digest"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-vnext-environment-plan-v1" },
+    "version": { "const": "v1" },
+    "plan_id": { "$ref": "#/$defs/identity" },
+    "project_id": { "$ref": "#/$defs/identity" },
+    "task_id": { "$ref": "#/$defs/identity" },
+    "requirement_set_id": { "$ref": "#/$defs/identity" },
+    "requirement_digest": { "$ref": "#/$defs/digest" },
+    "inventory_digest": { "$ref": "#/$defs/digest" },
+    "source_head": { "$ref": "#/$defs/source" },
+    "source_tree": { "$ref": "#/$defs/source" },
+    "platform_identity": { "$ref": "#/$defs/platform" },
+    "provisioning_adapter_version": { "$ref": "#/$defs/identity" },
+    "approval_class": { "$ref": "#/$defs/effect_class" },
+    "project_environment_relative_root": { "$ref": "#/$defs/relative_path" },
+    "requested_effects": { "type": "array", "items": { "$ref": "#/$defs/requested_effect" } },
+    "python": { "anyOf": [{ "$ref": "#/$defs/python" }, { "type": "null" }] },
+    "node": { "anyOf": [{ "$ref": "#/$defs/node" }, { "type": "null" }] },
+    "rust": { "anyOf": [{ "$ref": "#/$defs/rust" }, { "type": "null" }] },
+    "plan_digest": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "identity": { "type": "string", "pattern": "^[a-z][a-z0-9_.:-]*$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "source": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "relative_path": {
+      "type": "string",
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//).+"
+    },
+    "effect_class": {
+      "enum": ["NO_MUTATION", "SAFE_PROJECT_LOCAL_MUTATION", "SHARED_RESOURCE_MUTATION", "PRIVILEGE_REQUIRED", "POLICY_DENIED"]
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "path", "digest", "version"],
+      "properties": {
+        "name": { "$ref": "#/$defs/identity" },
+        "path": { "type": "string", "pattern": "^(?:[A-Za-z]:[\\\\/]|\\\\\\\\|/).+" },
+        "digest": { "$ref": "#/$defs/digest" },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "package": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "digest"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9_.:@/-]*$" },
+        "version": { "type": "string", "minLength": 1 },
+        "digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os_name", "architecture", "machine_id", "path_digest", "python_implementation"],
+      "properties": {
+        "os_name": { "type": "string", "minLength": 1 },
+        "architecture": { "type": "string", "minLength": 1 },
+        "machine_id": { "type": "string", "minLength": 1 },
+        "path_digest": { "$ref": "#/$defs/digest" },
+        "python_implementation": { "type": "string", "minLength": 1 }
+      }
+    },
+    "requested_effect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["component", "effect_class", "approval_class", "target_relative_path", "reason"],
+      "properties": {
+        "component": { "$ref": "#/$defs/identity" },
+        "effect_class": { "$ref": "#/$defs/effect_class" },
+        "approval_class": { "$ref": "#/$defs/effect_class" },
+        "target_relative_path": { "$ref": "#/$defs/relative_path" },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    },
+    "package_list": { "type": "array", "items": { "$ref": "#/$defs/package" } },
+    "python": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["interpreter", "requirements_digest", "packages", "venv_relative_path", "offline", "cache_available"],
+      "properties": {
+        "interpreter": { "$ref": "#/$defs/tool" },
+        "requirements_digest": { "$ref": "#/$defs/digest" },
+        "packages": { "$ref": "#/$defs/package_list" },
+        "venv_relative_path": { "$ref": "#/$defs/relative_path" },
+        "offline": { "type": "boolean" },
+        "cache_available": { "type": "boolean" }
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node", "npm", "manifest_digest", "lockfile_digest", "packages", "node_modules_relative_path", "package_manager", "offline", "cache_available"],
+      "properties": {
+        "node": { "$ref": "#/$defs/tool" },
+        "npm": { "$ref": "#/$defs/tool" },
+        "manifest_digest": { "$ref": "#/$defs/digest" },
+        "lockfile_digest": { "anyOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+        "packages": { "$ref": "#/$defs/package_list" },
+        "node_modules_relative_path": { "$ref": "#/$defs/relative_path" },
+        "package_manager": { "$ref": "#/$defs/identity" },
+        "offline": { "type": "boolean" },
+        "cache_available": { "type": "boolean" }
+      }
+    },
+    "rust": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rustup", "rustc", "cargo", "toolchain", "manifest_digest", "lockfile_digest", "target_relative_path", "offline", "cache_available"],
+      "properties": {
+        "rustup": { "$ref": "#/$defs/tool" },
+        "rustc": { "$ref": "#/$defs/tool" },
+        "cargo": { "$ref": "#/$defs/tool" },
+        "toolchain": { "type": "string", "minLength": 1 },
+        "manifest_digest": { "$ref": "#/$defs/digest" },
+        "lockfile_digest": { "anyOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+        "target_relative_path": { "$ref": "#/$defs/relative_path" },
+        "offline": { "type": "boolean" },
+        "cache_available": { "type": "boolean" }
+      }
+    }
+  }
+}
