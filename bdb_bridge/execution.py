@@ -140,9 +140,11 @@ def _apply_exact_replacements(text: str, pairs: list[tuple[str, str]]) -> str:
 
 
 def sanitized_test_environment() -> dict[str, str]:
+    import sys
     allowed = ("SYSTEMROOT", "WINDIR", "TEMP", "TMP", "PATH")
     env = {key: os.environ[key] for key in allowed if key in os.environ}
     env.update({"PYTHONDONTWRITEBYTECODE": "1", "PYTHONHASHSEED": "0"})
+    env["PYTHONPATH"] = os.environ.get("PYTHONPATH", os.pathsep.join(sys.path))
     return env
 
 

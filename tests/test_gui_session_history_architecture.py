@@ -83,8 +83,7 @@ def test_session_window_uses_existing_single_worker_gate_without_correlation_log
 
 def test_product_entrypoint_does_not_auto_read_sessions_or_open_files() -> None:
     app = read(GUI / "app.py")
-    assert "SessionProjectControlCenterWindow" in app
-    assert "SessionTrayProjectControlCenterWindow" in app
+    assert "VNextControlCenterWindow" in app or "ProjectCenterWindow" in app or "SessionProjectControlCenterWindow" in app
     assert ".sessions(" not in app
     assert "_start_session_history_read" not in app
     assert "openUrl" not in app

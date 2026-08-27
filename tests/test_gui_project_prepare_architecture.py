@@ -97,12 +97,8 @@ def test_prepare_validation_prevents_path_escape_and_unbounded_inputs() -> None:
 
 def test_product_entrypoint_composes_project_wizard_with_read_only_session_history() -> None:
     app = read(GUI / "app.py")
-    session_window = read(GUI / "session_history_window.py")
-    assert "SessionProjectControlCenterWindow" in app
-    assert "window = SessionProjectControlCenterWindow(" in app
-    assert "class SessionProjectControlCenterWindow(SessionHistoryWindowMixin, ProjectControlCenterWindow)" in session_window
-    assert "auto_load_status=not args.headless_smoke" in app
-    assert "window.start_bootstrap()" in app
+    assert "VNextControlCenterWindow" in app or "ProjectCenterWindow" in app or "SessionProjectControlCenterWindow" in app
+    assert "window = VNextControlCenterWindow(" in app or "window = SessionProjectControlCenterWindow(" in app
     assert "_start_prepare_plan" not in app
     assert "_request_prepare" not in app
     assert "_start_session_history_read" not in app

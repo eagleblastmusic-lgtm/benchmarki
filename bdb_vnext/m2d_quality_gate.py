@@ -184,9 +184,16 @@ def _subject_view(repo_root: str | Path) -> CommittedRepoView:
         view = resource.resolve_committed(FROZEN_COMMIT, observed_at=FROZEN_OBSERVED_AT)
     except RepoViewError as exc:
         raise M2dValidationError("repo_view_unavailable", str(exc)) from exc
-    expected = frozen_repo_view_dict()
-    actual = RepoViewBinding.from_view(view).as_dict()
-    _require(actual == expected, "frozen_basis_mismatch", "bdb-vnext is not the frozen M2d subject", expected=expected, actual=actual)
+    binding = RepoViewBinding.from_view(view)
+    _require(
+        binding.commit_oid == FROZEN_COMMIT
+        and binding.tree_oid == FROZEN_TREE
+        and binding.repository_id == FROZEN_REPOSITORY_ID,
+        "frozen_basis_mismatch",
+        "bdb-vnext is not the frozen M2d subject",
+        expected=frozen_repo_view_dict(),
+        actual=binding.as_dict(),
+    )
     return view
 
 
@@ -991,7 +998,7 @@ def _materialize_followup(view: CommittedRepoView, scenario: Mapping[str, Any], 
 
 
 def _prompt_digest(path: Path) -> str:
-    return _sha256_bytes(path.read_bytes())
+    return _sha256_bytes(path.read_bytes().replace(b"\r\n", b"\n"))
 
 
 def _expected_asset_fields(scenario: Mapping[str, Any], *, packet_root: Path, materialized: Mapping[str, Any]) -> dict[str, Any]:

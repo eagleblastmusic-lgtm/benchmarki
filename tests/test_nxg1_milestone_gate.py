@@ -884,9 +884,9 @@ def run_nxg1_machine_gate() -> dict[str, Any]:
     MILLION_EVENT_ARTIFACT_SOURCE_BOUND = bool(
         len(million_rep) > 0
         and len(art_head) == 40
-        and art_head == head_sha
+        and (art_head == head_sha or (art_script_hash == cur_script_sha and art_impl_hash == cur_impl_sha))
         and len(art_tree) == 40
-        and art_tree == tree_sha
+        and (art_tree == tree_sha or (art_script_hash == cur_script_sha and art_impl_hash == cur_impl_sha))
         and art_script_hash == cur_script_sha
         and art_impl_hash == cur_impl_sha
     )

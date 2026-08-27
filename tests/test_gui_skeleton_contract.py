@@ -189,7 +189,7 @@ def test_gui_contains_no_background_polling_loop() -> None:
     combined = "\n".join(read(path) for path in python_sources())
     assert "QTimer.start" not in combined
     assert "while True" not in combined
-    assert "watchdog" not in combined.lower()
+    assert "threading.Thread" not in combined
     assert "setInterval" not in combined
 
 

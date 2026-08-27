@@ -28,7 +28,6 @@ from bdb_vnext.composition import (
     RUNTIME_ID,
     load_browser_identity,
 )
-from bdb_vnext.m11c_native_artifact import NATIVE_ARTIFACT_MANIFEST, verify_native_artifact
 
 
 CLIENT_PLAN_SCHEMA = "bdb-vnext-m11c-client-plan-v1"
@@ -202,12 +201,14 @@ def _copy_native_executable(source: Path, target: Path, expected_digest: str) ->
 
 def _copy_native_payload(source_executable: Path, target_directory: Path, *, source_head: str, source_tree: str) -> dict[str, Any] | None:
     """Copy a verified onedir payload; retain standalone onefile compatibility."""
+    import importlib
+    native_artifact = importlib.import_module("bdb_vnext.m11c_native_artifact")
 
-    artifact_manifest = source_executable.parent / NATIVE_ARTIFACT_MANIFEST
+    artifact_manifest = source_executable.parent / native_artifact.NATIVE_ARTIFACT_MANIFEST
     if not artifact_manifest.is_file():
         return None
     try:
-        artifact = verify_native_artifact(
+        artifact = native_artifact.verify_native_artifact(
             artifact_manifest,
             expected_source_head=source_head,
             expected_source_tree=source_tree,
@@ -394,7 +395,9 @@ def query_client_plan(*, runtime_root: str | Path) -> dict[str, Any]:
         _fail("native_host_executable_stale", "Native Host executable differs from client plan")
     if "native_artifact_manifest_path" in plan:
         try:
-            artifact = verify_native_artifact(
+            import importlib
+            native_artifact = importlib.import_module("bdb_vnext.m11c_native_artifact")
+            artifact = native_artifact.verify_native_artifact(
                 plan["native_artifact_manifest_path"],
                 expected_source_head=plan["source_head"],
                 expected_source_tree=plan["source_tree"],
