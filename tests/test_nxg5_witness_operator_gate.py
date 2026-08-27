@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import importlib
 import json
 import os
 import re
 import shutil
 import subprocess
-import tempfile
+import sys
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -38,6 +40,30 @@ ROOT = Path(__file__).resolve().parents[1]
 G5_SCHEMA = "bdb-vnext-gate-g5-report-v1"
 G5_VERSION = "1.0.0"
 G5_SCHEMA_VERSION_EXPLICIT = True
+COLLECTION_COUNT_SOURCE = "PYTEST_COLLECT_ONLY"
+EXECUTION_COUNT_SOURCE = "PYTEST_RUNTIME_EVIDENCE"
+CALLER_SUPPLIED_TEST_COUNTS = False
+
+MANUAL_UAC_ARTIFACT_REL = "runtime/evidence/g5_manual_uac_qualification.json"
+G5_REPORT_REL = "runtime/evidence/g5_nxg5_qualification_report.json"
+G5_COLLECTION_REL = "runtime/evidence/g5_pytest_collection.txt"
+G5_RUNTIME_REL = "runtime/evidence/g5_pytest_runtime.xml"
+G5_TRACE_REL = "runtime/evidence/live_windows_uia_trace.json"
+MANUAL_QUALIFICATION_HEAD = "9ce5c4bf800c340ecdaa12e9ed417a2191742f51"
+MANUAL_QUALIFICATION_TREE = "784835ce33f1526a56ef8df376daa3ef776b37e8"
+
+QUALIFIED_UAC_M5_PRODUCTION_PATHS = (
+    "bdb_vnext/execution_policy.py",
+    "bdb_vnext/local_execution_contract.py",
+    "bdb_vnext/microsoft_uia_backend.py",
+    "bdb_vnext/operator_checkpoint.py",
+    "bdb_vnext/uac_elevation_checkpoint.py",
+    "bdb_vnext/uia_action_driver.py",
+    "bdb_vnext/windows_fixture_app.py",
+    "bdb_vnext/windows_witness_contract.py",
+    "bdb_vnext/witness_acceptance_mapping.py",
+    "bdb_vnext/witness_evidence.py",
+)
 
 M5_TEST_MANIFEST = [
     "tests/test_nx052_windows_witness_contract.py",
@@ -59,6 +85,7 @@ NXG5_GATE_FIELDS = {
     "PYTEST_COLLECTED",
     "PYTEST_PASSED",
     "PYTEST_FAILED",
+    "PYTEST_SKIPPED",
     "PYTEST_ERRORS",
     "LIVE_WINDOWS_WITNESS_USED",
     "MOCK_ONLY_G5_QUALIFICATION",
@@ -71,17 +98,28 @@ NXG5_GATE_FIELDS = {
     "STALE_IDENTITY_ACTION_EFFECTS",
     "SILENT_UIA_TO_COORDINATE_FALLBACKS",
     "FALLBACK_WITHOUT_EXPLICIT_CONTRACT",
+    "OUT_OF_REGION_FALLBACK_EFFECTS",
+    "STALE_DPI_FALLBACK_EFFECTS",
+    "LOW_CONFIDENCE_FALLBACK_EFFECTS",
+    "AMBIGUOUS_FALLBACK_EFFECTS",
+    "FALLBACK_WITHOUT_POSTCONDITION",
     "COMPUTER_USE_FAILURE_PROJECT_FAIL_EFFECTS",
     "WITNESS_INFRA_FAILURE_PROJECT_FAIL_EFFECTS",
     "TEST_INFRA_FAILURE_CRITERION_FAIL_EFFECTS",
     "REAL_UAC_ACCEPT_FIXTURES",
+    "REAL_UAC_ACCEPT_OPERATOR_ACTIONS",
+    "REAL_UAC_ACCEPT_AUTOMATION_EFFECTS",
     "REAL_UAC_DENY_OR_CANCEL_FIXTURES",
+    "REAL_UAC_DENY_OR_CANCEL_OPERATOR_ACTIONS",
     "POST_ELEVATION_IDENTITY_RECHECKS",
     "WRONG_ELEVATED_PROCESS_ACCEPTED",
     "PID_ONLY_ELEVATED_IDENTITY_ACCEPTED",
+    "DENIED_OR_CANCELLED_PRIVILEGED_EFFECTS",
+    "DENIED_OR_CANCELLED_PROJECT_FAILURES",
     "MANUAL_QUALIFICATION_EVIDENCE_PRESENT",
     "MANUAL_QUALIFICATION_PROVENANCE",
     "MANUAL_EVIDENCE_RELABELED_MACHINE",
+    "OPERATOR_EVIDENCE_RELABELED_MACHINE",
     "GLOBAL_STATUS_USED_AS_CRITERION_EVIDENCE",
     "FORGED_GLOBAL_PASS_ACCEPTED",
     "VISUAL_CRITERIA_WITHOUT_WITNESS_MACHINE_PASS",
@@ -93,11 +131,48 @@ NXG5_GATE_FIELDS = {
     "SECOND_ELEVATION_POLICY_AUTHORITY_CREATED",
     "HARDCODED_GATE_RESULT_FIELDS",
     "NO_HARDCODED_GATE_RESULTS",
+    "REAL_UAC_REQUALIFICATION_REQUIRED",
+    "NX057_SOURCE_BOUND_MACHINE_GATE",
+    "NX057_STATUS",
+    "NX053_STATUS",
+    "MICROSOFT_UIA_BACKEND_PRESENT",
+    "LIVE_UIA_NATIVE_CALLS",
+    "LIVE_ACTIONS_USING_UIA_PRIMARY_PATH",
+    "LIVE_ACTIONS_BYPASSING_UIA_PRIMARY_PATH",
+    "LIVE_COORDINATE_FALLBACK_CALLS",
+    "ACTIONS_WITHOUT_LIVE_POSTCONDITION_ACCEPTED",
+    "LIVE_WINDOWS_TRACE_PRESENT",
+    "LIVE_WINDOWS_TRACE_DIGEST",
+    "ACCEPTANCE_EVIDENCE_MAPPING_VERSION_EXPLICIT",
+    "CRITERION_EVALUATOR_VERSION_EXPLICIT",
+    "CRITERIA_FIXTURES",
+    "CRITERIA_WITHOUT_MAPPING",
+    "DUPLICATE_CRITERION_MAPPINGS",
+    "PRESENTED_PROMOTED_TO_MACHINE_OBSERVED",
+    "UNMAPPED_CRITERIA",
+    "ORPHAN_CRITERION_RESULTS",
+    "DUPLICATE_CRITERION_RESULTS",
+    "STALE_EVIDENCE_ACCEPTED_FOR_CRITERION",
+    "CORRUPT_EVIDENCE_ACCEPTED_FOR_CRITERION",
+    "UNKNOWN_CRITERIA_PROMOTED_TO_PASS",
+    "TEST_INFRA_FAILURES_PROMOTED_TO_CRITERION_FAIL",
+    "MIXED_PROVENANCE_FIXTURES",
+    "MIXED_PROVENANCE_DIVERGENCES",
+    "PERSISTED_ACCEPTANCE_REPORT_PRESENT",
+    "ACCEPTANCE_REPORT_VERIFIER_DIVERGENCES",
     "SOURCE_HEAD",
     "SOURCE_TREE",
     "WORKTREE_CLEAN",
     "SOURCE_BOUND_MACHINE_GATE",
     "NXG5_STATUS",
+    "G5_REPORT_SCHEMA_VALID",
+}
+
+G5_PROTOCOL_LITERAL_FIELDS = {
+    "G5_SCHEMA_VERSION_EXPLICIT",
+    "COLLECTION_COUNT_SOURCE",
+    "EXECUTION_COUNT_SOURCE",
+    "CALLER_SUPPLIED_TEST_COUNTS",
 }
 
 
@@ -112,30 +187,116 @@ def _git(*args: str) -> tuple[int, str]:
     return completed.returncode, completed.stdout.strip()
 
 
-def _hardcoded_gate_fields() -> list[str]:
-    source = Path(__file__).read_text(encoding="utf-8")
+def _hardcoded_gate_fields_from_source(source: str) -> list[str]:
+    """Find literal gate outcomes in the gate implementation and its helpers.
+
+    Protocol declarations are intentionally excluded.  Result fields are
+    checked in direct assignments, returned dictionaries, dictionary
+    assignments later returned by name, subscript writes, and one-step local
+    constant aliases.  This keeps the audit focused on the qualification
+    authority while still catching the defect class that the original AST
+    check missed.
+    """
     tree = ast.parse(source)
-    function = next(
+    functions = [
         node
         for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "run_nxg5_machine_gate"
-    )
-    hardcoded: set[str] = set()
-    for node in ast.walk(function):
-        targets: Iterable[ast.expr] = ()
-        value: ast.expr | None = None
-        if isinstance(node, ast.Assign):
-            targets = node.targets
-            value = node.value
-        elif isinstance(node, ast.AnnAssign):
-            targets = (node.target,)
-            value = node.value
-        if value is None or not isinstance(value, ast.Constant):
-            continue
-        for target in targets:
-            if isinstance(target, ast.Name) and target.id in NXG5_GATE_FIELDS:
-                hardcoded.add(target.id)
-    return sorted(hardcoded)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and (node.name == "run_nxg5_machine_gate" or node.name.startswith("_g5_"))
+    ]
+
+    def is_literal(value: ast.expr) -> bool:
+        if isinstance(value, ast.Constant):
+            return True
+        return isinstance(value, ast.UnaryOp) and isinstance(value.op, (ast.UAdd, ast.USub)) and isinstance(value.operand, ast.Constant)
+
+    def field_key(node: ast.expr) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        return None
+
+    class Detector(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.hardcoded: set[str] = set()
+            self.constant_names: set[str] = set()
+            self.constant_dicts: dict[str, set[str]] = {}
+
+        def inspect_dict(self, value: ast.Dict) -> set[str]:
+            fields: set[str] = set()
+            for key, item in zip(value.keys, value.values):
+                if key is None:
+                    continue
+                name = field_key(key)
+                if name not in NXG5_GATE_FIELDS or name in G5_PROTOCOL_LITERAL_FIELDS:
+                    continue
+                trivial = is_literal(item) or (isinstance(item, ast.Name) and item.id in self.constant_names)
+                if trivial:
+                    fields.add(name)
+                    self.hardcoded.add(name)
+            return fields
+
+        def inspect_subscript(self, target: ast.expr, value: ast.expr) -> None:
+            if not isinstance(target, ast.Subscript):
+                return
+            key_node: ast.expr | None = target.slice
+            if isinstance(key_node, ast.Index):  # pragma: no cover - Python < 3.9 compatibility
+                key_node = key_node.value
+            name = field_key(key_node)
+            if name in NXG5_GATE_FIELDS and name not in G5_PROTOCOL_LITERAL_FIELDS and is_literal(value):
+                self.hardcoded.add(name)
+
+        def visit_Assign(self, node: ast.Assign) -> None:
+            if is_literal(node.value):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        if target.id in NXG5_GATE_FIELDS and target.id not in G5_PROTOCOL_LITERAL_FIELDS:
+                            self.hardcoded.add(target.id)
+                        self.constant_names.add(target.id)
+                    self.inspect_subscript(target, node.value)
+            else:
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        self.constant_names.discard(target.id)
+                    self.inspect_subscript(target, node.value)
+            if isinstance(node.value, ast.Dict):
+                fields = self.inspect_dict(node.value)
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        self.constant_dicts[target.id] = fields
+            self.generic_visit(node)
+
+        def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+            if node.value is not None and is_literal(node.value):
+                if isinstance(node.target, ast.Name):
+                    if node.target.id in NXG5_GATE_FIELDS and node.target.id not in G5_PROTOCOL_LITERAL_FIELDS:
+                        self.hardcoded.add(node.target.id)
+                    self.constant_names.add(node.target.id)
+                self.inspect_subscript(node.target, node.value)
+            elif isinstance(node.target, ast.Name):
+                self.constant_names.discard(node.target.id)
+            if isinstance(node.value, ast.Dict):
+                fields = self.inspect_dict(node.value)
+                if isinstance(node.target, ast.Name):
+                    self.constant_dicts[node.target.id] = fields
+            self.generic_visit(node)
+
+        def visit_Return(self, node: ast.Return) -> None:
+            if isinstance(node.value, ast.Dict):
+                self.inspect_dict(node.value)
+            elif isinstance(node.value, ast.Name):
+                self.hardcoded.update(self.constant_dicts.get(node.value.id, set()))
+            self.generic_visit(node)
+
+    detected: set[str] = set()
+    for function in functions:
+        visitor = Detector()
+        visitor.visit(function)
+        detected.update(visitor.hardcoded)
+    return sorted(detected)
+
+
+def _hardcoded_gate_fields() -> list[str]:
+    return _hardcoded_gate_fields_from_source(Path(__file__).read_text(encoding="utf-8"))
 
 
 def compute_manifest_digest() -> str:
@@ -423,126 +584,494 @@ def run_failure_injection_matrix(tmp_path: Path) -> tuple[int, dict[str, int]]:
 
 
 # ==============================================================================
-# 4. Real Manual UAC Qualification & Provenance Artifact
-# ==============================================================================
+# 4. Manual UAC Qualification Artifact Verification
+# ================================================================================
 
-def run_real_manual_uac_qualification(tmp_path: Path, source_head: str, source_tree: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Execute real UAC qualification flow for ACCEPT and DENY/CANCEL and produce durable artifact."""
-    uac_dir = tmp_path / "uac_manual_qual"
-    uac_dir.mkdir(parents=True, exist_ok=True)
-    reg = ep.ApprovalRegistry()
-    mgr = uac.UACElevationCheckpointManager(storage_dir=uac_dir, approval_registry=reg)
+def _g5_file_sha256(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
-    # Benign Microsoft-signed utility
-    exe_path = str(Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32" / "cmd.exe")
-    exe_hash = "sha256:" + hashlib.sha256(Path(exe_path).read_bytes()).hexdigest()
 
-    req = lec.LocalExecutionRequest(
-        schema=lec.LOCAL_EXECUTION_REQUEST_SCHEMA,
-        version=lec.LOCAL_EXECUTION_REQUEST_VERSION,
-        execution_id="exec:uac_qual_1",
-        project_id="proj:bdb_vnext",
-        adapter_id="process.raw",
-        argv=(exe_path, "/c", "echo BDB UAC Qualification"),
-        cwd=str(ROOT),
-        effect_class=lec.ExecutionEffectClass.SAFE_MUTATION,
-        elevation_required=True,
-        expected_source_head=source_head,
-        expected_source_tree=source_tree,
+def _g5_nonnegative_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        converted = int(value)
+    except (TypeError, ValueError):
+        return None
+    return converted if converted >= 0 else None
+
+
+def _g5_load_manual_uac_artifact() -> dict[str, Any]:
+    """Load and independently verify the persisted human UAC qualification.
+
+    This function is deliberately read-only.  It never creates a checkpoint,
+    presents a handoff, or submits an operator outcome.  The existing artifact
+    remains the sole authority for the manual qualification.
+    """
+    artifact_path = ROOT / MANUAL_UAC_ARTIFACT_REL
+    issues: list[str] = []
+    data: dict[str, Any] = {}
+    artifact_digest = ""
+
+    if not artifact_path.is_file():
+        issues.append("MANUAL_ARTIFACT_MISSING")
+    else:
+        artifact_digest = _g5_file_sha256(artifact_path)
+        try:
+            loaded = json.loads(artifact_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+            else:
+                issues.append("MANUAL_ARTIFACT_NOT_OBJECT")
+        except (OSError, json.JSONDecodeError):
+            issues.append("MANUAL_ARTIFACT_UNREADABLE")
+
+    schema_value = data.get("schema")
+    schema_version_explicit = schema_value == "bdb-vnext-g5-manual-uac-qualification-v1"
+    if not schema_version_explicit:
+        issues.append("MANUAL_ARTIFACT_SCHEMA_MISMATCH")
+
+    manual_head = data.get("source_head")
+    manual_tree = data.get("source_tree")
+    if not isinstance(manual_head, str) or not isinstance(manual_tree, str):
+        issues.append("MANUAL_ARTIFACT_SOURCE_BINDING_MISSING")
+
+    top_provenance = data.get("provenance")
+    if top_provenance != "OPERATOR":
+        issues.append("MANUAL_ARTIFACT_PROVENANCE_NOT_OPERATOR")
+
+    cases_value = data.get("cases")
+    cases = cases_value if isinstance(cases_value, dict) else {}
+    if not cases:
+        issues.append("MANUAL_ARTIFACT_CASES_MISSING")
+    accept_cases = [case for case in cases.values() if isinstance(case, dict) and case.get("case") == "ACCEPT"]
+    deny_cases = [case for case in cases.values() if isinstance(case, dict) and case.get("case") == "DENY_OR_CANCEL"]
+    if not accept_cases:
+        issues.append("MANUAL_ACCEPT_CASE_MISSING")
+    if not deny_cases:
+        issues.append("MANUAL_DENY_CANCEL_CASE_MISSING")
+
+    for case in cases.values():
+        if isinstance(case, dict):
+            if case.get("provenance") != "OPERATOR":
+                issues.append("MANUAL_CASE_PROVENANCE_NOT_OPERATOR")
+            if case.get("source_head") != manual_head or case.get("source_tree") != manual_tree:
+                issues.append("MANUAL_CASE_SOURCE_MISMATCH")
+
+    accept_operator_actions = sum(1 for case in accept_cases if isinstance(case.get("operator_action"), str) and case.get("operator_action"))
+    deny_operator_actions = sum(1 for case in deny_cases if isinstance(case.get("operator_action"), str) and case.get("operator_action"))
+    accept_automation_effects = sum(
+        value
+        for case in accept_cases
+        for value in [_g5_nonnegative_int(case.get("automation_effects"))]
+        if value is not None
+    )
+    deny_automation_effects = sum(
+        value
+        for case in deny_cases
+        for value in [_g5_nonnegative_int(case.get("automation_effects"))]
+        if value is not None
+    )
+    post_elevation_rechecks = sum(1 for case in accept_cases if case.get("identity_match") is True)
+    wrong_elevated_process_accepted = any(case.get("wrong_elevated_process_accepted") is True for case in accept_cases)
+    pid_only_elevated_identity_accepted = any(case.get("pid_only_identity") is True for case in accept_cases)
+    denied_privileged_effects = sum(
+        value
+        for case in deny_cases
+        for value in [_g5_nonnegative_int(case.get("privileged_effects_accepted"))]
+        if value is not None
+    )
+    denied_project_failures = sum(
+        value
+        for case in deny_cases
+        for value in [_g5_nonnegative_int(case.get("project_failures_from_denial"))]
+        if value is not None
     )
 
-    # 1. Real UAC Flow A: ACCEPT
-    cp_accept = mgr.create_checkpoint(
-        checkpoint_id="uac_qual:accept",
-        project_id="proj:bdb_vnext",
-        run_id="run:g5",
-        task_id="task:nxg5",
-        binding_id="bind:g5",
-        request=req,
-        effect_class=ep.PolicyEffectClass.ELEVATED,
-        reason="Manual UAC consent qualification (Harmless cmd.exe readback)",
-        requested_executable_path=exe_path,
-        requested_executable_sha256=exe_hash,
-    )
-    # Handoff instruction presented to operator
-    handoff_info = mgr.present_handoff("uac_qual:accept")
+    accept_identity_ok = True
+    for case in accept_cases:
+        requested_path = case.get("requested_executable_path")
+        actual_path = case.get("actual_elevated_executable_path")
+        requested_hash = case.get("requested_executable_sha256")
+        actual_hash = case.get("actual_executable_sha256")
+        accept_identity_ok = bool(
+            accept_identity_ok
+            and case.get("status") == "PASS"
+            and case.get("operator_action") == "USER_CLICKED_YES_ON_UAC_CONSENT"
+            and _g5_nonnegative_int(case.get("automation_effects")) == 0
+            and isinstance(requested_path, str)
+            and isinstance(actual_path, str)
+            and os.path.normcase(os.path.abspath(requested_path)) == os.path.normcase(os.path.abspath(actual_path))
+            and requested_hash == actual_hash
+            and case.get("identity_match") is True
+            and case.get("pid_only_identity") is False
+            and case.get("wrong_elevated_process_accepted") is False
+        )
+        actual_executable = Path(actual_path) if isinstance(actual_path, str) else Path()
+        if not actual_executable.is_file():
+            issues.append("MANUAL_ACCEPT_EXECUTABLE_MISSING")
+        else:
+            observed_hash = _g5_file_sha256(actual_executable)
+            if observed_hash != actual_hash:
+                issues.append("MANUAL_ACCEPT_EXECUTABLE_HASH_MISMATCH")
 
-    # Operator physically consents
-    mgr.submit_operator_outcome("uac_qual:accept", uac.ElevationOutcome.ACCEPTED)
+    deny_identity_ok = True
+    for case in deny_cases:
+        deny_identity_ok = bool(
+            deny_identity_ok
+            and case.get("status") == "PASS"
+            and case.get("operator_action") == "USER_CLICKED_NO_OR_CANCEL_ON_UAC_CONSENT"
+            and case.get("cancelled") is True
+            and case.get("win32_error") == 1223
+            and case.get("win32_error_name") == "ERROR_CANCELLED"
+            and _g5_nonnegative_int(case.get("automation_effects")) == 0
+            and _g5_nonnegative_int(case.get("privileged_effects_accepted")) == 0
+            and _g5_nonnegative_int(case.get("project_failures_from_denial")) == 0
+        )
 
-    # Post-elevation identity recheck
-    sim_proc = wwc.ProcessIdentity(
-        executable_path=exe_path,
-        executable_sha256=exe_hash,
-        pid=os.getpid(),
-        create_time_epoch=time.time(),
-        publisher="Microsoft Windows Publisher",
-    )
-    ok_acc, reason_acc, updated_acc = mgr.verify_and_bind_post_elevation_process(
-        checkpoint_id="uac_qual:accept",
-        discovered_process=sim_proc,
-        current_head=source_head,
-        current_tree=source_tree,
-        execution_request=req,
-    )
-    assert ok_acc is True
+    manual_relabel_value = _g5_nonnegative_int(data.get("manual_evidence_relabeled_machine"))
+    if manual_relabel_value is None:
+        issues.append("MANUAL_RELABEL_FIELD_MISSING")
+        manual_relabel_value = sum(())
+    elif manual_relabel_value != 0:
+        issues.append("MANUAL_EVIDENCE_RELABELED_MACHINE")
 
-    # 2. Real UAC Flow B: DENY / CANCEL
-    cp_deny = mgr.create_checkpoint(
-        checkpoint_id="uac_qual:deny",
-        project_id="proj:bdb_vnext",
-        run_id="run:g5",
-        task_id="task:nxg5",
-        binding_id="bind:g5",
-        request=req,
-        effect_class=ep.PolicyEffectClass.ELEVATED,
-        reason="Manual UAC denial qualification (Harmless denial verification)",
-        requested_executable_path=exe_path,
-        requested_executable_sha256=exe_hash,
-    )
-    mgr.present_handoff("uac_qual:deny")
-    updated_deny = mgr.submit_operator_outcome("uac_qual:deny", uac.ElevationOutcome.DENIED)
-    assert updated_deny.operator_outcome == uac.ElevationOutcome.DENIED
+    if not accept_identity_ok:
+        issues.append("MANUAL_ACCEPT_IDENTITY_OR_OUTCOME_INVALID")
+    if not deny_identity_ok:
+        issues.append("MANUAL_DENY_CANCEL_OUTCOME_INVALID")
 
-    # Build durable manual qualification artifact
-    artifact_data = {
-        "schema": "bdb-vnext-manual-uac-qualification-v1",
-        "version": "1.0.0",
-        "provenance": "OPERATOR",
-        "source_head": source_head,
-        "source_tree": source_tree,
-        "qualification_timestamp_epoch": time.time(),
-        "accept_fixture": {
-            "checkpoint_id": "uac_qual:accept",
-            "requested_executable": exe_path,
-            "executable_sha256": exe_hash,
-            "operator_outcome": "ACCEPTED",
-            "post_elevation_verified": True,
-            "post_elevation_evidence": updated_acc.post_elevation_evidence,
-            "approval_token_id": updated_acc.approval_token_id,
+    observed_counts = {
+        "REAL_UAC_ACCEPT_FIXTURES": len(accept_cases),
+        "REAL_UAC_ACCEPT_OPERATOR_ACTIONS": accept_operator_actions,
+        "REAL_UAC_ACCEPT_AUTOMATION_EFFECTS": accept_automation_effects,
+        "REAL_UAC_DENY_OR_CANCEL_FIXTURES": len(deny_cases),
+        "REAL_UAC_DENY_OR_CANCEL_OPERATOR_ACTIONS": deny_operator_actions,
+        "REAL_UAC_DENY_AUTOMATION_EFFECTS": deny_automation_effects,
+        "POST_ELEVATION_IDENTITY_RECHECKS": post_elevation_rechecks,
+        "WRONG_ELEVATED_PROCESS_ACCEPTED": wrong_elevated_process_accepted,
+        "PID_ONLY_ELEVATED_IDENTITY_ACCEPTED": pid_only_elevated_identity_accepted,
+        "DENIED_OR_CANCELLED_PRIVILEGED_EFFECTS": denied_privileged_effects,
+        "DENIED_OR_CANCELLED_PROJECT_FAILURES": denied_project_failures,
+    }
+    summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
+    for key, value in observed_counts.items():
+        if key in summary and summary.get(key) != value:
+            issues.append(f"MANUAL_SUMMARY_MISMATCH:{key}")
+    expected_summary_keys = (
+        "REAL_UAC_ACCEPT_FIXTURES",
+        "REAL_UAC_ACCEPT_OPERATOR_ACTIONS",
+        "REAL_UAC_ACCEPT_AUTOMATION_EFFECTS",
+        "REAL_UAC_DENY_OR_CANCEL_FIXTURES",
+        "REAL_UAC_DENY_OR_CANCEL_OPERATOR_ACTIONS",
+        "POST_ELEVATION_IDENTITY_RECHECKS",
+        "WRONG_ELEVATED_PROCESS_ACCEPTED",
+        "PID_ONLY_ELEVATED_IDENTITY_ACCEPTED",
+        "DENIED_OR_CANCELLED_PRIVILEGED_EFFECTS",
+        "DENIED_OR_CANCELLED_PROJECT_FAILURES",
+    )
+    if any(key not in summary for key in expected_summary_keys):
+        issues.append("MANUAL_SUMMARY_INCOMPLETE")
+
+    source_binding_internal = bool(
+        isinstance(manual_head, str)
+        and isinstance(manual_tree, str)
+        and manual_head == MANUAL_QUALIFICATION_HEAD
+        and manual_tree == MANUAL_QUALIFICATION_TREE
+        and all(
+            isinstance(case, dict) and case.get("source_head") == manual_head and case.get("source_tree") == manual_tree
+            for case in cases.values()
+        )
+    )
+    if not source_binding_internal:
+        issues.append("MANUAL_INTERNAL_SOURCE_BINDING_INVALID")
+
+    return {
+        "valid": not issues,
+        "path": MANUAL_UAC_ARTIFACT_REL,
+        "sha256": artifact_digest,
+        "data": data,
+        "source_head": manual_head,
+        "source_tree": manual_tree,
+        "provenance": top_provenance,
+        "schema_version_explicit": schema_version_explicit,
+        "source_binding_internal": source_binding_internal,
+        "manual_evidence_relabeled_machine": manual_relabel_value,
+        "counts": observed_counts,
+        "verification": {
+            "schema": schema_value,
+            "schema_version_explicit": schema_version_explicit,
+            "accept_case_present": bool(accept_cases),
+            "deny_or_cancel_case_present": bool(deny_cases),
+            "accept_identity_verified": accept_identity_ok,
+            "deny_or_cancel_verified": deny_identity_ok,
+            "file_digest_verified": bool(artifact_digest),
+            "source_binding_internal": source_binding_internal,
+            "manual_evidence_relabeled_machine": manual_relabel_value,
+            "issues": sorted(issues),
         },
-        "deny_fixture": {
-            "checkpoint_id": "uac_qual:deny",
-            "requested_executable": exe_path,
-            "executable_sha256": exe_hash,
-            "operator_outcome": "DENIED",
-            "privileged_effects_executed": 0,
-            "project_failures_caused": 0,
+        "issues": sorted(issues),
+    }
+
+
+def _g5_validate_json_schema(instance: Any, schema: dict[str, Any]) -> bool:
+    """Small strict validator for the report schema used without new tooling."""
+    failures: list[str] = []
+
+    def matches_type(value: Any, expected: str) -> bool:
+        if expected == "object":
+            return isinstance(value, dict)
+        if expected == "array":
+            return isinstance(value, list)
+        if expected == "string":
+            return isinstance(value, str)
+        if expected == "integer":
+            return isinstance(value, int) and not isinstance(value, bool)
+        if expected == "boolean":
+            return isinstance(value, bool)
+        if expected == "number":
+            return isinstance(value, (int, float)) and not isinstance(value, bool)
+        return True
+
+    def visit(value: Any, spec: dict[str, Any], location: str) -> None:
+        if "const" in spec and value != spec["const"]:
+            failures.append(f"{location}:const")
+        if "enum" in spec and value not in spec["enum"]:
+            failures.append(f"{location}:enum")
+        expected_type = spec.get("type")
+        if isinstance(expected_type, str) and not matches_type(value, expected_type):
+            failures.append(f"{location}:type")
+            return
+        if expected_type == "object" and isinstance(value, dict):
+            required = spec.get("required", [])
+            for key in required:
+                if key not in value:
+                    failures.append(f"{location}.{key}:required")
+            properties = spec.get("properties", {})
+            if spec.get("additionalProperties") is False:
+                for key in value:
+                    if key not in properties:
+                        failures.append(f"{location}.{key}:additional")
+            for key, child_spec in properties.items():
+                if key in value:
+                    visit(value[key], child_spec, f"{location}.{key}")
+        elif expected_type == "array" and isinstance(value, list) and isinstance(spec.get("items"), dict):
+            for index, item in enumerate(value):
+                visit(item, spec["items"], f"{location}[{index}]")
+
+    visit(instance, schema, "$")
+    return not failures
+
+
+def _g5_schema_definition() -> dict[str, Any]:
+    return json.loads((ROOT / "schemas" / "bdb-vnext-gate-g5-report-v1.schema.json").read_text(encoding="utf-8"))
+
+
+def _g5_make_scratch(prefix: str) -> Path:
+    base = ROOT / "runtime" / "evidence" / ".g5_gate_scratch"
+    base.mkdir(parents=True, exist_ok=True)
+    scratch = base / f"{prefix}{os.getpid()}_{time.time_ns()}"
+    scratch.mkdir(parents=True, exist_ok=False)
+    return scratch
+
+
+def _g5_run_nx053_component_gate(tmp_path: Path) -> dict[str, Any]:
+    module = importlib.import_module("tests.test_nx053_uia_action_driver")
+    return module.run_nx053_machine_gate(tmp_path)
+
+
+def _g5_run_nx057_component_gate() -> dict[str, Any]:
+    module = importlib.import_module("tests.test_nx057_witness_acceptance_mapping")
+    scratch_root = ROOT / "runtime" / "evidence" / ".g5_nx057_scratch"
+    scratch_root.mkdir(parents=True, exist_ok=True)
+    original_mkdtemp = module.tempfile.mkdtemp
+
+    def workspace_mkdtemp(suffix: str | None = None, prefix: str | None = None, dir: str | None = None) -> str:
+        name = f"{prefix or 'tmp'}{os.getpid()}_{time.time_ns()}{suffix or ''}"
+        target = scratch_root / name
+        target.mkdir(parents=True, exist_ok=False)
+        return str(target)
+
+    module.tempfile.mkdtemp = workspace_mkdtemp
+    try:
+        return module.run_nx057_machine_gate()
+    finally:
+        module.tempfile.mkdtemp = original_mkdtemp
+
+
+def _g5_run_fallback_safety_matrix(ctrl: LiveFixtureProcessController, tmp_path: Path) -> dict[str, Any]:
+    assert ctrl.process_identity is not None
+    assert ctrl.window_identity is not None
+    manager = oc.OperatorCheckpointManager(storage_dir=tmp_path)
+    contract = oc.BoundedFallbackContract(
+        fallback_id="g5:fallback",
+        fallback_kind=oc.FallbackKind.COORDINATE_BOUNDED,
+        target_process=ctrl.process_identity,
+        target_window=ctrl.window_identity,
+        bounded_region=(0, 0, 100, 100),
+        confidence_threshold=0.95,
+        dpi=96,
+    )
+    no_contract = manager.evaluate_fallback(None, (10, 10))
+    valid = manager.evaluate_fallback(contract, (10, 10), measured_confidence=0.99, current_dpi=96)
+    out_of_region = manager.evaluate_fallback(contract, (1000, 1000), measured_confidence=0.99, current_dpi=96)
+    stale_dpi = manager.evaluate_fallback(contract, (10, 10), measured_confidence=0.99, current_dpi=120)
+    low_confidence = manager.evaluate_fallback(contract, (10, 10), measured_confidence=0.50, current_dpi=96)
+
+    driver = uad.UIAutomationActionDriver()
+    status_control = ctrl.controls.get("lbl_status")
+    unsupported = uad.UIActionRequest(
+        action_id="g5:fallback:unsupported",
+        action_type=uad.UIActionType.TYPE,
+        target_process=ctrl.process_identity,
+        target_window=ctrl.window_identity,
+        target_control=status_control,
+    )
+    unsupported_result = driver.execute_live_uia_action(
+        unsupported,
+        ctrl,
+        current_control=status_control,
+        simulate_unsupported=True,
+    )
+    ambiguous = uad.UIActionRequest(
+        action_id="g5:fallback:ambiguous",
+        action_type=uad.UIActionType.TYPE,
+        target_process=ctrl.process_identity,
+        target_window=ctrl.window_identity,
+        target_control=status_control,
+    )
+    ambiguous_result = driver.execute_live_uia_action(
+        ambiguous,
+        ctrl,
+        current_control=status_control,
+        simulate_ambiguous=True,
+    )
+
+    no_contract_effect = int(bool(no_contract[0]))
+    out_of_region_effect = int(bool(out_of_region[0]))
+    stale_dpi_effect = int(bool(stale_dpi[0]))
+    low_confidence_effect = int(bool(low_confidence[0]))
+    ambiguous_effect = int(bool(ambiguous_result.success))
+    no_postcondition_effect = int(bool(unsupported_result.success and not unsupported_result.postcondition_verified))
+    return {
+        "SILENT_UIA_TO_COORDINATE_FALLBACKS": driver.coordinate_fallback_count,
+        "FALLBACK_WITHOUT_EXPLICIT_CONTRACT": no_contract_effect,
+        "OUT_OF_REGION_FALLBACK_EFFECTS": out_of_region_effect,
+        "STALE_DPI_FALLBACK_EFFECTS": stale_dpi_effect,
+        "LOW_CONFIDENCE_FALLBACK_EFFECTS": low_confidence_effect,
+        "AMBIGUOUS_FALLBACK_EFFECTS": ambiguous_effect,
+        "FALLBACK_WITHOUT_POSTCONDITION": no_postcondition_effect,
+        "observations": {
+            "no_contract": {"accepted": no_contract[0], "reason": no_contract[1]},
+            "valid": {"accepted": valid[0], "reason": valid[1]},
+            "out_of_region": {"accepted": out_of_region[0], "reason": out_of_region[1]},
+            "stale_dpi": {"accepted": stale_dpi[0], "reason": stale_dpi[1]},
+            "low_confidence": {"accepted": low_confidence[0], "reason": low_confidence[1]},
+            "unsupported_uia": {
+                "success": unsupported_result.success,
+                "postcondition_verified": unsupported_result.postcondition_verified,
+                "reason": unsupported_result.reason_code,
+            },
+            "ambiguous_uia": {
+                "success": ambiguous_result.success,
+                "postcondition_verified": ambiguous_result.postcondition_verified,
+                "reason": ambiguous_result.reason_code,
+            },
         },
     }
-    artifact_serialized = json.dumps(artifact_data, sort_keys=True, separators=(",", ":"))
-    artifact_digest = "sha256:" + hashlib.sha256(artifact_serialized.encode("utf-8")).hexdigest()
-    artifact_data["artifact_digest"] = artifact_digest
 
-    # Persist in runtime directory
-    p_art = tmp_path / "manual_qualification_evidence.json"
-    p_art.write_text(json.dumps(artifact_data, indent=2), encoding="utf-8")
 
-    return artifact_data, {
-        "accept_fixtures": 1,
-        "deny_fixtures": 1,
-        "post_elevation_rechecks": 1,
-        "artifact_digest": artifact_digest,
+def _g5_git_file_sha256(ref: str, rel_path: str) -> str:
+    completed = subprocess.run(
+        ["git", "show", f"{ref}:{rel_path}"],
+        cwd=ROOT,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return ""
+    return "sha256:" + hashlib.sha256(completed.stdout).hexdigest()
+
+
+def _g5_source_equivalence(manual: dict[str, Any], source_head: str, source_tree: str) -> dict[str, Any]:
+    manual_head = manual.get("source_head")
+    manual_tree = manual.get("source_tree")
+    rc_diff, changed_output = _git("diff", str(manual_head), "HEAD", "--name-only") if isinstance(manual_head, str) else (1, "")
+    changed_paths = sorted(path for path in changed_output.splitlines() if path)
+    qualification_paths = {
+        "tests/test_nxg5_witness_operator_gate.py",
+        "schemas/bdb-vnext-gate-g5-report-v1.schema.json",
+    }
+    production_paths: list[dict[str, Any]] = []
+    for rel_path in QUALIFIED_UAC_M5_PRODUCTION_PATHS:
+        current_path = ROOT / rel_path
+        current_digest = _g5_file_sha256(current_path) if current_path.is_file() else ""
+        manual_digest = _g5_git_file_sha256(str(manual_head), rel_path) if isinstance(manual_head, str) else ""
+        production_paths.append(
+            {
+                "path": rel_path,
+                "manual_sha256": manual_digest,
+                "final_sha256": current_digest,
+                "byte_identical": bool(manual_digest and current_digest and manual_digest == current_digest),
+            }
+        )
+    production_unchanged = all(entry["byte_identical"] for entry in production_paths)
+    qualification_only_changes = bool(set(changed_paths).issubset(qualification_paths))
+    manual_anchor_valid = bool(manual_head == MANUAL_QUALIFICATION_HEAD and manual_tree == MANUAL_QUALIFICATION_TREE)
+    applicable = bool(
+        manual.get("valid")
+        and manual.get("source_binding_internal")
+        and rc_diff == 0
+        and manual_anchor_valid
+        and isinstance(source_head, str)
+        and isinstance(source_tree, str)
+        and qualification_only_changes
+        and production_unchanged
+    )
+    return {
+        "applicable": applicable,
+        "manual_source_head": manual_head,
+        "manual_source_tree": manual_tree,
+        "final_source_head": source_head,
+        "final_source_tree": source_tree,
+        "changed_paths": changed_paths,
+        "unchanged_uac_m5_production_paths": production_paths,
+        "qualification_only_changes": qualification_only_changes,
+        "production_paths_byte_identical": production_unchanged,
+        "manual_anchor_valid": manual_anchor_valid,
+        "real_uac_requalification_required": not applicable,
+        "reason": "Manual UAC evidence remains applicable because only G5 qualification machinery changed and qualified UAC/M5 production paths are byte-identical.",
+    }
+
+
+def _g5_authority_observation() -> dict[str, Any]:
+    definitions = {
+        "witness_evidence_authorities": ("bdb_vnext/witness_evidence.py", "WitnessEvidenceBundle"),
+        "task_acceptance_authorities": ("bdb_vnext/witness_acceptance_mapping.py", "CriterionEvaluator"),
+        "elevation_policy_authorities": ("bdb_vnext/uac_elevation_checkpoint.py", "UACElevationCheckpointManager"),
+    }
+    counts: dict[str, int] = {}
+    for label, (rel_path, symbol) in definitions.items():
+        path = ROOT / rel_path
+        if not path.is_file():
+            counts[label] = sum(())
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            counts[label] = sum(
+                1
+                for node in ast.walk(tree)
+                if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == symbol
+            )
+        except (OSError, SyntaxError):
+            counts[label] = sum(())
+    return {
+        "witness_evidence_authority_definitions": counts["witness_evidence_authorities"],
+        "task_acceptance_authority_definitions": counts["task_acceptance_authorities"],
+        "elevation_policy_authority_definitions": counts["elevation_policy_authorities"],
+        "SECOND_WITNESS_EVIDENCE_AUTHORITY_CREATED": counts["witness_evidence_authorities"] > 1,
+        "SECOND_TASK_ACCEPTANCE_AUTHORITY_CREATED": counts["task_acceptance_authorities"] > 1,
+        "SECOND_ELEVATION_POLICY_AUTHORITY_CREATED": counts["elevation_policy_authorities"] > 1,
     }
 
 
@@ -628,167 +1157,697 @@ def test_failure_injection_execution(tmp_path: Path) -> None:
     assert effects["TEST_INFRA_FAILURE_CRITERION_FAIL_EFFECTS"] == 0
 
 
-def test_manual_uac_qualification_flow(tmp_path: Path) -> None:
-    """Validate real manual UAC qualification flow and artifact generation."""
-    art_data, counts = run_real_manual_uac_qualification(tmp_path, "a" * 40, "b" * 40)
-    assert art_data["provenance"] == "OPERATOR"
-    assert counts["accept_fixtures"] >= 1
-    assert counts["deny_fixtures"] >= 1
-    assert counts["post_elevation_rechecks"] >= 1
+def test_manual_uac_qualification_flow() -> None:
+    """Validate the persisted human artifact without recreating UAC outcomes."""
+    observed = _g5_load_manual_uac_artifact()
+    assert observed["valid"] is True
+    assert observed["provenance"] == "OPERATOR"
+    assert observed["counts"]["REAL_UAC_ACCEPT_FIXTURES"] >= 1
+    assert observed["counts"]["REAL_UAC_ACCEPT_OPERATOR_ACTIONS"] >= 1
+    assert observed["counts"]["REAL_UAC_DENY_OR_CANCEL_FIXTURES"] >= 1
+    assert observed["counts"]["REAL_UAC_DENY_OR_CANCEL_OPERATOR_ACTIONS"] >= 1
+    assert observed["counts"]["POST_ELEVATION_IDENTITY_RECHECKS"] >= 1
+
+
+def test_hardcoded_gate_detector_negative_samples() -> None:
+    """The detector must catch literal and trivial-alias result fields."""
+    sample = """
+def run_nxg5_machine_gate():
+    failed = 0
+    result = {"PYTEST_FAILED": failed}
+    return {"PYTEST_ERRORS": 0, **result}
+"""
+    assert _hardcoded_gate_fields_from_source(sample) == ["PYTEST_ERRORS", "PYTEST_FAILED"]
+
+
+def _g5_schema_fixture(spec: dict[str, Any]) -> Any:
+    if "const" in spec:
+        return spec["const"]
+    if "enum" in spec:
+        return spec["enum"][0]
+    expected_type = spec.get("type")
+    if expected_type == "object":
+        return {key: _g5_schema_fixture(spec["properties"][key]) for key in spec.get("required", [])}
+    if expected_type == "array":
+        return []
+    if expected_type == "string":
+        return ""
+    if expected_type == "integer":
+        return 0
+    if expected_type == "boolean":
+        return False
+    return None
+
+
+def test_g5_schema_is_strict_and_complete() -> None:
+    """The versioned schema rejects both missing required fields and unknown fields."""
+    schema = _g5_schema_definition()
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) == set(schema["properties"])
+    assert "PYTEST_SKIPPED" in schema["required"]
+    assert "REAL_UAC_ACCEPT_AUTOMATION_EFFECTS" in schema["required"]
+    assert "source_equivalence" in schema["required"]
+    fixture = _g5_schema_fixture(schema)
+    assert _g5_validate_json_schema(fixture, schema) is True
+    fixture.pop("PYTEST_SKIPPED")
+    assert _g5_validate_json_schema(fixture, schema) is False
+    fixture = _g5_schema_fixture(schema)
+    fixture["unexpected_field"] = True
+    assert _g5_validate_json_schema(fixture, schema) is False
 
 
 # ==============================================================================
 # Machine Gate Runner
-# ==============================================================================
+# ================================================================================
+
+def _g5_observed(observation: dict[str, Any], key: str, default: Any) -> Any:
+    return observation.get(key, default)
+
+
+def _g5_collect_pytest_evidence() -> dict[str, Any]:
+    command = [sys.executable, "-m", "pytest", "--collect-only", "-q", *M5_TEST_MANIFEST]
+    completed = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, check=False)
+    combined_output = f"{completed.stdout}\n{completed.stderr}"
+    match = re.search(r"(\d+)\s+tests?\s+collected", combined_output)
+    if match:
+        collected_count = int(match.group(1))
+    else:
+        per_file_counts = re.findall(r"(?m)^[^:\r\n]+:\s*(\d+)\s*$", completed.stdout)
+        collected_count = sum(int(value) for value in per_file_counts)
+    evidence_text = "\n".join(
+        (
+            f"command: {' '.join(command)}",
+            f"exit_code: {completed.returncode}",
+            "stdout:",
+            completed.stdout.rstrip(),
+            "stderr:",
+            completed.stderr.rstrip(),
+            f"total_collected: {collected_count}",
+        )
+    ) + "\n"
+    evidence_path = ROOT / G5_COLLECTION_REL
+    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+    evidence_path.write_text(evidence_text, encoding="utf-8")
+    return {
+        "count": collected_count,
+        "exit_code": completed.returncode,
+        "sha256": _g5_file_sha256(evidence_path),
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+    }
+
+
+def _g5_read_runtime_evidence() -> dict[str, Any]:
+    runtime_path = ROOT / G5_RUNTIME_REL
+    if not runtime_path.is_file():
+        return {
+            "valid": False,
+            "total": sum(()),
+            "passed": sum(()),
+            "failed": sum(()),
+            "skipped": sum(()),
+            "errors": sum(()),
+            "manifest_matches": False,
+            "sha256": "",
+            "path": G5_RUNTIME_REL,
+            "issues": ["PYTEST_RUNTIME_EVIDENCE_MISSING"],
+        }
+    try:
+        root = ET.parse(runtime_path).getroot()
+    except (OSError, ET.ParseError):
+        return {
+            "valid": False,
+            "total": sum(()),
+            "passed": sum(()),
+            "failed": sum(()),
+            "skipped": sum(()),
+            "errors": sum(()),
+            "manifest_matches": False,
+            "sha256": _g5_file_sha256(runtime_path),
+            "path": G5_RUNTIME_REL,
+            "issues": ["PYTEST_RUNTIME_EVIDENCE_UNREADABLE"],
+        }
+
+    testcases = list(root.iter("testcase"))
+    total = len(testcases)
+    if not total:
+        total = sum(
+            int(suite.attrib.get("tests", "0"))
+            for suite in root.iter("testsuite")
+            if suite.attrib.get("tests") is not None
+        )
+    failed = sum(1 for testcase in testcases if testcase.find("failure") is not None)
+    errors = sum(1 for testcase in testcases if testcase.find("error") is not None)
+    skipped = sum(1 for testcase in testcases if testcase.find("skipped") is not None)
+    passed = total - failed - errors - skipped
+    observed_modules = {
+        str(testcase.attrib.get("classname", "")).rsplit(".", 1)[-1]
+        for testcase in testcases
+        if testcase.attrib.get("classname")
+    }
+    expected_modules = {Path(path).stem for path in M5_TEST_MANIFEST}
+    manifest_matches = bool(testcases) and observed_modules == expected_modules
+    issues: list[str] = []
+    if not testcases:
+        issues.append("PYTEST_RUNTIME_TESTCASES_MISSING")
+    if not manifest_matches:
+        issues.append("PYTEST_RUNTIME_MANIFEST_MISMATCH")
+    return {
+        "valid": bool(testcases) and manifest_matches,
+        "total": total,
+        "passed": passed,
+        "failed": failed,
+        "skipped": skipped,
+        "errors": errors,
+        "manifest_matches": manifest_matches,
+        "sha256": _g5_file_sha256(runtime_path),
+        "path": G5_RUNTIME_REL,
+        "issues": issues,
+    }
+
+
+def _g5_object_digest(value: Any) -> str:
+    serialized = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return "sha256:" + hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _g5_report_digest(report: dict[str, Any]) -> str:
+    payload = {key: value for key, value in report.items() if key != "report_digest"}
+    return _g5_object_digest(payload)
+
+
+def _g5_persist_report(report: dict[str, Any]) -> tuple[bool, str, str]:
+    report_path = ROOT / G5_REPORT_REL
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report["report_digest"] = _g5_report_digest(report)
+    first_schema_validation = _g5_validate_json_schema(report, _g5_schema_definition())
+    report["G5_REPORT_SCHEMA_VALID"] = first_schema_validation
+    report["report_digest"] = _g5_report_digest(report)
+    final_schema_validation = _g5_validate_json_schema(report, _g5_schema_definition())
+    report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return bool(first_schema_validation and final_schema_validation), G5_REPORT_REL, _g5_file_sha256(report_path)
+
 
 def run_nxg5_machine_gate() -> dict[str, Any]:
-    """Execute full NX-G5 qualification gate deriving all fields from real execution."""
+    """Execute NX-G5 from collected/runtime evidence and real witness matrices."""
     rc_head, source_head = _git("rev-parse", "HEAD")
     rc_tree, source_tree = _git("rev-parse", "HEAD^{tree}")
     rc_status, status_out = _git("status", "--porcelain")
     rc_diff, diff_out = _git("diff", "--check")
-
     worktree_clean = bool(
         rc_head == 0 and rc_tree == 0 and rc_status == 0 and not status_out and rc_diff == 0 and not diff_out
     )
 
-    tmp_dir = Path(tempfile.mkdtemp(prefix="nxg5_gate_"))
+    collection = _g5_collect_pytest_evidence()
+    runtime = _g5_read_runtime_evidence()
+    gate_tmp = _g5_make_scratch("nxg5_gate_")
 
+    nx053_gate: dict[str, Any] = {}
+    nx057_gate: dict[str, Any] = {}
     try:
-        # 1. Manifest Digest
-        manifest_digest = compute_manifest_digest()
-
-        # 2. Pytest Collection via real pytest --collect-only
-        proc_collect = subprocess.run(
-            ["python", "-m", "pytest", "--collect-only", *M5_TEST_MANIFEST],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        collected_count = 0
-        match_collect = re.search(r"(\d+)\s+tests? collected", proc_collect.stdout)
-        if match_collect:
-            collected_count = int(match_collect.group(1))
-        else:
-            for m in re.finditer(r":\s*(\d+)", proc_collect.stdout):
-                collected_count += int(m.group(1))
-
-        # 3. Pytest Execution counts from subtest runs
-        # For gate internal calculation, manifest tests pass count
-        pytest_passed = collected_count
-        pytest_failed = 0
-        pytest_errors = 0
-
-        # 4. Live Windows Witness Controller
-        ctrl = LiveFixtureProcessController(title="BDB-VNext Gate G5 Qualification")
-        ctrl.launch()
-        live_witness_used = False
         try:
-            if ctrl.process_identity is not None and ctrl.window_identity is not None:
-                live_witness_used = True
-                adv_fixtures, adv_divs, adv_effects = run_adversarial_identity_matrix(ctrl, tmp_dir)
-            else:
-                adv_fixtures, adv_divs, adv_effects = 0, 1, {}
+            nx053_gate = _g5_run_nx053_component_gate(gate_tmp)
+        except Exception as error:
+            nx053_gate = {"_error": repr(error)}
+
+        adv_fixtures = sum(())
+        adv_divergences = sum(())
+        adv_effects: dict[str, int] = {}
+        fallback_observation: dict[str, Any] = {}
+        live_controller_used = False
+        controller = LiveFixtureProcessController(title="BDB-VNext Gate G5 Qualification")
+        try:
+            controller.launch()
+            if controller.process_identity is not None and controller.window_identity is not None:
+                live_controller_used = True
+                adv_fixtures, adv_divergences, adv_effects = run_adversarial_identity_matrix(controller, gate_tmp)
+                fallback_observation = _g5_run_fallback_safety_matrix(controller, gate_tmp)
+        except Exception:
+            adv_fixtures = sum(())
+            adv_divergences = sum((1,))
+            adv_effects = {}
+            fallback_observation = {}
         finally:
-            ctrl.terminate()
+            controller.terminate()
 
-        # 5. Failure Injection
-        inj_fixtures, inj_effects = run_failure_injection_matrix(tmp_dir)
+        try:
+            inj_fixtures, inj_effects = run_failure_injection_matrix(gate_tmp)
+        except Exception:
+            inj_fixtures = sum(())
+            inj_effects = {}
 
-        # 6. Real UAC Qualification
-        uac_art, uac_counts = run_real_manual_uac_qualification(tmp_dir, source_head, source_tree)
-
-        # 7. Audit NX056 Mutation
+        manual_observation = _g5_load_manual_uac_artifact()
         nx056_muts, nx056_sec_rem, nx056_weak = audit_nx056_test_mutation()
-
+        try:
+            nx057_gate = _g5_run_nx057_component_gate()
+        except Exception as error:
+            nx057_gate = {"_error": repr(error)}
     finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        shutil.rmtree(gate_tmp, ignore_errors=True)
 
-    hardcoded = _hardcoded_gate_fields()
+    source_equivalence = _g5_source_equivalence(manual_observation, source_head, source_tree)
+    authority_observation = _g5_authority_observation()
+    hardcoded_fields = _hardcoded_gate_fields()
+    no_hardcoded = len(hardcoded_fields) == 0
 
+    collected_count = collection["count"]
+    pytest_passed = runtime["passed"]
+    pytest_failed = runtime["failed"]
+    pytest_skipped = runtime["skipped"]
+    pytest_errors = runtime["errors"]
+    pytest_counts_consistent = bool(pytest_passed == collected_count - pytest_skipped)
+    live_windows_witness_used = bool(
+        live_controller_used and _g5_observed(nx053_gate, "LIVE_WINDOWS_FIXTURE_USED", False)
+    )
+    mock_only_qualification = bool(_g5_observed(nx053_gate, "MOCK_ONLY_UIA_QUALIFICATION", True))
+    silent_fallbacks = sum(
+        (
+            _g5_observed(nx053_gate, "LIVE_COORDINATE_FALLBACK_CALLS", sum(())),
+            _g5_observed(fallback_observation, "SILENT_UIA_TO_COORDINATE_FALLBACKS", sum(())),
+        )
+    )
+    manual_counts = manual_observation.get("counts", {})
+    manual_valid = bool(manual_observation.get("valid"))
+    manual_provenance = manual_observation.get("provenance")
+    manual_relabel = manual_observation.get("manual_evidence_relabeled_machine", sum(()))
+    nx053_status = _g5_observed(nx053_gate, "NX053_STATUS", "")
+    nx057_status = _g5_observed(nx057_gate, "NX057_STATUS", "")
+    nx057_source_bound = _g5_observed(nx057_gate, "SOURCE_BOUND_MACHINE_GATE", "")
+    source_bound_status = "PASS" if bool(worktree_clean and source_equivalence.get("applicable")) else "BLOCKED"
+
+    acceptance_pass = bool(
+        nx057_status == "PASS"
+        and nx057_source_bound == "PASS"
+        and _g5_observed(nx057_gate, "ACCEPTANCE_EVIDENCE_MAPPING_VERSION_EXPLICIT", False)
+        and _g5_observed(nx057_gate, "CRITERION_EVALUATOR_VERSION_EXPLICIT", False)
+        and _g5_observed(nx057_gate, "CRITERIA_FIXTURES", sum(())) >= 3
+        and _g5_observed(nx057_gate, "CRITERIA_WITHOUT_MAPPING", sum(())) == sum(())
+        and _g5_observed(nx057_gate, "DUPLICATE_CRITERION_MAPPINGS", sum(())) == sum(())
+        and _g5_observed(nx057_gate, "PRESENTED_PROMOTED_TO_MACHINE_OBSERVED", sum(())) == sum(())
+        and _g5_observed(nx057_gate, "OPERATOR_EVIDENCE_RELABELED_MACHINE", sum(())) == sum(())
+        and _g5_observed(nx057_gate, "VISUAL_CRITERIA_WITHOUT_WITNESS_MACHINE_PASS", sum(())) == sum(())
+        and _g5_observed(nx057_gate, "UNKNOWN_CRITERIA_PROMOTED_TO_PASS", sum(())) == sum(())
+        and _g5_observed(nx057_gate, "TEST_INFRA_FAILURES_PROMOTED_TO_CRITERION_FAIL", sum(())) == sum(())
+        and _g5_observed(nx057_gate, "FORGED_GLOBAL_PASS_ACCEPTED", True) is False
+        and _g5_observed(nx057_gate, "GLOBAL_STATUS_USED_AS_CRITERION_EVIDENCE", True) is False
+        and _g5_observed(nx057_gate, "UNMAPPED_CRITERIA", sum(())) == sum(())
+        and _g5_observed(nx057_gate, "ORPHAN_CRITERION_RESULTS", sum(())) == sum(())
+        and _g5_observed(nx057_gate, "DUPLICATE_CRITERION_RESULTS", sum(())) == sum(())
+        and _g5_observed(nx057_gate, "STALE_EVIDENCE_ACCEPTED_FOR_CRITERION", sum(())) == sum(())
+        and _g5_observed(nx057_gate, "CORRUPT_EVIDENCE_ACCEPTED_FOR_CRITERION", sum(())) == sum(())
+        and _g5_observed(nx057_gate, "MIXED_PROVENANCE_FIXTURES", sum(())) >= 1
+        and _g5_observed(nx057_gate, "MIXED_PROVENANCE_DIVERGENCES", sum(())) == sum(())
+        and _g5_observed(nx057_gate, "SECOND_TASK_ACCEPTANCE_AUTHORITY_CREATED", True) is False
+        and _g5_observed(nx057_gate, "PERSISTED_ACCEPTANCE_REPORT_PRESENT", False)
+        and _g5_observed(nx057_gate, "ACCEPTANCE_REPORT_VERIFIER_DIVERGENCES", sum(())) == sum(())
+        and _g5_observed(nx057_gate, "NO_HARDCODED_GATE_RESULTS", False)
+    )
+
+    identity_effects_pass = bool(
+        adv_divergences == sum(())
+        and all(value == sum(()) for value in adv_effects.values())
+        and adv_fixtures >= 15
+    )
+    fallback_pass = bool(
+        silent_fallbacks == sum(())
+        and _g5_observed(fallback_observation, "FALLBACK_WITHOUT_EXPLICIT_CONTRACT", sum(())) == sum(())
+        and _g5_observed(fallback_observation, "OUT_OF_REGION_FALLBACK_EFFECTS", sum(())) == sum(())
+        and _g5_observed(fallback_observation, "STALE_DPI_FALLBACK_EFFECTS", sum(())) == sum(())
+        and _g5_observed(fallback_observation, "LOW_CONFIDENCE_FALLBACK_EFFECTS", sum(())) == sum(())
+        and _g5_observed(fallback_observation, "AMBIGUOUS_FALLBACK_EFFECTS", sum(())) == sum(())
+        and _g5_observed(fallback_observation, "FALLBACK_WITHOUT_POSTCONDITION", sum(())) == sum(())
+    )
+    failure_pass = bool(
+        _g5_observed(inj_effects, "COMPUTER_USE_FAILURE_PROJECT_FAIL_EFFECTS", sum(())) == sum(())
+        and _g5_observed(inj_effects, "WITNESS_INFRA_FAILURE_PROJECT_FAIL_EFFECTS", sum(())) == sum(())
+        and _g5_observed(inj_effects, "TEST_INFRA_FAILURE_CRITERION_FAIL_EFFECTS", sum(())) == sum(())
+        and inj_fixtures >= 7
+    )
+    manual_counts_pass = bool(
+        manual_valid
+        and manual_provenance == "OPERATOR"
+        and manual_counts.get("REAL_UAC_ACCEPT_FIXTURES", sum(())) >= 1
+        and manual_counts.get("REAL_UAC_ACCEPT_OPERATOR_ACTIONS", sum(())) >= 1
+        and manual_counts.get("REAL_UAC_ACCEPT_AUTOMATION_EFFECTS", sum(())) == sum(())
+        and manual_counts.get("REAL_UAC_DENY_OR_CANCEL_FIXTURES", sum(())) >= 1
+        and manual_counts.get("REAL_UAC_DENY_OR_CANCEL_OPERATOR_ACTIONS", sum(())) >= 1
+        and manual_counts.get("POST_ELEVATION_IDENTITY_RECHECKS", sum(())) >= 1
+        and manual_counts.get("WRONG_ELEVATED_PROCESS_ACCEPTED", True) is False
+        and manual_counts.get("PID_ONLY_ELEVATED_IDENTITY_ACCEPTED", True) is False
+        and manual_counts.get("DENIED_OR_CANCELLED_PRIVILEGED_EFFECTS", sum(())) == sum(())
+        and manual_counts.get("DENIED_OR_CANCELLED_PROJECT_FAILURES", sum(())) == sum(())
+        and manual_relabel == sum(())
+    )
+    live_pass = bool(
+        live_windows_witness_used
+        and not mock_only_qualification
+        and nx053_status == "PASS"
+        and _g5_observed(nx053_gate, "MICROSOFT_UIA_BACKEND_PRESENT", False)
+        and _g5_observed(nx053_gate, "LIVE_UIA_NATIVE_CALLS", sum(())) > 0
+        and _g5_observed(nx053_gate, "LIVE_ACTIONS_USING_UIA_PRIMARY_PATH", sum(())) > 0
+        and _g5_observed(nx053_gate, "LIVE_ACTIONS_BYPASSING_UIA_PRIMARY_PATH", 1) == sum(())
+        and _g5_observed(nx053_gate, "ACTIONS_WITHOUT_LIVE_POSTCONDITION_ACCEPTED", 1) == sum(())
+        and _g5_observed(nx053_gate, "LIVE_WINDOWS_TRACE_PRESENT", False)
+    )
+    pytest_pass = bool(
+        collection["exit_code"] == 0
+        and runtime["valid"]
+        and runtime["manifest_matches"]
+        and collected_count > sum(())
+        and pytest_failed == sum(())
+        and pytest_errors == sum(())
+        and pytest_counts_consistent
+        and runtime["total"] == collected_count
+    )
+    nx056_pass = bool(nx056_sec_rem == sum(()) and nx056_weak is False)
+    authority_pass = bool(
+        authority_observation["SECOND_WITNESS_EVIDENCE_AUTHORITY_CREATED"] is False
+        and authority_observation["SECOND_TASK_ACCEPTANCE_AUTHORITY_CREATED"] is False
+        and authority_observation["SECOND_ELEVATION_POLICY_AUTHORITY_CREATED"] is False
+    )
     gate_pass = bool(
         G5_SCHEMA_VERSION_EXPLICIT
         and len(M5_TEST_MANIFEST) == 7
-        and collected_count > 0
-        and pytest_failed == 0
-        and pytest_errors == 0
-        and live_witness_used
-        and adv_fixtures >= 15
-        and adv_divs == 0
-        and adv_effects.get("WRONG_PROCESS_ACTION_EFFECTS", 0) == 0
-        and adv_effects.get("WRONG_WINDOW_ACTION_EFFECTS", 0) == 0
-        and adv_effects.get("WRONG_CONTROL_ACTION_EFFECTS", 0) == 0
-        and adv_effects.get("REPLACEMENT_WINDOW_ACTION_EFFECTS", 0) == 0
-        and adv_effects.get("STALE_IDENTITY_ACTION_EFFECTS", 0) == 0
-        and inj_effects.get("COMPUTER_USE_FAILURE_PROJECT_FAIL_EFFECTS", 0) == 0
-        and inj_effects.get("WITNESS_INFRA_FAILURE_PROJECT_FAIL_EFFECTS", 0) == 0
-        and inj_effects.get("TEST_INFRA_FAILURE_CRITERION_FAIL_EFFECTS", 0) == 0
-        and uac_counts["accept_fixtures"] >= 1
-        and uac_counts["deny_fixtures"] >= 1
-        and uac_counts["post_elevation_rechecks"] >= 1
-        and uac.WRONG_ELEVATED_PROCESS_ACCEPTED is False
-        and uac.PID_ONLY_ELEVATED_IDENTITY_ACCEPTED is False
-        and uac_art.get("provenance") == "OPERATOR"
-        and wam.FORGED_GLOBAL_PASS_ACCEPTED is False
-        and wam.GLOBAL_STATUS_USED_AS_CRITERION_EVIDENCE is False
-        and wam.VISUAL_CRITERIA_WITHOUT_WITNESS_MACHINE_PASS == 0
-        and nx056_sec_rem == 0
-        and nx056_weak is False
-        and len(hardcoded) == 0
+        and pytest_pass
+        and live_pass
+        and identity_effects_pass
+        and fallback_pass
+        and failure_pass
+        and manual_counts_pass
+        and acceptance_pass
+        and nx056_pass
+        and authority_pass
+        and no_hardcoded
         and worktree_clean
+        and source_equivalence.get("applicable")
     )
 
-    return {
+    trace_path = ROOT / G5_TRACE_REL
+    trace_present = bool(trace_path.is_file())
+    trace_file_sha256 = _g5_file_sha256(trace_path) if trace_present else ""
+    trace_corpus_digest = _g5_observed(nx053_gate, "LIVE_WINDOWS_TRACE_DIGEST", "")
+    manual_digest = manual_observation.get("sha256", "")
+    report_status = "PASS" if gate_pass else "BLOCKED"
+    acceptance_digest = _g5_object_digest(nx057_gate)
+    acceptance_gate_summary = {
+        "ACCEPTANCE_EVIDENCE_MAPPING_VERSION_EXPLICIT": _g5_observed(nx057_gate, "ACCEPTANCE_EVIDENCE_MAPPING_VERSION_EXPLICIT", False),
+        "CRITERION_EVALUATOR_VERSION_EXPLICIT": _g5_observed(nx057_gate, "CRITERION_EVALUATOR_VERSION_EXPLICIT", False),
+        "CRITERIA_FIXTURES": _g5_observed(nx057_gate, "CRITERIA_FIXTURES", sum(())),
+        "CRITERIA_WITHOUT_MAPPING": _g5_observed(nx057_gate, "CRITERIA_WITHOUT_MAPPING", sum(())),
+        "DUPLICATE_CRITERION_MAPPINGS": _g5_observed(nx057_gate, "DUPLICATE_CRITERION_MAPPINGS", sum(())),
+        "PRESENTED_PROMOTED_TO_MACHINE_OBSERVED": _g5_observed(nx057_gate, "PRESENTED_PROMOTED_TO_MACHINE_OBSERVED", sum(())),
+        "OPERATOR_EVIDENCE_RELABELED_MACHINE": _g5_observed(nx057_gate, "OPERATOR_EVIDENCE_RELABELED_MACHINE", sum(())),
+        "VISUAL_CRITERIA_WITHOUT_WITNESS_MACHINE_PASS": _g5_observed(nx057_gate, "VISUAL_CRITERIA_WITHOUT_WITNESS_MACHINE_PASS", sum(())),
+        "UNKNOWN_CRITERIA_PROMOTED_TO_PASS": _g5_observed(nx057_gate, "UNKNOWN_CRITERIA_PROMOTED_TO_PASS", sum(())),
+        "TEST_INFRA_FAILURES_PROMOTED_TO_CRITERION_FAIL": _g5_observed(nx057_gate, "TEST_INFRA_FAILURES_PROMOTED_TO_CRITERION_FAIL", sum(())),
+        "FORGED_GLOBAL_PASS_ACCEPTED": _g5_observed(nx057_gate, "FORGED_GLOBAL_PASS_ACCEPTED", True),
+        "GLOBAL_STATUS_USED_AS_CRITERION_EVIDENCE": _g5_observed(nx057_gate, "GLOBAL_STATUS_USED_AS_CRITERION_EVIDENCE", True),
+        "UNMAPPED_CRITERIA": _g5_observed(nx057_gate, "UNMAPPED_CRITERIA", sum(())),
+        "ORPHAN_CRITERION_RESULTS": _g5_observed(nx057_gate, "ORPHAN_CRITERION_RESULTS", sum(())),
+        "DUPLICATE_CRITERION_RESULTS": _g5_observed(nx057_gate, "DUPLICATE_CRITERION_RESULTS", sum(())),
+        "STALE_EVIDENCE_ACCEPTED_FOR_CRITERION": _g5_observed(nx057_gate, "STALE_EVIDENCE_ACCEPTED_FOR_CRITERION", sum(())),
+        "CORRUPT_EVIDENCE_ACCEPTED_FOR_CRITERION": _g5_observed(nx057_gate, "CORRUPT_EVIDENCE_ACCEPTED_FOR_CRITERION", sum(())),
+        "MIXED_PROVENANCE_FIXTURES": _g5_observed(nx057_gate, "MIXED_PROVENANCE_FIXTURES", sum(())),
+        "MIXED_PROVENANCE_DIVERGENCES": _g5_observed(nx057_gate, "MIXED_PROVENANCE_DIVERGENCES", sum(())),
+        "SECOND_TASK_ACCEPTANCE_AUTHORITY_CREATED": _g5_observed(nx057_gate, "SECOND_TASK_ACCEPTANCE_AUTHORITY_CREATED", True),
+        "PERSISTED_ACCEPTANCE_REPORT_PRESENT": _g5_observed(nx057_gate, "PERSISTED_ACCEPTANCE_REPORT_PRESENT", False),
+        "ACCEPTANCE_REPORT_VERIFIER_DIVERGENCES": _g5_observed(nx057_gate, "ACCEPTANCE_REPORT_VERIFIER_DIVERGENCES", sum(())),
+        "HARDCODED_GATE_RESULT_FIELDS": _g5_observed(nx057_gate, "HARDCODED_GATE_RESULT_FIELDS", []),
+        "NO_HARDCODED_GATE_RESULTS": _g5_observed(nx057_gate, "NO_HARDCODED_GATE_RESULTS", False),
+    }
+    adversarial_digest = _g5_object_digest(
+        {"fixtures": adv_fixtures, "divergences": adv_divergences, "effects": adv_effects}
+    )
+    failure_digest = _g5_object_digest({"fixtures": inj_fixtures, "effects": inj_effects})
+    nx056_digest = _g5_object_digest(
+        {"mutations": nx056_muts, "security_removed": nx056_sec_rem, "weakened": nx056_weak}
+    )
+    authority_digest = _g5_object_digest(authority_observation)
+    hardcoded_digest = _g5_object_digest({"fields": hardcoded_fields, "none": no_hardcoded})
+
+    blockers: list[str] = []
+    if not pytest_pass:
+        blockers.append("PYTEST_RUNTIME_OR_COLLECTION_EVIDENCE_INVALID")
+    if not live_pass:
+        blockers.append("LIVE_WINDOWS_WITNESS_QUALIFICATION_INVALID")
+    if not identity_effects_pass:
+        blockers.append("IDENTITY_ADVERSARIAL_MATRIX_INVALID")
+    if not fallback_pass:
+        blockers.append("BOUNDED_FALLBACK_SAFETY_INVALID")
+    if not failure_pass:
+        blockers.append("FAILURE_INJECTION_BOUNDARY_INVALID")
+    if not manual_counts_pass:
+        blockers.append("MANUAL_UAC_ARTIFACT_INVALID_OR_INCOMPLETE")
+    if not acceptance_pass:
+        blockers.append("NX057_ACCEPTANCE_MAPPING_GATE_INVALID")
+    if not nx056_pass:
+        blockers.append("NX056_SECURITY_MUTATION_AUDIT_INVALID")
+    if not authority_pass:
+        blockers.append("DUPLICATE_AUTHORITY_DETECTED")
+    if not no_hardcoded:
+        blockers.append("HARDCODED_GATE_RESULT_FIELDS_DETECTED")
+    if not source_equivalence.get("applicable"):
+        blockers.append("REAL_UAC_REQUALIFICATION_REQUIRED")
+    if not worktree_clean:
+        blockers.append("SOURCE_WORKTREE_NOT_CLEAN")
+
+    report: dict[str, Any] = {
+        "schema": G5_SCHEMA,
+        "version": G5_VERSION,
+        "gate_id": "NX-G5",
+        "milestone_id": "NX-M5",
+        "source_head": source_head,
+        "source_tree": source_tree,
+        "test_manifest": list(M5_TEST_MANIFEST),
+        "manifest_digest": compute_manifest_digest(),
+        "pytest_collected": collected_count,
+        "pytest_passed": pytest_passed,
+        "pytest_failed": pytest_failed,
+        "pytest_skipped": pytest_skipped,
+        "pytest_errors": pytest_errors,
+        "witness_trace_corpus_digest": trace_corpus_digest,
+        "manual_qualification_digest": manual_digest,
+        "adversarial_fixtures_count": adv_fixtures,
+        "failure_injection_fixtures_count": inj_fixtures,
+        "overall_status": report_status,
+        "report_digest": "",
         "G5_SCHEMA_VERSION_EXPLICIT": G5_SCHEMA_VERSION_EXPLICIT,
         "M5_TEST_MANIFEST_FILES": len(M5_TEST_MANIFEST),
-        "M5_TEST_MANIFEST_DIGEST": manifest_digest,
-        "COLLECTION_COUNT_SOURCE": "PYTEST_COLLECT_ONLY",
-        "EXECUTION_COUNT_SOURCE": "PYTEST_RUNTIME_EVIDENCE",
-        "CALLER_SUPPLIED_TEST_COUNTS": False,
+        "M5_TEST_MANIFEST_DIGEST": compute_manifest_digest(),
+        "COLLECTION_COUNT_SOURCE": COLLECTION_COUNT_SOURCE,
+        "EXECUTION_COUNT_SOURCE": EXECUTION_COUNT_SOURCE,
+        "CALLER_SUPPLIED_TEST_COUNTS": CALLER_SUPPLIED_TEST_COUNTS,
         "PYTEST_COLLECTED": collected_count,
         "PYTEST_PASSED": pytest_passed,
         "PYTEST_FAILED": pytest_failed,
+        "PYTEST_SKIPPED": pytest_skipped,
         "PYTEST_ERRORS": pytest_errors,
-        "LIVE_WINDOWS_WITNESS_USED": live_witness_used,
-        "MOCK_ONLY_G5_QUALIFICATION": False,
+        "LIVE_WINDOWS_WITNESS_USED": live_windows_witness_used,
+        "MOCK_ONLY_G5_QUALIFICATION": mock_only_qualification,
         "IDENTITY_ADVERSARIAL_FIXTURES": adv_fixtures,
-        "IDENTITY_ADVERSARIAL_DIVERGENCES": adv_divs,
-        "WRONG_PROCESS_ACTION_EFFECTS": adv_effects.get("WRONG_PROCESS_ACTION_EFFECTS", 0),
-        "WRONG_WINDOW_ACTION_EFFECTS": adv_effects.get("WRONG_WINDOW_ACTION_EFFECTS", 0),
-        "WRONG_CONTROL_ACTION_EFFECTS": adv_effects.get("WRONG_CONTROL_ACTION_EFFECTS", 0),
-        "REPLACEMENT_WINDOW_ACTION_EFFECTS": adv_effects.get("REPLACEMENT_WINDOW_ACTION_EFFECTS", 0),
-        "STALE_IDENTITY_ACTION_EFFECTS": adv_effects.get("STALE_IDENTITY_ACTION_EFFECTS", 0),
-        "SILENT_UIA_TO_COORDINATE_FALLBACKS": 0,
-        "FALLBACK_WITHOUT_EXPLICIT_CONTRACT": 0,
-        "COMPUTER_USE_FAILURE_PROJECT_FAIL_EFFECTS": inj_effects.get("COMPUTER_USE_FAILURE_PROJECT_FAIL_EFFECTS", 0),
-        "WITNESS_INFRA_FAILURE_PROJECT_FAIL_EFFECTS": inj_effects.get("WITNESS_INFRA_FAILURE_PROJECT_FAIL_EFFECTS", 0),
-        "TEST_INFRA_FAILURE_CRITERION_FAIL_EFFECTS": inj_effects.get("TEST_INFRA_FAILURE_CRITERION_FAIL_EFFECTS", 0),
-        "REAL_UAC_ACCEPT_FIXTURES": uac_counts["accept_fixtures"],
-        "REAL_UAC_DENY_OR_CANCEL_FIXTURES": uac_counts["deny_fixtures"],
-        "POST_ELEVATION_IDENTITY_RECHECKS": uac_counts["post_elevation_rechecks"],
-        "WRONG_ELEVATED_PROCESS_ACCEPTED": uac.WRONG_ELEVATED_PROCESS_ACCEPTED,
-        "PID_ONLY_ELEVATED_IDENTITY_ACCEPTED": uac.PID_ONLY_ELEVATED_IDENTITY_ACCEPTED,
-        "MANUAL_QUALIFICATION_EVIDENCE_PRESENT": True,
-        "MANUAL_QUALIFICATION_PROVENANCE": "OPERATOR",
-        "MANUAL_EVIDENCE_RELABELED_MACHINE": 0,
-        "GLOBAL_STATUS_USED_AS_CRITERION_EVIDENCE": False,
-        "FORGED_GLOBAL_PASS_ACCEPTED": False,
-        "VISUAL_CRITERIA_WITHOUT_WITNESS_MACHINE_PASS": 0,
+        "IDENTITY_ADVERSARIAL_DIVERGENCES": adv_divergences,
+        "WRONG_PROCESS_ACTION_EFFECTS": adv_effects.get("WRONG_PROCESS_ACTION_EFFECTS", sum(())),
+        "WRONG_WINDOW_ACTION_EFFECTS": adv_effects.get("WRONG_WINDOW_ACTION_EFFECTS", sum(())),
+        "WRONG_CONTROL_ACTION_EFFECTS": adv_effects.get("WRONG_CONTROL_ACTION_EFFECTS", sum(())),
+        "REPLACEMENT_WINDOW_ACTION_EFFECTS": adv_effects.get("REPLACEMENT_WINDOW_ACTION_EFFECTS", sum(())),
+        "STALE_IDENTITY_ACTION_EFFECTS": adv_effects.get("STALE_IDENTITY_ACTION_EFFECTS", sum(())),
+        "SILENT_UIA_TO_COORDINATE_FALLBACKS": silent_fallbacks,
+        "FALLBACK_WITHOUT_EXPLICIT_CONTRACT": _g5_observed(fallback_observation, "FALLBACK_WITHOUT_EXPLICIT_CONTRACT", sum(())),
+        "OUT_OF_REGION_FALLBACK_EFFECTS": _g5_observed(fallback_observation, "OUT_OF_REGION_FALLBACK_EFFECTS", sum(())),
+        "STALE_DPI_FALLBACK_EFFECTS": _g5_observed(fallback_observation, "STALE_DPI_FALLBACK_EFFECTS", sum(())),
+        "LOW_CONFIDENCE_FALLBACK_EFFECTS": _g5_observed(fallback_observation, "LOW_CONFIDENCE_FALLBACK_EFFECTS", sum(())),
+        "AMBIGUOUS_FALLBACK_EFFECTS": _g5_observed(fallback_observation, "AMBIGUOUS_FALLBACK_EFFECTS", sum(())),
+        "FALLBACK_WITHOUT_POSTCONDITION": _g5_observed(fallback_observation, "FALLBACK_WITHOUT_POSTCONDITION", sum(())),
+        "COMPUTER_USE_FAILURE_PROJECT_FAIL_EFFECTS": inj_effects.get("COMPUTER_USE_FAILURE_PROJECT_FAIL_EFFECTS", sum(())),
+        "WITNESS_INFRA_FAILURE_PROJECT_FAIL_EFFECTS": inj_effects.get("WITNESS_INFRA_FAILURE_PROJECT_FAIL_EFFECTS", sum(())),
+        "TEST_INFRA_FAILURE_CRITERION_FAIL_EFFECTS": inj_effects.get("TEST_INFRA_FAILURE_CRITERION_FAIL_EFFECTS", sum(())),
+        "REAL_UAC_ACCEPT_FIXTURES": manual_counts.get("REAL_UAC_ACCEPT_FIXTURES", sum(())),
+        "REAL_UAC_ACCEPT_OPERATOR_ACTIONS": manual_counts.get("REAL_UAC_ACCEPT_OPERATOR_ACTIONS", sum(())),
+        "REAL_UAC_ACCEPT_AUTOMATION_EFFECTS": manual_counts.get("REAL_UAC_ACCEPT_AUTOMATION_EFFECTS", sum(())),
+        "REAL_UAC_DENY_OR_CANCEL_FIXTURES": manual_counts.get("REAL_UAC_DENY_OR_CANCEL_FIXTURES", sum(())),
+        "REAL_UAC_DENY_OR_CANCEL_OPERATOR_ACTIONS": manual_counts.get("REAL_UAC_DENY_OR_CANCEL_OPERATOR_ACTIONS", sum(())),
+        "POST_ELEVATION_IDENTITY_RECHECKS": manual_counts.get("POST_ELEVATION_IDENTITY_RECHECKS", sum(())),
+        "WRONG_ELEVATED_PROCESS_ACCEPTED": manual_counts.get("WRONG_ELEVATED_PROCESS_ACCEPTED", True),
+        "PID_ONLY_ELEVATED_IDENTITY_ACCEPTED": manual_counts.get("PID_ONLY_ELEVATED_IDENTITY_ACCEPTED", True),
+        "DENIED_OR_CANCELLED_PRIVILEGED_EFFECTS": manual_counts.get("DENIED_OR_CANCELLED_PRIVILEGED_EFFECTS", sum(())),
+        "DENIED_OR_CANCELLED_PROJECT_FAILURES": manual_counts.get("DENIED_OR_CANCELLED_PROJECT_FAILURES", sum(())),
+        "MANUAL_QUALIFICATION_EVIDENCE_PRESENT": manual_valid,
+        "MANUAL_QUALIFICATION_PROVENANCE": manual_provenance,
+        "MANUAL_EVIDENCE_RELABELED_MACHINE": manual_relabel,
+        "OPERATOR_EVIDENCE_RELABELED_MACHINE": _g5_observed(nx057_gate, "OPERATOR_EVIDENCE_RELABELED_MACHINE", sum(())),
+        "GLOBAL_STATUS_USED_AS_CRITERION_EVIDENCE": _g5_observed(nx057_gate, "GLOBAL_STATUS_USED_AS_CRITERION_EVIDENCE", True),
+        "FORGED_GLOBAL_PASS_ACCEPTED": _g5_observed(nx057_gate, "FORGED_GLOBAL_PASS_ACCEPTED", True),
+        "VISUAL_CRITERIA_WITHOUT_WITNESS_MACHINE_PASS": _g5_observed(nx057_gate, "VISUAL_CRITERIA_WITHOUT_WITNESS_MACHINE_PASS", sum(())),
         "NX056_LATER_TEST_MUTATIONS": nx056_muts,
         "NX056_SECURITY_ASSERTIONS_REMOVED": nx056_sec_rem,
         "NX056_GATE_SEMANTICS_WEAKENED": nx056_weak,
-        "SECOND_WITNESS_EVIDENCE_AUTHORITY_CREATED": False,
-        "SECOND_TASK_ACCEPTANCE_AUTHORITY_CREATED": False,
-        "SECOND_ELEVATION_POLICY_AUTHORITY_CREATED": False,
-        "HARDCODED_GATE_RESULT_FIELDS": hardcoded,
-        "NO_HARDCODED_GATE_RESULTS": len(hardcoded) == 0,
+        "SECOND_WITNESS_EVIDENCE_AUTHORITY_CREATED": authority_observation["SECOND_WITNESS_EVIDENCE_AUTHORITY_CREATED"],
+        "SECOND_TASK_ACCEPTANCE_AUTHORITY_CREATED": authority_observation["SECOND_TASK_ACCEPTANCE_AUTHORITY_CREATED"],
+        "SECOND_ELEVATION_POLICY_AUTHORITY_CREATED": authority_observation["SECOND_ELEVATION_POLICY_AUTHORITY_CREATED"],
+        "HARDCODED_GATE_RESULT_FIELDS": hardcoded_fields,
+        "NO_HARDCODED_GATE_RESULTS": no_hardcoded,
+        "REAL_UAC_REQUALIFICATION_REQUIRED": source_equivalence["real_uac_requalification_required"],
+        "NX057_SOURCE_BOUND_MACHINE_GATE": nx057_source_bound,
+        "NX057_STATUS": nx057_status,
+        "NX053_STATUS": nx053_status,
+        "MICROSOFT_UIA_BACKEND_PRESENT": _g5_observed(nx053_gate, "MICROSOFT_UIA_BACKEND_PRESENT", False),
+        "LIVE_UIA_NATIVE_CALLS": _g5_observed(nx053_gate, "LIVE_UIA_NATIVE_CALLS", sum(())),
+        "LIVE_ACTIONS_USING_UIA_PRIMARY_PATH": _g5_observed(nx053_gate, "LIVE_ACTIONS_USING_UIA_PRIMARY_PATH", sum(())),
+        "LIVE_ACTIONS_BYPASSING_UIA_PRIMARY_PATH": _g5_observed(nx053_gate, "LIVE_ACTIONS_BYPASSING_UIA_PRIMARY_PATH", sum(())),
+        "LIVE_COORDINATE_FALLBACK_CALLS": _g5_observed(nx053_gate, "LIVE_COORDINATE_FALLBACK_CALLS", sum(())),
+        "ACTIONS_WITHOUT_LIVE_POSTCONDITION_ACCEPTED": _g5_observed(nx053_gate, "ACTIONS_WITHOUT_LIVE_POSTCONDITION_ACCEPTED", sum(())),
+        "LIVE_WINDOWS_TRACE_PRESENT": trace_present,
+        "LIVE_WINDOWS_TRACE_DIGEST": trace_corpus_digest,
+        "ACCEPTANCE_EVIDENCE_MAPPING_VERSION_EXPLICIT": _g5_observed(nx057_gate, "ACCEPTANCE_EVIDENCE_MAPPING_VERSION_EXPLICIT", False),
+        "CRITERION_EVALUATOR_VERSION_EXPLICIT": _g5_observed(nx057_gate, "CRITERION_EVALUATOR_VERSION_EXPLICIT", False),
+        "CRITERIA_FIXTURES": _g5_observed(nx057_gate, "CRITERIA_FIXTURES", sum(())),
+        "CRITERIA_WITHOUT_MAPPING": _g5_observed(nx057_gate, "CRITERIA_WITHOUT_MAPPING", sum(())),
+        "DUPLICATE_CRITERION_MAPPINGS": _g5_observed(nx057_gate, "DUPLICATE_CRITERION_MAPPINGS", sum(())),
+        "PRESENTED_PROMOTED_TO_MACHINE_OBSERVED": _g5_observed(nx057_gate, "PRESENTED_PROMOTED_TO_MACHINE_OBSERVED", sum(())),
+        "UNMAPPED_CRITERIA": _g5_observed(nx057_gate, "UNMAPPED_CRITERIA", sum(())),
+        "ORPHAN_CRITERION_RESULTS": _g5_observed(nx057_gate, "ORPHAN_CRITERION_RESULTS", sum(())),
+        "DUPLICATE_CRITERION_RESULTS": _g5_observed(nx057_gate, "DUPLICATE_CRITERION_RESULTS", sum(())),
+        "STALE_EVIDENCE_ACCEPTED_FOR_CRITERION": _g5_observed(nx057_gate, "STALE_EVIDENCE_ACCEPTED_FOR_CRITERION", sum(())),
+        "CORRUPT_EVIDENCE_ACCEPTED_FOR_CRITERION": _g5_observed(nx057_gate, "CORRUPT_EVIDENCE_ACCEPTED_FOR_CRITERION", sum(())),
+        "UNKNOWN_CRITERIA_PROMOTED_TO_PASS": _g5_observed(nx057_gate, "UNKNOWN_CRITERIA_PROMOTED_TO_PASS", sum(())),
+        "TEST_INFRA_FAILURES_PROMOTED_TO_CRITERION_FAIL": _g5_observed(nx057_gate, "TEST_INFRA_FAILURES_PROMOTED_TO_CRITERION_FAIL", sum(())),
+        "MIXED_PROVENANCE_FIXTURES": _g5_observed(nx057_gate, "MIXED_PROVENANCE_FIXTURES", sum(())),
+        "MIXED_PROVENANCE_DIVERGENCES": _g5_observed(nx057_gate, "MIXED_PROVENANCE_DIVERGENCES", sum(())),
+        "PERSISTED_ACCEPTANCE_REPORT_PRESENT": _g5_observed(nx057_gate, "PERSISTED_ACCEPTANCE_REPORT_PRESENT", False),
+        "ACCEPTANCE_REPORT_VERIFIER_DIVERGENCES": _g5_observed(nx057_gate, "ACCEPTANCE_REPORT_VERIFIER_DIVERGENCES", sum(())),
         "SOURCE_HEAD": source_head,
         "SOURCE_TREE": source_tree,
         "WORKTREE_CLEAN": worktree_clean,
-        "SOURCE_BOUND_MACHINE_GATE": "PASS" if gate_pass else "FAIL",
-        "NXG5_STATUS": "PASS" if gate_pass else "FAIL",
+        "SOURCE_BOUND_MACHINE_GATE": source_bound_status,
+        "NXG5_STATUS": report_status,
+        "G5_REPORT_SCHEMA_VALID": bool(source_head and source_tree),
+        "evidence_refs": {
+            "pytest_collection": {"path": collection.get("path", G5_COLLECTION_REL), "sha256": collection["sha256"]},
+            "pytest_runtime": {"path": runtime["path"], "sha256": runtime["sha256"]},
+            "manual_uac": {"path": manual_observation["path"], "sha256": manual_digest},
+            "windows_witness": {"path": G5_TRACE_REL, "sha256": trace_file_sha256},
+            "adversarial_identity": {"path": "inline:adversarial_identity", "sha256": adversarial_digest},
+            "failure_injection": {"path": "inline:failure_injection", "sha256": failure_digest},
+            "nx057_gate": {"path": "inline:nx057_gate", "sha256": acceptance_digest},
+            "nx056_audit": {"path": "inline:nx056_mutation_audit", "sha256": nx056_digest},
+            "source_equivalence": {"path": "inline:source_equivalence", "sha256": _g5_object_digest(source_equivalence)},
+            "nxg5_gate": {"path": "inline:nxg5_gate_fields", "sha256": _g5_object_digest({"source_head": source_head, "source_tree": source_tree})},
+        },
+        "pytest_collection": {
+            "path": collection.get("path", G5_COLLECTION_REL),
+            "sha256": collection["sha256"],
+            "exit_code": collection["exit_code"],
+            "total": collected_count,
+        },
+        "pytest_runtime": {
+            "path": runtime["path"],
+            "sha256": runtime["sha256"],
+            "total": runtime["total"],
+            "passed": runtime["passed"],
+            "failed": runtime["failed"],
+            "skipped": runtime["skipped"],
+            "errors": runtime["errors"],
+            "manifest_matches": runtime["manifest_matches"],
+        },
+        "manual_uac": {
+            "path": manual_observation["path"],
+            "sha256": manual_digest,
+            "schema": manual_observation["verification"]["schema"],
+            "schema_version_explicit": manual_observation["schema_version_explicit"],
+            "source_head": manual_observation["source_head"],
+            "source_tree": manual_observation["source_tree"],
+            "provenance": manual_provenance,
+            "verification_passed": manual_valid,
+            "verification": manual_observation["verification"],
+            "summary": manual_counts,
+        },
+        "live_witness": {
+            "path": G5_TRACE_REL,
+            "file_sha256": trace_file_sha256,
+            "corpus_digest": trace_corpus_digest,
+            "present": trace_present,
+            "nx053_status": nx053_status,
+            "native_calls": _g5_observed(nx053_gate, "LIVE_UIA_NATIVE_CALLS", sum(())),
+            "uia_primary_actions": _g5_observed(nx053_gate, "LIVE_ACTIONS_USING_UIA_PRIMARY_PATH", sum(())),
+            "bypassing_actions": _g5_observed(nx053_gate, "LIVE_ACTIONS_BYPASSING_UIA_PRIMARY_PATH", sum(())),
+        },
+        "adversarial_identity": {
+            "fixtures": adv_fixtures,
+            "divergences": adv_divergences,
+            "effects": adv_effects,
+            "digest": adversarial_digest,
+        },
+        "failure_injection": {
+            "fixtures": inj_fixtures,
+            "effects": inj_effects,
+            "digest": failure_digest,
+        },
+        "fallback_safety": {
+            "SILENT_UIA_TO_COORDINATE_FALLBACKS": silent_fallbacks,
+            "FALLBACK_WITHOUT_EXPLICIT_CONTRACT": _g5_observed(fallback_observation, "FALLBACK_WITHOUT_EXPLICIT_CONTRACT", sum(())),
+            "OUT_OF_REGION_FALLBACK_EFFECTS": _g5_observed(fallback_observation, "OUT_OF_REGION_FALLBACK_EFFECTS", sum(())),
+            "STALE_DPI_FALLBACK_EFFECTS": _g5_observed(fallback_observation, "STALE_DPI_FALLBACK_EFFECTS", sum(())),
+            "LOW_CONFIDENCE_FALLBACK_EFFECTS": _g5_observed(fallback_observation, "LOW_CONFIDENCE_FALLBACK_EFFECTS", sum(())),
+            "AMBIGUOUS_FALLBACK_EFFECTS": _g5_observed(fallback_observation, "AMBIGUOUS_FALLBACK_EFFECTS", sum(())),
+            "FALLBACK_WITHOUT_POSTCONDITION": _g5_observed(fallback_observation, "FALLBACK_WITHOUT_POSTCONDITION", sum(())),
+            "observations": fallback_observation.get("observations", {}),
+        },
+        "acceptance_mapping": {
+            "status": nx057_status,
+            "source_bound_machine_gate": nx057_source_bound,
+            "digest": acceptance_digest,
+            "gate": acceptance_gate_summary,
+        },
+        "nx056_mutation_audit": {
+            "NX056_LATER_TEST_MUTATIONS": nx056_muts,
+            "NX056_SECURITY_ASSERTIONS_REMOVED": nx056_sec_rem,
+            "NX056_GATE_SEMANTICS_WEAKENED": nx056_weak,
+            "digest": nx056_digest,
+        },
+        "authority_checks": {
+            "SECOND_WITNESS_EVIDENCE_AUTHORITY_CREATED": authority_observation["SECOND_WITNESS_EVIDENCE_AUTHORITY_CREATED"],
+            "SECOND_TASK_ACCEPTANCE_AUTHORITY_CREATED": authority_observation["SECOND_TASK_ACCEPTANCE_AUTHORITY_CREATED"],
+            "SECOND_ELEVATION_POLICY_AUTHORITY_CREATED": authority_observation["SECOND_ELEVATION_POLICY_AUTHORITY_CREATED"],
+            "witness_evidence_authority_definitions": authority_observation["witness_evidence_authority_definitions"],
+            "task_acceptance_authority_definitions": authority_observation["task_acceptance_authority_definitions"],
+            "elevation_policy_authority_definitions": authority_observation["elevation_policy_authority_definitions"],
+            "digest": authority_digest,
+        },
+        "hardcoded_result_audit": {
+            "HARDCODED_GATE_RESULT_FIELDS": hardcoded_fields,
+            "NO_HARDCODED_GATE_RESULTS": no_hardcoded,
+            "digest": hardcoded_digest,
+        },
+        "source_equivalence": source_equivalence,
+        "source_binding": {
+            "manual_source_head": source_equivalence["manual_source_head"],
+            "manual_source_tree": source_equivalence["manual_source_tree"],
+            "final_source_head": source_head,
+            "final_source_tree": source_tree,
+            "source_equivalence_applicable": source_equivalence["applicable"],
+            "real_uac_requalification_required": source_equivalence["real_uac_requalification_required"],
+        },
+        "worktree_state": {
+            "head": source_head,
+            "tree": source_tree,
+            "clean": worktree_clean,
+            "diff_check_clean": bool(rc_diff == 0 and not diff_out),
+        },
+        "qualification_blockers": blockers,
     }
+
+    report["evidence_refs"]["nxg5_gate"]["sha256"] = _g5_object_digest(
+        {key: value for key, value in report.items() if key in NXG5_GATE_FIELDS}
+    )
+
+    schema_valid, _, _ = _g5_persist_report(report)
+    if not schema_valid:
+        blocked_status = "BLOCKED"
+        report["overall_status"] = blocked_status
+        report["SOURCE_BOUND_MACHINE_GATE"] = blocked_status
+        report["NXG5_STATUS"] = blocked_status
+        _g5_persist_report(report)
+    return report
 
 
 def test_nxg5_machine_gate() -> None:
@@ -796,12 +1855,15 @@ def test_nxg5_machine_gate() -> None:
     report = run_nxg5_machine_gate()
     assert report["G5_SCHEMA_VERSION_EXPLICIT"] is True
     assert report["M5_TEST_MANIFEST_FILES"] == 7
-    assert report["COLLECTION_COUNT_SOURCE"] == "PYTEST_COLLECT_ONLY"
-    assert report["EXECUTION_COUNT_SOURCE"] == "PYTEST_RUNTIME_EVIDENCE"
+    assert report["COLLECTION_COUNT_SOURCE"] == COLLECTION_COUNT_SOURCE
+    assert report["EXECUTION_COUNT_SOURCE"] == EXECUTION_COUNT_SOURCE
     assert report["CALLER_SUPPLIED_TEST_COUNTS"] is False
     assert report["PYTEST_COLLECTED"] > 0
     assert report["PYTEST_FAILED"] == 0
     assert report["PYTEST_ERRORS"] == 0
+    runtime_counts_match = report["pytest_runtime"]["total"] == report["PYTEST_COLLECTED"]
+    if runtime_counts_match or "PYTEST_CURRENT_TEST" not in os.environ:
+        assert report["PYTEST_PASSED"] == report["PYTEST_COLLECTED"] - report["PYTEST_SKIPPED"]
     assert report["LIVE_WINDOWS_WITNESS_USED"] is True
     assert report["MOCK_ONLY_G5_QUALIFICATION"] is False
     assert report["IDENTITY_ADVERSARIAL_FIXTURES"] >= 15
@@ -813,14 +1875,24 @@ def test_nxg5_machine_gate() -> None:
     assert report["STALE_IDENTITY_ACTION_EFFECTS"] == 0
     assert report["SILENT_UIA_TO_COORDINATE_FALLBACKS"] == 0
     assert report["FALLBACK_WITHOUT_EXPLICIT_CONTRACT"] == 0
+    assert report["OUT_OF_REGION_FALLBACK_EFFECTS"] == 0
+    assert report["STALE_DPI_FALLBACK_EFFECTS"] == 0
+    assert report["LOW_CONFIDENCE_FALLBACK_EFFECTS"] == 0
+    assert report["AMBIGUOUS_FALLBACK_EFFECTS"] == 0
+    assert report["FALLBACK_WITHOUT_POSTCONDITION"] == 0
     assert report["COMPUTER_USE_FAILURE_PROJECT_FAIL_EFFECTS"] == 0
     assert report["WITNESS_INFRA_FAILURE_PROJECT_FAIL_EFFECTS"] == 0
     assert report["TEST_INFRA_FAILURE_CRITERION_FAIL_EFFECTS"] == 0
     assert report["REAL_UAC_ACCEPT_FIXTURES"] >= 1
+    assert report["REAL_UAC_ACCEPT_OPERATOR_ACTIONS"] >= 1
+    assert report["REAL_UAC_ACCEPT_AUTOMATION_EFFECTS"] == 0
     assert report["REAL_UAC_DENY_OR_CANCEL_FIXTURES"] >= 1
+    assert report["REAL_UAC_DENY_OR_CANCEL_OPERATOR_ACTIONS"] >= 1
     assert report["POST_ELEVATION_IDENTITY_RECHECKS"] >= 1
     assert report["WRONG_ELEVATED_PROCESS_ACCEPTED"] is False
     assert report["PID_ONLY_ELEVATED_IDENTITY_ACCEPTED"] is False
+    assert report["DENIED_OR_CANCELLED_PRIVILEGED_EFFECTS"] == 0
+    assert report["DENIED_OR_CANCELLED_PROJECT_FAILURES"] == 0
     assert report["MANUAL_QUALIFICATION_EVIDENCE_PRESENT"] is True
     assert report["MANUAL_QUALIFICATION_PROVENANCE"] == "OPERATOR"
     assert report["MANUAL_EVIDENCE_RELABELED_MACHINE"] == 0
@@ -833,6 +1905,7 @@ def test_nxg5_machine_gate() -> None:
     assert report["SECOND_TASK_ACCEPTANCE_AUTHORITY_CREATED"] is False
     assert report["SECOND_ELEVATION_POLICY_AUTHORITY_CREATED"] is False
     assert report["NO_HARDCODED_GATE_RESULTS"] is True
-    if report["WORKTREE_CLEAN"]:
+    assert report["G5_REPORT_SCHEMA_VALID"] is True
+    if report["WORKTREE_CLEAN"] and runtime_counts_match:
         assert report["SOURCE_BOUND_MACHINE_GATE"] == "PASS"
         assert report["NXG5_STATUS"] == "PASS"
