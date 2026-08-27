@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-feature-flag-contract-v1.schema.json",
+  "title": "BDB vNext Feature Flag Contract v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "project_id",
+    "revision",
+    "flags",
+    "sha256_digest"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-vnext-feature-flag-contract-v1" },
+    "schema_version": { "const": "1.0.0" },
+    "project_id": { "type": "string", "minLength": 1 },
+    "revision": { "type": "integer", "minimum": 1 },
+    "flags": {
+      "type": "object",
+      "additionalProperties": { "type": "boolean" }
+    },
+    "sha256_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  },
+  "additionalProperties": false
+}

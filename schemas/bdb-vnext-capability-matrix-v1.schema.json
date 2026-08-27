@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-capability-matrix-v1.schema.json",
+  "title": "BDB vNext Capability Matrix v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "capabilities",
+    "sha256_digest"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-vnext-capability-matrix-v1" },
+    "schema_version": { "const": "1.0.0" },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "capability_id",
+          "min_schema_version",
+          "dependencies",
+          "conflicts",
+          "default_state",
+          "rollback_behavior"
+        ],
+        "properties": {
+          "capability_id": { "type": "string" },
+          "min_schema_version": { "type": "string" },
+          "dependencies": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "conflicts": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "default_state": { "type": "boolean", "const": false },
+          "rollback_behavior": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "sha256_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  },
+  "additionalProperties": false
+}

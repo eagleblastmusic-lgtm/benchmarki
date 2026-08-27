@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-canary-execution-report-v1.schema.json",
+  "title": "BDB vNext Canary Execution Report v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "canary_identity",
+    "scope",
+    "flag_revision",
+    "active_flags",
+    "status",
+    "executed_tasks",
+    "rollback_state",
+    "premium_isolation_verified",
+    "sha256_digest"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-vnext-canary-execution-report-v1" },
+    "schema_version": { "const": "1.0.0" },
+    "canary_identity": { "const": "bdb-vnext-synthetic-canary" },
+    "scope": { "type": "string", "enum": ["TASK", "MILESTONE", "PROJECT", "UNTIL_STOPPED"] },
+    "flag_revision": { "type": "integer", "minimum": 1 },
+    "active_flags": {
+      "type": "object",
+      "additionalProperties": { "type": "boolean" }
+    },
+    "status": { "type": "string", "enum": ["PASSED", "FAILED", "ROLLED_BACK"] },
+    "executed_tasks": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "rollback_state": {
+      "type": "object",
+      "required": ["is_rolled_back", "reason"],
+      "properties": {
+        "is_rolled_back": { "type": "boolean" },
+        "reason": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "premium_isolation_verified": { "type": "boolean", "const": true },
+    "sha256_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  },
+  "additionalProperties": false
+}
