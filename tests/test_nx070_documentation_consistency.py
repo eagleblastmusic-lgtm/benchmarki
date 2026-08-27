@@ -545,7 +545,8 @@ def _path_mutation_counts(changed_paths: list[str]) -> tuple[int, int, int, int]
     )
     premium_effects = sum(1 for path in changed_paths if re.search(r"premium", path, re.IGNORECASE))
     historical_patterns = (
-        re.compile(r"^docs/(?:m|n|x|cc)[^/]*\.md$", re.IGNORECASE),
+        re.compile(r"^docs/(?:m|n|x)\d[^/]*\.md$", re.IGNORECASE),
+        re.compile(r"^docs/cc\d[^/]*\.md$", re.IGNORECASE),
         re.compile(r"^docs/governance/", re.IGNORECASE),
         re.compile(r"^docs/legacy/", re.IGNORECASE),
     )
