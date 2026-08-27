@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-improvement-item-v1.schema.json",
+  "title": "BDB vNext Improvement Item v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "improvement_id",
+    "fingerprint",
+    "title",
+    "opportunity",
+    "priority",
+    "source_friction_refs",
+    "project_id",
+    "provenance",
+    "decision_reason",
+    "status",
+    "created_at",
+    "updated_at",
+    "revision",
+    "evidence_refs"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "bdb-vnext-improvement-item-v1"
+    },
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "improvement_id": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9_\\-\\.:]+$"
+    },
+    "fingerprint": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "opportunity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8192
+    },
+    "priority": {
+      "type": "string",
+      "enum": ["P0", "P1", "P2", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
+    },
+    "source_friction_refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "project_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provenance": {
+      "type": "string",
+      "enum": ["MACHINE", "OPERATOR", "MANUAL_NOTE"]
+    },
+    "decision_reason": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": ["OPEN", "PLANNED", "DONE", "REJECTED"]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "superseded_by_improvement_id": {
+      "type": ["string", "null"]
+    },
+    "merged_into_improvement_id": {
+      "type": ["string", "null"]
+    }
+  },
+  "additionalProperties": false
+}

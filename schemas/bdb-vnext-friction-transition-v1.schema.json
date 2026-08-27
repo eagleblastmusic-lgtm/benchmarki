@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-friction-transition-v1.schema.json",
+  "title": "BDB vNext Friction Transition v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "transition_id",
+    "event_id",
+    "previous_status",
+    "new_status",
+    "reason",
+    "timestamp",
+    "provenance"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "bdb-vnext-friction-transition-v1"
+    },
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "transition_id": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9_\\-\\.:]+$"
+    },
+    "event_id": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9_\\-\\.:]+$"
+    },
+    "previous_status": {
+      "type": "string",
+      "enum": ["OBSERVED", "TRIAGED", "PROMOTED", "RESOLVED", "SUPERSEDED"]
+    },
+    "new_status": {
+      "type": "string",
+      "enum": ["OBSERVED", "TRIAGED", "PROMOTED", "RESOLVED", "SUPERSEDED"]
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "provenance": {
+      "type": "string",
+      "enum": ["MACHINE", "OPERATOR", "MANUAL_NOTE"]
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  },
+  "additionalProperties": false
+}
