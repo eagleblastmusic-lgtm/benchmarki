@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-global-learning-view-v1.schema.json",
+  "title": "BDB vNext Sanitized Global Learning View v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "view_id",
+    "generated_at",
+    "opted_in_projects",
+    "global_patterns",
+    "tombstones",
+    "sha256_digest"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-vnext-global-learning-view-v1" },
+    "schema_version": { "const": "1.0.0" },
+    "view_id": { "type": "string" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "opted_in_projects": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "global_patterns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "global_fingerprint",
+          "category",
+          "failure_class",
+          "sanitized_symptom_signature",
+          "severity",
+          "total_occurrences",
+          "contributing_project_count",
+          "first_seen_at",
+          "last_seen_at"
+        ],
+        "properties": {
+          "global_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "category": { "type": "string" },
+          "failure_class": { "type": "string" },
+          "sanitized_symptom_signature": { "type": "string" },
+          "subsystem": { "type": ["string", "null"] },
+          "severity": { "type": "string" },
+          "total_occurrences": { "type": "integer", "minimum": 1 },
+          "contributing_project_count": { "type": "integer", "minimum": 1 },
+          "first_seen_at": { "type": "string" },
+          "last_seen_at": { "type": "string" },
+          "sanitized_resolution_class": { "type": ["string", "null"] }
+        },
+        "additionalProperties": false
+      }
+    },
+    "tombstones": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["global_fingerprint", "tombstone_reason", "deleted_at", "policy_version"],
+        "properties": {
+          "global_fingerprint": { "type": "string" },
+          "tombstone_reason": { "type": "string" },
+          "deleted_at": { "type": "string" },
+          "policy_version": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "sha256_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  },
+  "additionalProperties": false
+}
