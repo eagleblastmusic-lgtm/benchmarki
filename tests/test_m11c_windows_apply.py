@@ -3,11 +3,16 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Iterator
 
 import pytest
 
 import bdb_vnext.m11c_cutover as m11c
+import bdb_vnext.m11c_windows_clients as clients
 from bdb_vnext.m11c_windows_clients import (
     TARGET_REGISTRY_SUBKEY,
     register_windows_target_native_host,
@@ -18,18 +23,212 @@ from test_m11c_cutover import FREEZE_DIGEST, HEAD, TREE, _fixture, _m9a_report
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="M11c public apply is Windows-only")
 
 
-@pytest.fixture(autouse=True)
-def _cleanup_test_target_native_route():
-    yield
-    if os.name != "nt":
-        return
-    import winreg
+class _IsolatedRegistryKey:
+    def __init__(self, backend: "_IsolatedRegistry", root: object, subkey: str, view: int) -> None:
+        self.backend = backend
+        self.root = root
+        self.subkey = subkey
+        self.view = view
 
-    for view in (winreg.KEY_WOW64_32KEY, winreg.KEY_WOW64_64KEY):
-        try:
-            winreg.DeleteKeyEx(winreg.HKEY_CURRENT_USER, TARGET_REGISTRY_SUBKEY, view, 0)
-        except (FileNotFoundError, OSError):
-            pass
+    def __enter__(self) -> "_IsolatedRegistryKey":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+
+class _IsolatedRegistry:
+    """Minimal injected winreg backend; no handle can address the real Registry."""
+
+    HKEY_CURRENT_USER = SimpleNamespace(name="ISOLATED_HKCU")
+    HKEY_LOCAL_MACHINE = SimpleNamespace(name="ISOLATED_HKLM")
+    KEY_READ = 0x20019
+    KEY_SET_VALUE = 0x0002
+    KEY_WOW64_32KEY = 0x0200
+    KEY_WOW64_64KEY = 0x0100
+    REG_SZ = 1
+
+    def __init__(self) -> None:
+        self._values: dict[tuple[str, str, int], tuple[str, int]] = {}
+
+    def _root_name(self, root: object) -> str:
+        if root is self.HKEY_CURRENT_USER:
+            return "HKCU"
+        if root is self.HKEY_LOCAL_MACHINE:
+            return "HKLM"
+        raise AssertionError("production or foreign Registry root selected by isolated test")
+
+    def _view(self, access: int) -> int:
+        selected = access & (self.KEY_WOW64_32KEY | self.KEY_WOW64_64KEY)
+        if selected not in {self.KEY_WOW64_32KEY, self.KEY_WOW64_64KEY}:
+            raise AssertionError("non-isolated Registry view selected by isolated test")
+        return selected
+
+    def _identity(self, root: object, subkey: str, view: int) -> tuple[str, str, int]:
+        if view not in {self.KEY_WOW64_32KEY, self.KEY_WOW64_64KEY}:
+            raise AssertionError("non-isolated Registry view selected by isolated test")
+        return self._root_name(root), subkey, view
+
+    def OpenKey(self, root: object, subkey: str, reserved: int, access: int) -> _IsolatedRegistryKey:
+        assert reserved == 0
+        view = self._view(access)
+        identity = self._identity(root, subkey, view)
+        if identity not in self._values:
+            raise FileNotFoundError(subkey)
+        return _IsolatedRegistryKey(self, root, subkey, view)
+
+    def CreateKeyEx(self, root: object, subkey: str, reserved: int, access: int) -> _IsolatedRegistryKey:
+        assert reserved == 0
+        view = self._view(access)
+        self._identity(root, subkey, view)
+        return _IsolatedRegistryKey(self, root, subkey, view)
+
+    def QueryValueEx(self, key: _IsolatedRegistryKey, name: object) -> tuple[str, int]:
+        assert name is None
+        identity = self._identity(key.root, key.subkey, key.view)
+        if identity not in self._values:
+            raise FileNotFoundError(key.subkey)
+        return self._values[identity]
+
+    def SetValueEx(self, key: _IsolatedRegistryKey, name: object, reserved: int, kind: int, value: str) -> None:
+        assert name is None and reserved == 0 and kind == self.REG_SZ
+        identity = self._identity(key.root, key.subkey, key.view)
+        self._values[identity] = value, kind
+
+    def DeleteKeyEx(self, root: object, subkey: str, view: int, reserved: int) -> None:
+        assert reserved == 0
+        identity = self._identity(root, subkey, view)
+        if identity not in self._values:
+            raise FileNotFoundError(subkey)
+        del self._values[identity]
+
+    def DeleteKey(self, root: object, subkey: str) -> None:
+        raise AssertionError("view-less Registry cleanup is forbidden in isolated tests")
+
+    def seed(self, *, root: object, subkey: str, view: int, value: str) -> None:
+        self._values[self._identity(root, subkey, view)] = value, self.REG_SZ
+
+    def snapshot(self) -> dict[tuple[str, str, int], tuple[str, int]]:
+        return dict(self._values)
+
+    def restore(self, snapshot: dict[tuple[str, str, int], tuple[str, int]]) -> None:
+        self._values = dict(snapshot)
+
+
+class _ProductionWinregGuard:
+    def __getattr__(self, name: str) -> object:
+        raise AssertionError(f"direct production winreg access is forbidden in this test: {name}")
+
+
+@contextmanager
+def _restored_registry_session(registry: _IsolatedRegistry) -> Iterator[_IsolatedRegistry]:
+    before = registry.snapshot()
+    try:
+        yield registry
+    finally:
+        registry.restore(before)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_test_registry(monkeypatch: pytest.MonkeyPatch) -> Iterator[_IsolatedRegistry]:
+    registry = _IsolatedRegistry()
+    monkeypatch.setattr(clients, "_winreg_module", lambda: registry)
+    monkeypatch.setitem(sys.modules, "winreg", _ProductionWinregGuard())
+    with _restored_registry_session(registry):
+        yield registry
+
+
+@pytest.mark.parametrize("view", [_IsolatedRegistry.KEY_WOW64_32KEY, _IsolatedRegistry.KEY_WOW64_64KEY])
+def test_isolated_registry_rejects_production_root_for_both_views(
+    _isolated_test_registry: _IsolatedRegistry,
+    view: int,
+) -> None:
+    with pytest.raises(AssertionError, match="production or foreign Registry root"):
+        _isolated_test_registry.CreateKeyEx(
+            object(),
+            TARGET_REGISTRY_SUBKEY,
+            0,
+            _isolated_test_registry.KEY_SET_VALUE | view,
+        )
+
+
+def test_isolated_registry_routes_both_views_without_real_hkcu(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolated_test_registry: _IsolatedRegistry,
+) -> None:
+    expected = str(tmp_path / "isolated-native-manifest.json")
+    monkeypatch.setattr(clients, "query_client_plan", lambda **_: {"plan": {"native_manifest_path": expected}})
+
+    routes = register_windows_target_native_host(runtime_root=tmp_path / "runtime")
+
+    assert routes["target_registered"] is True
+    assert routes["target_registered_views"] == ["32", "64"]
+    assert {item["value"] for item in routes["target"]} == {expected}
+    assert {
+        identity[2]
+        for identity in _isolated_test_registry.snapshot()
+        if identity[0] == "HKCU" and identity[1] == TARGET_REGISTRY_SUBKEY
+    } == {
+        _isolated_test_registry.KEY_WOW64_32KEY,
+        _isolated_test_registry.KEY_WOW64_64KEY,
+    }
+
+
+@pytest.mark.parametrize("outcome", ["pass", "fail", "exception", "interrupt"])
+def test_isolated_registry_cleanup_restores_preexisting_routes_for_every_exit(
+    outcome: str,
+) -> None:
+    registry = _IsolatedRegistry()
+    expected32 = "C:\\captured-production\\manifest-32.json"
+    expected64 = "C:\\captured-production\\manifest-64.json"
+    registry.seed(
+        root=registry.HKEY_CURRENT_USER,
+        subkey=TARGET_REGISTRY_SUBKEY,
+        view=registry.KEY_WOW64_32KEY,
+        value=expected32,
+    )
+    registry.seed(
+        root=registry.HKEY_CURRENT_USER,
+        subkey=TARGET_REGISTRY_SUBKEY,
+        view=registry.KEY_WOW64_64KEY,
+        value=expected64,
+    )
+    before = registry.snapshot()
+
+    def exercise() -> None:
+        with _restored_registry_session(registry):
+            registry.DeleteKeyEx(
+                registry.HKEY_CURRENT_USER,
+                TARGET_REGISTRY_SUBKEY,
+                registry.KEY_WOW64_32KEY,
+                0,
+            )
+            registry.DeleteKeyEx(
+                registry.HKEY_CURRENT_USER,
+                TARGET_REGISTRY_SUBKEY,
+                registry.KEY_WOW64_64KEY,
+                0,
+            )
+            if outcome == "fail":
+                raise AssertionError("simulated test failure")
+            if outcome == "exception":
+                raise RuntimeError("simulated test exception")
+            if outcome == "interrupt":
+                raise KeyboardInterrupt("simulated interrupted fixture")
+
+    if outcome == "pass":
+        exercise()
+    else:
+        expected_error = {
+            "fail": AssertionError,
+            "exception": RuntimeError,
+            "interrupt": KeyboardInterrupt,
+        }[outcome]
+        with pytest.raises(expected_error):
+            exercise()
+
+    assert registry.snapshot() == before
 
 
 def _powershell() -> str:
