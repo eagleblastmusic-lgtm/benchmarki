@@ -85,7 +85,13 @@ _SECRET_PATTERNS = [
     (re.compile(r"(?i)(secret\s*[:=]\s*)[^\s,;\"]+"), r"\1[REDACTED_SECRET]"),
     (re.compile(r"ghp_[a-zA-Z0-9]{20,}"), "[REDACTED_GH_TOKEN]"),
     (re.compile(r"sk-[a-zA-Z0-9]{20,}"), "[REDACTED_OPENAI_KEY]"),
-    (re.compile(r"-----BEGIN [A-Z ]+PRIVATE KEY-----[\s\S]+?-----END [A-Z ]+PRIVATE KEY-----"), "[REDACTED_PRIVATE_KEY]"),
+    (re.compile(r"-----BEGIN (?:[A-Z ]+)?PRIVATE KEY-----[\s\S]+?-----END (?:[A-Z ]+)?PRIVATE KEY-----"), "[REDACTED_PRIVATE_KEY]"),
+    (re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+"), "<REDACTED_EMAIL>"),
+    (re.compile(r"\\\\[^\s:\"'\\]+\\[^\s:\"'\\]+(?:\\[^\s:\"']*)?"), "<UNC_NETWORK_PATH>"),
+    (re.compile(r"(?i)\"access_token\"\s*:\s*\"[^\"]+\""), "\"access_token\": \"[REDACTED_TOKEN]\""),
+    (re.compile(r"[a-zA-Z]:\\Users\\[^\s:\"'\\]+(?:\\[^\s:\"']*)?", re.IGNORECASE), "<USER_PATH>"),
+    (re.compile(r"/(?:home|Users)/[^\s:\"'/]+(?:/[^\s:\"']*)?", re.IGNORECASE), "<USER_PATH>"),
+    (re.compile(r"```[\s\S]*?```|def\s+\w+\(.*?\):|class\s+\w+[\(:]"), "<CODE_OMITTED>"),
 ]
 
 # Volatile noise strip patterns for symptom normalization

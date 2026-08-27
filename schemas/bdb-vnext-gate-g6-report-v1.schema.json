@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-gate-g6-report-v1.schema.json",
+  "title": "BDB vNext Gate G6 Operational Learning Report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "report_digest",
+    "source_head",
+    "source_tree",
+    "worktree_clean",
+    "source_bound_machine_gate",
+    "nxg6_status",
+    "test_manifest",
+    "test_manifest_digest",
+    "pytest_collection",
+    "pytest_runtime",
+    "p0_p2_replay",
+    "concurrency_qualification",
+    "projection_recovery",
+    "diagnostic_reconstruction",
+    "privacy_assessment",
+    "global_learning_qualification",
+    "retention_compaction_recovery",
+    "no_auto_mutation_proof",
+    "artifact_digests",
+    "g6_gate_fields"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-vnext-gate-g6-report-v1" },
+    "schema_version": { "const": "1.0.0" },
+    "report_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "source_head": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "source_tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "worktree_clean": { "type": "boolean" },
+    "source_bound_machine_gate": { "type": "string", "enum": ["PASS", "FAIL", "BLOCKED"] },
+    "nxg6_status": { "type": "string", "enum": ["PASS", "FAIL", "BLOCKED"] },
+    "test_manifest": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "test_manifest_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "pytest_collection": {
+      "type": "object",
+      "required": ["source", "collected", "digest", "exit_code"],
+      "properties": {
+        "source": { "type": "string" },
+        "collected": { "type": "integer", "minimum": 1 },
+        "digest": { "type": "string" },
+        "exit_code": { "type": "integer" }
+      },
+      "additionalProperties": false
+    },
+    "pytest_runtime": {
+      "type": "object",
+      "required": ["source", "total", "passed", "failed", "skipped", "errors", "manifest_matches", "digest"],
+      "properties": {
+        "source": { "type": "string" },
+        "total": { "type": "integer", "minimum": 1 },
+        "passed": { "type": "integer", "minimum": 1 },
+        "failed": { "type": "integer", "enum": [0] },
+        "skipped": { "type": "integer" },
+        "errors": { "type": "integer", "enum": [0] },
+        "manifest_matches": { "type": "boolean" },
+        "digest": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "p0_p2_replay": {
+      "type": "object",
+      "required": ["canonical_incident_count", "mapping_digest", "replay_fixtures", "replay_divergences", "determinism_divergences", "report_rel_path", "report_digest"],
+      "properties": {
+        "canonical_incident_count": { "type": "integer", "minimum": 17 },
+        "mapping_digest": { "type": "string" },
+        "replay_fixtures": { "type": "integer", "minimum": 17 },
+        "replay_divergences": { "type": "integer", "enum": [0] },
+        "determinism_divergences": { "type": "integer", "enum": [0] },
+        "report_rel_path": { "type": "string" },
+        "report_digest": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "concurrency_qualification": {
+      "type": "object",
+      "required": ["fixtures", "lost_occurrences", "duplicate_friction_records", "duplicate_improvement_items", "projection_corruptions", "authority_divergences"],
+      "properties": {
+        "fixtures": { "type": "integer", "minimum": 16 },
+        "lost_occurrences": { "type": "integer", "enum": [0] },
+        "duplicate_friction_records": { "type": "integer", "enum": [0] },
+        "duplicate_improvement_items": { "type": "integer", "enum": [0] },
+        "projection_corruptions": { "type": "integer", "enum": [0] },
+        "authority_divergences": { "type": "integer", "enum": [0] }
+      },
+      "additionalProperties": false
+    },
+    "projection_recovery": {
+      "type": "object",
+      "required": ["fixtures", "rebuild_divergences", "tamper_authority_effects", "partial_projection_authority_effects", "stale_projection_accepted_current"],
+      "properties": {
+        "fixtures": { "type": "integer", "minimum": 6 },
+        "rebuild_divergences": { "type": "integer", "enum": [0] },
+        "tamper_authority_effects": { "type": "integer", "enum": [0] },
+        "partial_projection_authority_effects": { "type": "integer", "enum": [0] },
+        "stale_projection_accepted_current": { "type": "integer", "enum": [0] }
+      },
+      "additionalProperties": false
+    },
+    "diagnostic_reconstruction": {
+      "type": "object",
+      "required": ["fixtures", "reconstruction_divergences", "private_output_dependencies"],
+      "properties": {
+        "fixtures": { "type": "integer", "minimum": 4 },
+        "reconstruction_divergences": { "type": "integer", "enum": [0] },
+        "private_output_dependencies": { "type": "integer", "enum": [0] }
+      },
+      "additionalProperties": false
+    },
+    "privacy_assessment": {
+      "type": "object",
+      "required": ["fixtures", "total_findings", "critical_defects", "high_defects", "medium_findings", "low_findings", "assessment_rel_path", "assessment_digest"],
+      "properties": {
+        "fixtures": { "type": "integer", "minimum": 12 },
+        "total_findings": { "type": "integer" },
+        "critical_defects": { "type": "integer", "enum": [0] },
+        "high_defects": { "type": "integer", "enum": [0] },
+        "medium_findings": { "type": "integer" },
+        "low_findings": { "type": "integer" },
+        "assessment_rel_path": { "type": "string" },
+        "assessment_digest": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "global_learning_qualification": {
+      "type": "object",
+      "required": ["non_opted_in_global_records", "global_retention_local_evidence_deletions", "global_deleted_private_data_resurrections", "local_records_merged_cross_project", "global_expected_dedupe_divergences", "global_false_dedupe_merges"],
+      "properties": {
+        "non_opted_in_global_records": { "type": "integer", "enum": [0] },
+        "global_retention_local_evidence_deletions": { "type": "integer", "enum": [0] },
+        "global_deleted_private_data_resurrections": { "type": "integer", "enum": [0] },
+        "local_records_merged_cross_project": { "type": "integer", "enum": [0] },
+        "global_expected_dedupe_divergences": { "type": "integer", "enum": [0] },
+        "global_false_dedupe_merges": { "type": "integer", "enum": [0] }
+      },
+      "additionalProperties": false
+    },
+    "retention_compaction_recovery": {
+      "type": "object",
+      "required": ["fixtures", "retention_recovery_divergences", "compaction_recovery_divergences"],
+      "properties": {
+        "fixtures": { "type": "integer", "minimum": 4 },
+        "retention_recovery_divergences": { "type": "integer", "enum": [0] },
+        "compaction_recovery_divergences": { "type": "integer", "enum": [0] }
+      },
+      "additionalProperties": false
+    },
+    "no_auto_mutation_proof": {
+      "type": "object",
+      "required": ["project_plan_digest_before", "project_plan_digest_after", "auto_project_plan_mutations", "auto_project_source_mutations", "auto_project_task_creations"],
+      "properties": {
+        "project_plan_digest_before": { "type": "string" },
+        "project_plan_digest_after": { "type": "string" },
+        "auto_project_plan_mutations": { "type": "integer", "enum": [0] },
+        "auto_project_source_mutations": { "type": "integer", "enum": [0] },
+        "auto_project_task_creations": { "type": "integer", "enum": [0] }
+      },
+      "additionalProperties": false
+    },
+    "artifact_digests": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "g6_gate_fields": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

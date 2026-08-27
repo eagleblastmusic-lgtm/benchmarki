@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -71,8 +72,18 @@ def write_projection_file_atomic(target_path: Path | str, content: str) -> None:
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(content)
-        # Atomic replace
-        os.replace(tmp_file, str(path))
+        # Atomic replace with bounded retry for Windows concurrent handle collisions
+        last_err: Exception | None = None
+        for attempt in range(25):
+            try:
+                os.replace(tmp_file, str(path))
+                last_err = None
+                break
+            except (PermissionError, OSError) as exc:
+                last_err = exc
+                time.sleep(0.01 * (attempt + 1))
+        if last_err is not None:
+            raise last_err
     except Exception:
         if os.path.exists(tmp_file):
             try:
