@@ -1,7 +1,9 @@
 # BDB vNext — bieżąca architektura
 
 Status: **CURRENT**  
-Implementation baseline: `eae9fee9d171d61ded3c9cf539058559679aa9c8`
+Qualified source subject (NX-069): `a6aa681ccbf40ca181834ed3fe628152a06dd406`
+Qualified source tree: `a496aefa0667498985f0a117c5e13bf59f2be9ef`
+Current state and deployed slot observation: [`NX070_CURRENT_STATE.md`](NX070_CURRENT_STATE.md)
 
 Ten dokument opisuje działającą architekturę `bdb-vnext`, a nie historyczny POC, Browser 0.4.x ani wcześniejszy Local Workspace Loop.
 
@@ -236,18 +238,23 @@ Sam staging Browser/Native bytes nie aktywuje produkcji.
 
 Szczegóły: [`VNEXT_PRODUCTION_RUNTIME.md`](VNEXT_PRODUCTION_RUNTIME.md).
 
-## 9. Zweryfikowany bounded repair — eae9fee9
+## 9. Zweryfikowane fail-stop semantics through NX-069
 
-Implementation baseline `eae9fee9d171d61ded3c9cf539058559679aa9c8` naprawia dwa wcześniej udokumentowane rozjazdy implementacji:
+The historical pre-NX-070 repair is retained as history; the accepted
+NX-069 qualified source revalidates these implementation semantics:
 
 1. Browser receipt UI nie utożsamia już transport success z task acceptance. `Result accepted` jest możliwe wyłącznie przy `accepted === true` i `result_status === "PASS"`. FAIL/replayed FAIL są prezentowane jako failure.
 2. `reconcile()` oraz milestone projection zachowują blocked/review authority. Cursor pozostaje na tasku blokującym/review, a projekcja nie wystawia `RUNNABLE`; tylko run `running` może korzystać z `next_task_id` do przesuwania kursora.
 
 Dodatkowo Browser AUTO zatrzymuje chain na każdym nie-accepted-PASS, obejmując FAIL, REVIEW i UNKNOWN.
 
-Repair przeszedł focused suite `50 passed` oraz jawne regression checks dla FAIL/replayed FAIL, blocked/review cursor, istniejącego PASS flow i STOP semantics. `node --check`, `py_compile` i `git diff --check` również przeszły.
+The source-bound NX-069 qualification and focused regression checks cover
+FAIL/replayed FAIL, blocked/review cursor, the existing PASS flow, STOP
+semantics, JavaScript/Python syntax, and diff integrity.
 
-To jest source-level evidence. W ramach repairu production package nie był budowany, production/runtime nie był modyfikowany, a real ChatGPT Browser smoke nie był uruchamiany.
+This is source-level evidence. Production package promotion and production
+cutover remain separate operations; see the current-state snapshot for the
+observed ACTIVE generation and the NX-070 boundary.
 
 ## 10. Non-authorities
 

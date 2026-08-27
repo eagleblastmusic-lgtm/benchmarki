@@ -1,6 +1,14 @@
 # BDB vNext — produkcyjny runtime Windows
 
 Status: **CURRENT**  
+Qualified source subject (NX-069): `a6aa681ccbf40ca181834ed3fe628152a06dd406`
+Qualified source tree: `a496aefa0667498985f0a117c5e13bf59f2be9ef`
+Volatile deployment snapshot: [`NX070_CURRENT_STATE.md`](NX070_CURRENT_STATE.md)
+
+The qualified source is not automatically the deployed production runtime.
+The current external Bootstrap readback remains the source of truth for
+`ACTIVE`, `PREVIOUS`, and `CANDIDATE` slots; NX-070 performs no promotion or
+Bootstrap mutation.
 
 ## 1. Canonical runtime root
 
@@ -78,7 +86,10 @@ kopiowanie nie aktywuje targetu i nie tworzy drugiej authority.
 
 Dokumentacja nie powinna mówić „produkcja jest na HEAD X” tylko dlatego, że branch wskazuje X.
 
-Implementation baseline dokumentacji może być starszym commitem kodowym niż branch HEAD, jeżeli późniejsze commity dotyczą wyłącznie dokumentacji. To nadal nie mówi nic o zainstalowanym runtime.
+The qualified source subject and the final documentation commit are separate
+identities. The NX-070 gate derives the final committed `HEAD`/`TREE` instead
+of embedding a self-referential value; neither identity alone proves the
+installed runtime. Read the deployed slots from the current-state snapshot.
 
 ## 5. Build input vs repo-local live runtime
 

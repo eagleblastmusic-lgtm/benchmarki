@@ -1,7 +1,9 @@
 # BDB vNext — Project workflow
 
 Status: **CURRENT**  
-Implementation baseline: `eae9fee9d171d61ded3c9cf539058559679aa9c8`
+Qualified source subject (NX-069): `a6aa681ccbf40ca181834ed3fe628152a06dd406`
+Qualified source tree: `a496aefa0667498985f0a117c5e13bf59f2be9ef`
+Current release/state boundary: [`NX070_CURRENT_STATE.md`](NX070_CURRENT_STATE.md)
 
 ## 1. Utworzenie projektu
 
@@ -196,11 +198,11 @@ calculator/app result = derived from actual repo + validation
 
 Nie należy aktualizować `project-plan.json`, aby księgować każdy completed task. Postęp wykonania należy do Project Execution/Memory.
 
-## 14. Zweryfikowana fail-stop semantyka baseline eae9fee9
+## 14. Zweryfikowana fail-stop semantyka through NX-069
 
-Bounded repair `eae9fee9d171d61ded3c9cf539058559679aa9c8` usunął wcześniejsze caveaty dotyczące receipt UI i blocked/review projection.
-
-Na tym baseline:
+The accepted NX-069 qualified source retains the fail-stop behavior below;
+the historical repair that first introduced it is not the current source or
+deployment identity.
 
 - FAIL/replayed FAIL nie są pokazywane jako `Result accepted`;
 - Browser AUTO nie kontynuuje dla FAIL, REVIEW ani UNKNOWN;
@@ -208,6 +210,8 @@ Na tym baseline:
 - tylko aktywny run `running` może przesunąć cursor przez `next_task_id`;
 - blocked/review milestone projection nie raportuje `RUNNABLE`.
 
-Focused validation repairu zakończyła się wynikiem `50 passed` wraz z regression checks dla FAIL/replay-FAIL, blocked/review cursor, istniejącego PASS flow i STOP semantics.
+The source-bound NX-069 qualification and focused regressions cover these
+conditions.
 
-Nie jest to dowód deploymentu: production package i real ChatGPT Browser smoke nie były częścią tego repairu.
+Nie jest to dowód deploymentu: qualified source and current production ACTIVE are separate
+states; future candidate promotion is also separately documented in the current snapshot.

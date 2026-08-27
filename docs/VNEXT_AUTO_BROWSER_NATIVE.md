@@ -1,7 +1,9 @@
 # BDB vNext — AUTO, Browser i Native transport
 
 Status: **CURRENT**  
-Implementation baseline: `eae9fee9d171d61ded3c9cf539058559679aa9c8`
+Qualified source subject (NX-069): `a6aa681ccbf40ca181834ed3fe628152a06dd406`
+Qualified source tree: `a496aefa0667498985f0a117c5e13bf59f2be9ef`
+Current release/state boundary: [`NX070_CURRENT_STATE.md`](NX070_CURRENT_STATE.md)
 
 Ten dokument dotyczy `browser_extension_vnext` oraz Native Host `com.bartosz.dev_bridge.vnext`. Nie opisuje legacy Browser 0.4.x.
 
@@ -248,9 +250,11 @@ Content adapter okresowo sprawdza pending project launch. Polling jest transport
 
 Claim ma krótki lease. Brak ACK nie powinien trwale zgubić PENDING AUTO handoffu; recovery ma być możliwe po refresh/restart, o ile canonical identity pozostaje aktualne.
 
-## 15. Zweryfikowany repair — eae9fee9
+## 15. Zweryfikowane fail-stop semantics through NX-069
 
-Bounded repair `eae9fee9d171d61ded3c9cf539058559679aa9c8` naprawił dwa wcześniejsze defekty:
+The accepted NX-069 qualified source retains the following fail-stop
+semantics. The historical repair that introduced them remains historical
+evidence rather than a current source declaration:
 
 ### Receipt label / AUTO continuation
 
@@ -262,9 +266,12 @@ FAIL/replayed FAIL są pokazywane jako failure, nie jako `Result accepted`. Auto
 
 Project Execution używa durable run status jako authority. `blocked` i `review` nie projektują `RUNNABLE`, mają puste `runnable_task_ids` i zachowują current task na blockerze/review. Tylko `running` może przesuwać cursor przez progress `next_task_id`.
 
-Focused suite repairu: `50 passed`. Dodatkowo Browser FAIL/replay-FAIL, blocked/review cursor, istniejący PASS flow i STOP semantics przeszły; `node --check`, `py_compile` i `git diff --check` również przeszły.
+The source-bound NX-069 qualification and focused regressions cover these
+conditions.
 
-Real ChatGPT Browser smoke dla tego repairu nie był uruchamiany, a production package nie był budowany. Source validation nie może być przedstawiana jako potwierdzenie aktualnie zainstalowanego produkcyjnego klienta.
+Real ChatGPT Browser smoke and production promotion are separate operations;
+source validation must not be presented as proof that the qualified source is
+the currently installed production client.
 
 ## 16. Legacy distinction
 

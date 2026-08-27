@@ -200,6 +200,8 @@ Ich obecność nie oznacza, że każda activation/writer/intake gate jest aktual
 
 ## Current documentation
 
+- [Current-state snapshot](docs/NX070_CURRENT_STATE.md) — qualified source separately from deployed ACTIVE/PREVIOUS/CANDIDATE state, release boundaries, and evidence links.
+- [NX-070 supersession map](docs/NX070_SUPERSESSION_MAP.md) — versioned record of replaced current-source statements.
 - [Status i klasyfikacja dokumentacji](docs/DOCUMENTATION_STATUS.md)
 - [Bieżąca architektura vNext](docs/VNEXT_CURRENT_ARCHITECTURE.md)
 - [Project workflow](docs/VNEXT_PROJECT_WORKFLOW.md)
@@ -216,9 +218,15 @@ Najbardziej mylące generyczne dokumenty legacy Browser/Native oraz root POC sta
 
 ## Zweryfikowana semantyka fail-stop
 
-Implementation baseline `eae9fee9d171d61ded3c9cf539058559679aa9c8` naprawia dwa wcześniej znane rozjazdy:
+The accepted qualified source subject for this documentation snapshot is
+`a6aa681ccbf40ca181834ed3fe628152a06dd406` with tree
+`a496aefa0667498985f0a117c5e13bf59f2be9ef`. It retains and qualifies the
+following fail-stop behavior:
 
 - Browser receipt UI uznaje wynik za accepted tylko dla `accepted === true` i `result_status === "PASS"`; FAIL/replayed FAIL nie są etykietowane jako `Result accepted`;
 - aktywny milestone run w stanie `blocked` lub `review` zachowuje cursor na tasku blokującym/review i nie projektuje `RUNNABLE`; tylko run `running` może przesuwać cursor przez `next_task_id`.
 
-Focused validation tego repairu zakończyła się wynikiem `50 passed`. Ten fakt dotyczy source validation; nie dowodzi deploymentu produkcyjnego ani realnego smoke w aktualnym DOM ChatGPT.
+The source-bound NX-069 qualification and its focused regressions cover these
+semantics. This is source validation; it does not prove deployment of the
+qualified source. The currently deployed production generation is separately recorded
+separately in the [current-state snapshot](docs/NX070_CURRENT_STATE.md).

@@ -2,6 +2,13 @@
 
 Ten plik jest indeksem bieżącej dokumentacji na branchu `bdb-vnext`.
 
+The explicit volatile state authority for the repository documentation is the
+[NX-070 current-state snapshot](NX070_CURRENT_STATE.md), version
+`bdb-vnext-current-snapshot-v1`. It records the accepted qualified source
+subject separately from the currently deployed Bootstrap `ACTIVE` generation.
+The [NX-070 supersession map](NX070_SUPERSESSION_MAP.md) records replaced
+current statements without rewriting historical evidence.
+
 ## Zasada podstawowa
 
 Dokumentacja BDB powstała w wielu etapach: POC, Local Workspace Loop, Browser 0.4.x, Control Center 0.2/0.3, migracja side-by-side oraz docelowy BDB vNext. Nazwa pliku ani data nie oznaczają, że dokument opisuje aktualny runtime.
@@ -18,12 +25,20 @@ Dokument historyczny nie może samodzielnie służyć do wnioskowania o bieżąc
 ## CURRENT — dokumentacja bieżącego BDB vNext
 
 - [`../README.md`](../README.md) — wejście do aktualnego produktu i skrócona mapa systemu.
+- [`NX070_CURRENT_STATE.md`](NX070_CURRENT_STATE.md) — evidence-linked qualified source, production slots, release status, and not-yet-performed operations.
+- [`NX070_SUPERSESSION_MAP.md`](NX070_SUPERSESSION_MAP.md) — versioned current-documentation replacement map.
 - [`VNEXT_CURRENT_ARCHITECTURE.md`](VNEXT_CURRENT_ARCHITECTURE.md) — bieżące authority, granice komponentów i model stanu.
 - [`VNEXT_PROJECT_WORKFLOW.md`](VNEXT_PROJECT_WORKFLOW.md) — tworzenie projektu, planowanie, Work, Project Plan, execution i result flow.
 - [`VNEXT_AUTO_BROWSER_NATIVE.md`](VNEXT_AUTO_BROWSER_NATIVE.md) — Browser vNext, Native Host, milestone AUTO, recovery i handoff `PENDING/SENT`.
 - [`VNEXT_PRODUCTION_RUNTIME.md`](VNEXT_PRODUCTION_RUNTIME.md) — produkcyjny runtime Windows, client plan, Browser/Native identity i aktywacja.
 
-Dokumenty CURRENT opisują implementację obserwowaną na implementation baseline `eae9fee9d171d61ded3c9cf539058559679aa9c8`. Późniejsze commity dokumentacyjne mogą znajdować się ponad tym commitem bez zmiany source semantics. Jeżeli kod wykonawczy pójdzie dalej, należy porównać zmianę źródła z tym baseline i ponownie zsynchronizować dokumentację.
+Dokumenty CURRENT są zsynchronizowane z zaakceptowanym qualified source
+subject `a6aa681ccbf40ca181834ed3fe628152a06dd406` / tree
+`a496aefa0667498985f0a117c5e13bf59f2be9ef` oraz z obserwacją Bootstrap
+`ACTIVE` opisaną w snapshot. Finalny `HEAD`/`TREE` commitu NX-070 jest
+wyliczany przez gate z rzeczywistego committed repository, ponieważ wpisanie
+go do tego samego commitu utworzyłoby self-reference. Source branch HEAD nie
+jest przez to utożsamiany z production deployment.
 
 ## FROZEN GOVERNANCE — zachować
 
@@ -67,15 +82,21 @@ Przy zmianie kontraktu BDB vNext, która dotyczy Project Memory, Project Executi
 5. nie utożsamiaj branch HEAD z wersją aktualnie zainstalowaną — produkcyjną source identity należy odczytać z client/runtime evidence;
 6. nie opisuj browserowego cache jako canonical authority; jest wyłącznie projekcją/transportem.
 
-## Zweryfikowane repair semantics — baseline eae9fee9
+## Zweryfikowane repair semantics — historyczny repair, revalidated in NX-069
 
-Bounded repair `eae9fee9d171d61ded3c9cf539058559679aa9c8` usunął dwa wcześniej odnotowane defekty source:
+The pre-NX-070 bounded repair `eae9fee9d171d61ded3c9cf539058559679aa9c8` is
+historical evidence, not the current source declaration. Its semantics were
+revalidated on the accepted NX-069 qualified source:
 
 - Browser receipt UI wymaga teraz `accepted === true` oraz `result_status === "PASS"`; FAIL/replayed FAIL nie są prezentowane jako accepted PASS.
 - Milestone AUTO `blocked`/`review` zachowuje canonical cursor na tasku blokującym/review i nie projektuje `RUNNABLE`; tylko run `running` może przesuwać cursor przez `next_task_id`.
 
 AUTO continuation jest fail-closed: FAIL, REVIEW i UNKNOWN nie uruchamiają następnego launchu.
 
-Focused validation repairu: `50 passed`, plus Browser FAIL/replay-FAIL PASS, blocked/review cursor PASS, existing PASS flow PASS, STOP semantics PASS, `node --check` PASS, `py_compile` PASS i `git diff --check` PASS.
+The accepted NX-069 source-bound qualification and focused regressions cover
+the same checks; this note does not claim that the qualified source is already
+the deployed production runtime.
 
-W ramach tego repairu production package nie był budowany, production/runtime nie był modyfikowany, a real ChatGPT Browser smoke nie był uruchamiany. Nie wolno więc z samego source baseline wnioskować, że identyczny build jest już wdrożony produkcyjnie.
+The historical repair did not itself build a production package or modify
+production/runtime. Current production `ACTIVE`, `PREVIOUS`, and `CANDIDATE`
+state must be read from the snapshot's external Bootstrap evidence.
