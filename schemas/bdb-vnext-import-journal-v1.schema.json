@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-import-journal-v1.schema.json",
+  "title": "BDB vNext Import Journal v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "journal_id",
+    "project_id",
+    "started_at",
+    "status",
+    "entries",
+    "sha256_digest"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-vnext-import-journal-v1" },
+    "schema_version": { "const": "1.0.0" },
+    "journal_id": { "type": "string" },
+    "project_id": { "type": "string", "minLength": 1 },
+    "started_at": { "type": "string" },
+    "completed_at": { "type": ["string", "null"] },
+    "status": { "type": "string", "enum": ["PLANNED", "APPLYING", "APPLIED", "VERIFIED", "FAILED", "ROLLED_BACK"] },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["sequence_no", "entity_type", "entity_id", "status", "timestamp"],
+        "properties": {
+          "sequence_no": { "type": "integer", "minimum": 0 },
+          "entity_type": { "type": "string" },
+          "entity_id": { "type": "string" },
+          "status": { "type": "string", "enum": ["PLANNED", "APPLIED", "VERIFIED", "FAILED", "IGNORED"] },
+          "timestamp": { "type": "string" },
+          "details": { "type": "object" },
+          "error_message": { "type": ["string", "null"] }
+        },
+        "additionalProperties": false
+      }
+    },
+    "sha256_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  },
+  "additionalProperties": false
+}

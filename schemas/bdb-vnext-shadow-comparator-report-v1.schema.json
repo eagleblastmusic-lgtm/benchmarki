@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-shadow-comparator-report-v1.schema.json",
+  "title": "BDB vNext Shadow Comparator Report v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "report_id",
+    "project_id",
+    "compared_at",
+    "is_equivalent",
+    "v1_logical_digest",
+    "v2_logical_digest",
+    "differences",
+    "summary"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-vnext-shadow-comparator-report-v1" },
+    "schema_version": { "const": "1.0.0" },
+    "report_id": { "type": "string" },
+    "project_id": { "type": "string", "minLength": 1 },
+    "compared_at": { "type": "string" },
+    "is_equivalent": { "type": "boolean" },
+    "v1_logical_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "v2_logical_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "differences": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["entity_type", "entity_id", "diff_kind", "description"],
+        "properties": {
+          "entity_type": { "type": "string" },
+          "entity_id": { "type": "string" },
+          "diff_kind": { "type": "string", "enum": ["MISSING_IN_V2", "EXTRA_IN_V2", "ATTRIBUTE_MISMATCH"] },
+          "description": { "type": "string" },
+          "v1_value": {},
+          "v2_value": {}
+        },
+        "additionalProperties": false
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": { "type": "integer" }
+    }
+  },
+  "additionalProperties": false
+}

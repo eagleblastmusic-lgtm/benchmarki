@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-v1-v2-import-contract-v1.schema.json",
+  "title": "BDB vNext v1 to v2 Import Contract v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "backup_manifest",
+    "inventory",
+    "journal_id",
+    "status",
+    "mapped_counts",
+    "sha256_digest"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-vnext-v1-v2-import-contract-v1" },
+    "schema_version": { "const": "1.0.0" },
+    "backup_manifest": { "type": "object" },
+    "inventory": { "type": "object" },
+    "journal_id": { "type": "string" },
+    "status": { "type": "string", "enum": ["PLANNED", "APPLIED", "VERIFIED", "FAILED", "ROLLED_BACK"] },
+    "mapped_counts": {
+      "type": "object",
+      "additionalProperties": { "type": "integer" }
+    },
+    "sha256_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  },
+  "additionalProperties": false
+}
