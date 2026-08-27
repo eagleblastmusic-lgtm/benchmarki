@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-operational-status-v1.schema.json",
+  "title": "BDB vNext Operational Status Model v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "project_id",
+    "overall_health",
+    "captured_at",
+    "subsystems",
+    "correlation_context"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-vnext-operational-status-v1" },
+    "schema_version": { "const": "1.0.0" },
+    "project_id": { "type": "string", "minLength": 1 },
+    "overall_health": {
+      "type": "string",
+      "enum": ["HEALTHY", "WAITING", "DEGRADED", "PAUSED", "UNVERIFIABLE", "STALE", "UNKNOWN"]
+    },
+    "captured_at": { "type": "string", "format": "date-time" },
+    "is_stale": { "type": "boolean" },
+    "correlation_context": {
+      "type": "object",
+      "required": ["project_id"],
+      "properties": {
+        "project_id": { "type": "string" },
+        "run_id": { "type": ["string", "null"] },
+        "task_id": { "type": ["string", "null"] },
+        "binding_id": { "type": ["string", "null"] },
+        "attempt_id": { "type": ["string", "null"] },
+        "execution_id": { "type": ["string", "null"] },
+        "continuation_id": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "subsystems": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["name", "health", "canonical_source", "source_revision", "freshness", "observed_at"],
+        "properties": {
+          "name": { "type": "string" },
+          "health": {
+            "type": "string",
+            "enum": ["HEALTHY", "WAITING", "DEGRADED", "PAUSED", "UNVERIFIABLE", "STALE", "UNKNOWN"]
+          },
+          "canonical_source": { "type": "string", "minLength": 1 },
+          "source_revision": { "type": ["string", "integer"] },
+          "freshness": {
+            "type": "string",
+            "enum": ["FRESH", "STALE", "DEGRADED", "UNKNOWN"]
+          },
+          "observed_at": { "type": "string", "format": "date-time" },
+          "details": { "type": "object" },
+          "correlation_ids": { "type": "object" },
+          "error_message": { "type": ["string", "null"] }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

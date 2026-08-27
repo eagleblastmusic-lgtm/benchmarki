@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-diagnostic-export-v1.schema.json",
+  "title": "BDB vNext Diagnostic Export v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "export_id",
+    "project_id",
+    "exported_at",
+    "status_snapshot",
+    "timeline_events",
+    "aggregate_counts",
+    "sha256_digest"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-vnext-diagnostic-export-v1" },
+    "schema_version": { "const": "1.0.0" },
+    "export_id": { "type": "string" },
+    "project_id": { "type": "string", "minLength": 1 },
+    "exported_at": { "type": "string", "format": "date-time" },
+    "status_snapshot": { "type": "object" },
+    "timeline_events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["sequence_no", "timestamp", "subsystem", "event_type", "correlation_ids"],
+        "properties": {
+          "sequence_no": { "type": "integer", "minimum": 0 },
+          "timestamp": { "type": "string" },
+          "subsystem": { "type": "string" },
+          "event_type": { "type": "string" },
+          "summary": { "type": "string" },
+          "failure_class": { "type": ["string", "null"] },
+          "correlation_ids": { "type": "object" },
+          "evidence_refs": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "details": { "type": "object" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "aggregate_counts": {
+      "type": "object",
+      "additionalProperties": { "type": "integer" }
+    },
+    "sha256_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  },
+  "additionalProperties": false
+}
