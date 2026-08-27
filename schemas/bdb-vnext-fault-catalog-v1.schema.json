@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-vnext-fault-catalog-v1.schema.json",
+  "title": "BDB vNext Fault Catalog v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "fault_cells",
+    "sha256_digest"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-vnext-fault-catalog-v1" },
+    "schema_version": { "const": "1.0.0" },
+    "fault_cells": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "fault_id",
+          "fault_class",
+          "subsystem_boundary",
+          "injection_point",
+          "expected_disposition",
+          "description"
+        ],
+        "properties": {
+          "fault_id": { "type": "string" },
+          "fault_class": { "type": "string" },
+          "subsystem_boundary": { "type": "string" },
+          "injection_point": { "type": "string" },
+          "expected_disposition": {
+            "type": "string",
+            "enum": ["ACCEPTED", "WAITING", "PAUSED", "SAFELY_RECOVERABLE", "BLOCKED_QUARANTINED", "ROLLED_BACK"]
+          },
+          "description": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "sha256_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  },
+  "additionalProperties": false
+}
