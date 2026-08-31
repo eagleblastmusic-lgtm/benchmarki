@@ -1,0 +1,292 @@
+{
+  "audit_id": "bdb-vnext-next-iteration-audit-20260829-iter2",
+  "audit_iteration": 2,
+  "audit_mode": "MODE_B_NEXT_ITERATION_META_AUDIT",
+  "repository": "https://github.com/eagleblastmusic-lgtm/bartosz-dev-bridge.git",
+  "branch": "bdb-vnext",
+  "audit_start_source": {
+    "head": "a3e111f19ebf8df803a92bee5734a9f03524501a",
+    "tree": "ab70143e69973f71f2965ffc09a5144a3d074757",
+    "parent": "47d0f3903d991bdae7b736b74656c7a1a27097b9",
+    "timestamp": "2026-08-27 22:58:43 +0200",
+    "subject": "bdb-vnext: isolate NX-071 registry fixture"
+  },
+  "audit_end_source": {
+    "head": "a3e111f19ebf8df803a92bee5734a9f03524501a",
+    "tree": "ab70143e69973f71f2965ffc09a5144a3d074757",
+    "parent": "47d0f3903d991bdae7b736b74656c7a1a27097b9",
+    "timestamp": "2026-08-27 22:58:43 +0200",
+    "subject": "bdb-vnext: isolate NX-071 registry fixture"
+  },
+  "source_drift": {
+    "drift_detected": false,
+    "changed_tracked_files": 0,
+    "invalidated_findings": []
+  },
+  "input_identity": {
+    "original_audit_prompt": "INLINE_INPUT_PROTOCOL_V3 (Title: FINAL UNIVERSAL TECHNICAL AUDIT & ANALYSIS PROTOCOL)",
+    "previous_audit_report": "INLINE_PREVIOUS_REPORT (Title: BDB vNext — niezależny audyt techniczny, audit_id: bdb-vnext-independent-audit-20260829-a3e111f)",
+    "previous_ledger": "artifacts/bdb-vnext-independent-audit-20260829/audit-ledger.json",
+    "canonical_json": "BDB_vNext_Project_Plan_v1.json (UNAVAILABLE/NOT_PROVIDED)",
+    "canonical_md": "BDB_vNext_Audit_i_Plan_Nastepnej_Iteracji.md (UNAVAILABLE/NOT_PROVIDED)"
+  },
+  "input_quarantine_status": {
+    "quarantine_respected": true,
+    "blind_checkpoint_frozen_before_reveal": true,
+    "blind_checkpoint_path": "artifacts/bdb-vnext-next-iteration-audit-20260829/blind-checkpoint.json",
+    "blind_checkpoint_digest": "22704c60f75816784057b0837827c8ed1b91e6345c37b83e2f6549c1fa6d6457"
+  },
+  "coverage_denominators": {
+    "tracked_files": 1208,
+    "python_files": 732,
+    "python_source_files": 354,
+    "python_test_files": 378,
+    "python_loc": 256630,
+    "python_functions": 9489,
+    "python_classes": 1240,
+    "python_test_functions": 2551,
+    "json_schemas": 109,
+    "github_workflows": 24,
+    "console_entrypoints": 19,
+    "statically_reachable_internal_modules": 133,
+    "gate_qualification_functions": 72,
+    "files_with_hardcoded_gate_detectors": 38,
+    "files_with_source_bound_machine_gate": 65,
+    "production_call_sites_of_reconcile_launch_outbox": 0
+  },
+  "lifecycle_matrix": {
+    "CURRENT_SOURCE": {
+      "head": "a3e111f19ebf8df803a92bee5734a9f03524501a",
+      "tree": "ab70143e69973f71f2965ffc09a5144a3d074757",
+      "status": "COMMITTED_CLEAN"
+    },
+    "CLAIMED_QUALIFIED_SOURCE": {
+      "head": "a6aa681ccbf40ca181834ed3fe628152a06dd406",
+      "tree": "a496aefa0667498985f0a117c5e13bf59f2be9ef",
+      "status": "QUALIFICATION_INVALIDATED"
+    },
+    "DEPLOYED_ACTIVE": {
+      "head": "abb55690fcd583cfd9b2f1cd922e71709165b999",
+      "tree": "9ffc7cec9a2f131965ef12063ac892e7e63a0cae",
+      "status": "VERIFIED_ACTIVE_EXTERNAL_BOOTSTRAP"
+    },
+    "PREVIOUS_SLOT": {
+      "head": "38cdd038c59416f85caef8758bd7f879100c866a",
+      "status": "VERIFIED_PREVIOUS_EXTERNAL_BOOTSTRAP"
+    },
+    "CANDIDATE_SLOT": {
+      "status": "NULL_NOT_STAGED"
+    }
+  },
+  "previous_finding_adjudication": [
+    {
+      "id": "F-001",
+      "claim": "Gate manufactures decisive status instead of deriving it",
+      "previous_sev": "CRITICAL",
+      "current_status": "CONFIRMED_CURRENT",
+      "relation_to_blind": "INDEPENDENTLY_REDISCOVERED",
+      "evidence": "full_qualification_runner.py:106-127, test_nx069_full_qualification.py:313"
+    },
+    {
+      "id": "F-002",
+      "claim": "Project execution result completes tasks without repo observation or evidence resolution",
+      "previous_sev": "HIGH",
+      "current_status": "CONFIRMED_CURRENT",
+      "relation_to_blind": "INDEPENDENTLY_REDISCOVERED",
+      "evidence": "project_execution.py:1298-1424, project_execution.py:1278-1296"
+    },
+    {
+      "id": "F-003",
+      "claim": "Memory and Catalog locks reclaim live owners by age alone",
+      "previous_sev": "HIGH",
+      "current_status": "CONFIRMED_CURRENT",
+      "relation_to_blind": "INDEPENDENTLY_REDISCOVERED",
+      "evidence": "project_catalog.py:685-721, project_memory.py:533-575"
+    },
+    {
+      "id": "F-004",
+      "claim": "Queue lock has unrecoverable partial-create liveness and ABA check-to-unlink",
+      "previous_sev": "HIGH",
+      "current_status": "CONFIRMED_CURRENT",
+      "relation_to_blind": "INDEPENDENTLY_REDISCOVERED",
+      "evidence": "project_launch.py:464-560"
+    },
+    {
+      "id": "F-005",
+      "claim": "Launch outbox recovery erases valid replacement and misses expired PUBLISHED projections",
+      "previous_sev": "HIGH",
+      "current_status": "CONFIRMED_CURRENT",
+      "relation_to_blind": "INDEPENDENTLY_REDISCOVERED",
+      "evidence": "project_workflow.py:572-590, project_workflow.py:639-653"
+    },
+    {
+      "id": "F-006",
+      "claim": "CURRENT documentation is stale relative to branch",
+      "previous_sev": "MEDIUM",
+      "current_status": "CONFIRMED_CURRENT",
+      "relation_to_blind": "INDEPENDENTLY_REDISCOVERED",
+      "evidence": "docs/NX070_CURRENT_STATE.md:71"
+    },
+    {
+      "id": "F-007",
+      "claim": "Exact canonical authority artifacts are unavailable",
+      "previous_sev": "BLOCKER",
+      "current_status": "CONFIRMED_ACCESS_BLOCKER",
+      "relation_to_blind": "PREVIOUS_ONLY",
+      "evidence": "Files BDB_vNext_Project_Plan_v1.json and BDB_vNext_Audit_i_Plan_Nastepnej_Iteracji.md missing"
+    }
+  ],
+  "adjudicated_finding_set": [
+    {
+      "id": "ADJ-F-001",
+      "title": "Qualification gate manufactures decisive status instead of deriving it from bound observations, with AST detector bypass and worktree source-binding flaw",
+      "category": "ASSURANCE_INTEGRITY / GATE_LINEAGE",
+      "severity": "CRITICAL",
+      "confidence": "VERY_HIGH",
+      "discovery_status": "BLIND_REDISCOVERED",
+      "path": "bdb_vnext/full_qualification_runner.py, tests/test_nx069_full_qualification.py",
+      "violated_invariant": "QUALIFICATION_VERDICT_MUST_DERIVE_FROM_FRESH_OBSERVED_EVIDENCE_OF_COMMITTED_SOURCE",
+      "root_cause": "RC-01: Declaration substitutes measurement in qualification gates and AST checks",
+      "impact": "Release decisions based on NX069 PASS are untrustworthy"
+    },
+    {
+      "id": "ADJ-F-002",
+      "title": "ProjectExecution.record_result advances canonical task state and AUTO cursor without live repository verification or evidence resolution",
+      "category": "DATA_INTEGRITY / STATE_MACHINE",
+      "severity": "HIGH",
+      "confidence": "VERY_HIGH",
+      "discovery_status": "BLIND_REDISCOVERED",
+      "path": "bdb_vnext/project_execution.py",
+      "violated_invariant": "CANONICAL_TASK_COMPLETION_REQUIRES_AUTHORITATIVE_REPO_OBSERVATION_AND_EVIDENCE_DEREFERENCE",
+      "root_cause": "RC-02: String identity assertion substitutes external authority dereferencing",
+      "impact": "Canonical project state and AUTO can advance to completion on completely synthetic or false results"
+    },
+    {
+      "id": "ADJ-F-003",
+      "title": "ProjectMemoryStore and ProjectCatalog lock reclaim steals critical section from live process by age alone with read-then-unlink race",
+      "category": "CONCURRENCY / MUTUAL_EXCLUSION",
+      "severity": "HIGH",
+      "confidence": "VERY_HIGH",
+      "discovery_status": "BLIND_REDISCOVERED",
+      "path": "bdb_vnext/project_catalog.py, bdb_vnext/project_memory.py",
+      "violated_invariant": "LOCK_RECLAIM_MUST_NEVER_REVOKE_ACTIVE_UNEXPIRED_LIVE_PROCESS_OWNERSHIP",
+      "root_cause": "RC-03: Pathname and mtime substitute stable OS process incarnation and handle locks",
+      "impact": "Two processes can concurrently execute state transactions over Project Catalog and Memory"
+    },
+    {
+      "id": "ADJ-F-004",
+      "title": "ProjectLaunchQueueAdapter lock suffers unrecoverable denial-of-service on partial-write crash and check-to-unlink replacement race",
+      "category": "LIVENESS / CONCURRENCY",
+      "severity": "HIGH",
+      "confidence": "VERY_HIGH",
+      "discovery_status": "BLIND_REDISCOVERED",
+      "path": "bdb_vnext/project_launch.py",
+      "violated_invariant": "LOCK_CREATION_MUST_BE_CRASH_RECOVERABLE_AND_RECLAIM_FREE_OF_ABA_RACE",
+      "root_cause": "RC-03: Pathname and mtime substitute stable OS process incarnation and handle locks",
+      "impact": "Permanent queue deadlock after partial write crash; ABA race where valid successor lock is deleted"
+    },
+    {
+      "id": "ADJ-F-005",
+      "title": "Launch outbox reconciliation can overwrite valid concurrent launches, permanently misses expired PUBLISHED items, and lacks production execution call sites",
+      "category": "CROSS_PERSISTENCE / RECOVERY",
+      "severity": "HIGH",
+      "confidence": "VERY_HIGH",
+      "discovery_status": "BLIND_REDISCOVERED",
+      "path": "bdb_vnext/project_workflow.py",
+      "violated_invariant": "CROSS_PERSISTENCE_RECONCILIATION_MUST_BE_ATOMIC_CONVERGENT_AND_ACTIVELY_SCHEDULED",
+      "root_cause": "RC-04: Outbox reconciliation is isolated from runtime lifecycle and lacks PUBLISHED projection recovery",
+      "impact": "Lost launch projections; permanent AUTO stall without automated recovery path"
+    },
+    {
+      "id": "ADJ-F-006",
+      "title": "CURRENT state documentation drifts from committed git branch history regarding NX-071 status",
+      "category": "DOCUMENTATION_PARITY / LIFECYCLE",
+      "severity": "MEDIUM",
+      "confidence": "VERY_HIGH",
+      "discovery_status": "BLIND_REDISCOVERED",
+      "path": "docs/NX070_CURRENT_STATE.md",
+      "violated_invariant": "DOCUMENTATION_SNAPSHOTS_MUST_REFLECT_COMMITTED_BRANCH_REALITY",
+      "root_cause": "RC-05: Documentation snapshot updated ahead of/out-of-sync with iterative task commits",
+      "impact": "Operational confusion regarding active milestone status and false confidence in qualification rigor"
+    },
+    {
+      "id": "ADJ-F-007",
+      "title": "Explicitly named canonical plan and audit specification documents are absent from workspace",
+      "category": "AUTHORITY_ACCESS_BLOCKER",
+      "severity": "BLOCKER",
+      "confidence": "HIGH",
+      "discovery_status": "PREVIOUS_ONLY",
+      "path": "BDB_vNext_Project_Plan_v1.json, BDB_vNext_Audit_i_Plan_Nastepnej_Iteracji.md",
+      "violated_invariant": "CANONICAL_AUTHORITY_MUST_BE_ACCESSIBLE_FOR_CONFORMANCE_VERIFICATION",
+      "root_cause": "RC-05: Upstream distribution omission of specific canonical authority files",
+      "impact": "Formal task/dependency/gate canonical conformance verification remains blocked"
+    }
+  ],
+  "sound_claims": [
+    {
+      "id": "SC-01",
+      "mechanism": "Atomic document persistence via temp + fsync + os.replace in Memory, Catalog, and Launch Queue",
+      "status": "SOUND_FOR_INSPECTED_FAILURE_MODEL",
+      "proof": "Atomic file replacement guarantees reader sees either old or new valid JSON payload on POSIX/NTFS"
+    },
+    {
+      "id": "SC-02",
+      "mechanism": "OS file handle locks (BootstrapLock in bootstrap.py, InstanceLock in bdb_bridge)",
+      "status": "SOUND_FOR_INSPECTED_FAILURE_MODEL",
+      "proof": "Kernel-level byte-range/file locking automatically cleans up on abnormal process termination"
+    },
+    {
+      "id": "SC-03",
+      "mechanism": "External Bootstrap slot authority physical separation (ACTIVE, PREVIOUS, CANDIDATE)",
+      "status": "SOUND_FOR_INSPECTED_FAILURE_MODEL",
+      "proof": "Slot directories are non-overlapping and managed via immutable slot manifests and atomic slot-state replacements"
+    }
+  ],
+  "minimal_root_causes": [
+    {
+      "id": "RC-01",
+      "title": "Declaration substitutes measurement in qualification gates and AST checks",
+      "affected_findings": [
+        "ADJ-F-001"
+      ]
+    },
+    {
+      "id": "RC-02",
+      "title": "String identity assertion substitutes external authority dereferencing",
+      "affected_findings": [
+        "ADJ-F-002"
+      ]
+    },
+    {
+      "id": "RC-03",
+      "title": "Pathname and mtime substitute stable OS process incarnation and handle locks",
+      "affected_findings": [
+        "ADJ-F-003",
+        "ADJ-F-004"
+      ]
+    },
+    {
+      "id": "RC-04",
+      "title": "Outbox reconciliation is isolated from runtime lifecycle and lacks PUBLISHED projection recovery",
+      "affected_findings": [
+        "ADJ-F-005"
+      ]
+    },
+    {
+      "id": "RC-05",
+      "title": "Documentation projection drifts from underlying commit history and distribution",
+      "affected_findings": [
+        "ADJ-F-006",
+        "ADJ-F-007"
+      ]
+    }
+  ],
+  "four_axis_status": {
+    "IMPLEMENTATION_STATUS": "REPAIR_REQUIRED",
+    "QUALIFICATION_EVIDENCE_STATUS": "INVALIDATED",
+    "DEPENDENCY_ASSURANCE_STATUS": "BLOCKED_BY_UPSTREAM_CANONICAL_ACCESS",
+    "DEPLOYMENT_LIFECYCLE_STATUS": "NOT_DEPLOYED"
+  },
+  "final_decision": "NO_GO / NOT_QUALIFIED / NOT_READY_FOR_NEXT_GATE",
+  "audit_completion_status": "COMPLETE_FOR_AVAILABLE_SCOPE"
+}

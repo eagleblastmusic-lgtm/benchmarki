@@ -1,0 +1,381 @@
+{
+  "audit_id": "bdb-vnext-next-iteration-audit-20260829-final",
+  "audit_iteration": "NEXT_ITERATION_AFTER_FIRST_PASS",
+  "audit_mode": "BLIND_FIRST_META_ADJUDICATION_MARGINAL_GAIN",
+  "timestamp_local": "2026-08-29T23:58:22+02:00",
+  "repository": {
+    "local_root": "C:/Projekty/DevMaster/bartosz-dev-bridge-vnext",
+    "declared_remote": "https://github.com/eagleblastmusic-lgtm/bartosz-dev-bridge",
+    "branch": "bdb-vnext"
+  },
+  "branch": "bdb-vnext",
+  "audit_start_source": {
+    "head": "a3e111f19ebf8df803a92bee5734a9f03524501a",
+    "tree": "ab70143e69973f71f2965ffc09a5144a3d074757",
+    "parent": "47d0f3903d991bdae7b736b74656c7a1a27097b9",
+    "subject": "bdb-vnext: isolate NX-071 registry fixture",
+    "commit_timestamp": "2026-08-27T22:58:43+02:00",
+    "upstream": "origin/bdb-vnext",
+    "ahead": 0,
+    "behind": 0,
+    "tracked_staged_changes": 0,
+    "tracked_unstaged_changes": 0,
+    "effective_worktree": "DIRTY_PREEXISTING_UNTRACKED_AUDIT_ARTIFACTS"
+  },
+  "audit_end_source": {
+    "head": "a3e111f19ebf8df803a92bee5734a9f03524501a",
+    "tree": "ab70143e69973f71f2965ffc09a5144a3d074757",
+    "tracked_staged_changes": 0,
+    "tracked_unstaged_changes": 0,
+    "effective_worktree": "DIRTY_PREEXISTING_AND_CURRENT_UNTRACKED_AUDIT_ARTIFACTS",
+    "fresh_readback_pending_final_artifact_validation": false,
+    "final_readback_timestamp_local": "2026-08-30T00:17:55+02:00",
+    "final_readback_tracked_status_lines": 0,
+    "final_report_validated": true
+  },
+  "source_drift": {
+    "head_changed": false,
+    "tree_changed": false,
+    "tracked_source_changed": false,
+    "audit_output_drift": true,
+    "audit_output_drift_details": "A post-freeze agent overwrite changed blind-checkpoint.json and created a premature audit-ledger.json; neither is final authority.",
+    "invalidated_source_findings": []
+  },
+  "input_identity": {
+    "original_audit_prompt": {
+      "path": "C:/Projekty/Audyty/Prompty/Codex Sol 5.6 max H prompt.txt",
+      "role": "PREVIOUS_AUDIT_OBLIGATION_AUTHORITY",
+      "length_bytes": 34345,
+      "sha256": "1E2C16FDAD33138811D1F470328BA69D6FE68C1372169A41CC4FE918BD8F6F28",
+      "accessible": true,
+      "semantic_consumption": "COMPLETE_AFTER_BLIND_CHECKPOINT"
+    },
+    "previous_audit_report": {
+      "path": "C:/Projekty/Audyty/Prompty/Codex Sol 5.6 max H raport.md",
+      "role": "PREVIOUS_AUDIT_EVIDENCE_INPUT_NOT_CURRENT_AUTHORITY",
+      "length_bytes": 34516,
+      "sha256": "D23D7A9C7B059C2F33C62AC62C9130FEA28758D47C19C5AA63DCEC3E8CA91D91",
+      "accessible": true,
+      "semantic_consumption": "COMPLETE_AFTER_BLIND_CHECKPOINT"
+    },
+    "previous_machine_ledger": {
+      "provided": false,
+      "status": "NOT_SUPPLIED_DO_NOT_INFER_FROM_UNTRACKED_FILES"
+    },
+    "original_prompt_canonical_json": "BDB_vNext_Project_Plan_v1.json",
+    "original_prompt_canonical_md": "BDB_vNext_Audit_i_Plan_Nastepnej_Iteracji.md",
+    "canonical_access": "UNVERIFIED_ACCESS_EXACT_FILES_NOT_FOUND_IN_ACCESSIBLE_WORKSPACES"
+  },
+  "input_quarantine_status": {
+    "overall": "PARTIALLY_COMPROMISED_WITH_INDEPENDENT_BLIND_TRACK_RECOVERED",
+    "orchestrator_accidental_early_exposure": true,
+    "prior_content_used_as_discovery_map": false,
+    "context_isolated_blind_reviewers": 3,
+    "blind_reviewers_prior_content_quarantined": true,
+    "original_frozen_checkpoint_sha256": "2504888FED13719B6B409CD3041D8674E43C65648E5AADE02FE875B92F213585",
+    "original_frozen_checkpoint_length": 17321,
+    "post_reveal_file_overwrite_detected": true,
+    "overwritten_file_sha256": "22704C60F75816784057B0837827C8ED1B91E6345C37B83E2F6549C1FA6D6457",
+    "integrity_notice": "artifacts/bdb-vnext-next-iteration-audit-20260829/artifact-integrity-notice.json",
+    "blind_provenance_used": "context-isolated reviewer final messages and the pre-reveal validated checkpoint record in the orchestration transcript"
+  },
+  "blind_system_model": {
+    "main_flow": "Control Center GUI -> ProjectCatalog/ProjectMemory v1 -> ProjectExecution binding/outbox -> launch queue -> Native Host -> Browser -> result submission -> v1 durable transition",
+    "parallel_authority": "Control Center AUTO Start/Stop uses ProjectMemoryStoreV2 SQLite while the live Browser/Native execution path reads ProjectMemoryStore v1 JSON.",
+    "durable_domains": [
+      "catalog JSON",
+      "immutable plan files and current pointer",
+      "v1 memory JSON events/execution/bindings/outbox",
+      "launch queue and claim lease",
+      "v2 SQLite scope cursor and STOP fence",
+      "qualification artifacts",
+      "external bootstrap/client/registry state"
+    ],
+    "trust_boundaries": [
+      "assistant DOM output to Native Messaging",
+      "Native Host to ProjectWorkflow",
+      "caller assertions to canonical task completion",
+      "v2 GUI authority to v1 live execution",
+      "test/evidence producers to qualification verdict",
+      "source/build/candidate/deployment lifecycle"
+    ]
+  },
+  "blind_hypothesis_ledger": [
+    {"id": "BH-001", "status": "CONFIRMED", "claim": "Task acceptance is self-attested rather than repository/evidence authoritative.", "post_reveal": "Matches previous F-002; manual criterion spoof is a new sibling."},
+    {"id": "BH-002", "status": "CONFIRMED", "claim": "Plan pointer publication is not crash-atomic with memory and catalog.", "post_reveal": "BLIND_ONLY new true class; dynamically confirmed."},
+    {"id": "BH-003", "status": "CONFIRMED", "claim": "v1 memory/catalog locks can be reclaimed from a live owner by age.", "post_reveal": "Independently rediscovers previous F-003."},
+    {"id": "BH-004", "status": "CONFIRMED", "claim": "GUI AUTO and Browser/Native AUTO use disconnected authorities.", "post_reveal": "BLIND_ONLY new true class; Start and STOP dynamically confirmed."},
+    {"id": "BH-005", "status": "CONFIRMED", "claim": "NX069 qualification is self-certifying and stale-evidence accepting.", "post_reveal": "Independently rediscovers previous F-001."},
+    {"id": "BH-006", "status": "CONFIRMED_STATIC_NOT_PRODUCT_REACHABLE", "claim": "Local execution policy trusts caller-declared effects.", "post_reveal": "Narrowed to latent/package surface; dynamic effect probes skipped."},
+    {"id": "BH-007", "status": "UNRESOLVED_POLICY", "claim": "Native Host caller origin is optional.", "post_reveal": "Threat boundary not authoritative; dynamic probe skipped."},
+    {"id": "BH-008", "status": "CONFIRMED_LATENT", "claim": "Output is truncated only after unbounded parent-memory accumulation.", "post_reveal": "8 MiB replay produced 17,095,838-byte Python peak; no inspected product caller."},
+    {"id": "BH-009", "status": "UNVERIFIED_PHYSICAL", "claim": "Native root isolation is lexical and may be aliasable.", "post_reveal": "Physical reparse/ACL checks skipped."},
+    {"id": "BH-010", "status": "CONFIRMED", "claim": "Submitter can reclassify manual review as deterministic PASS.", "post_reveal": "Dynamic PASS/completion with no approval, no evidence, and null head_after."},
+    {"id": "BH-011", "status": "CONFIRMED_NOT_PRODUCT_REACHABLE", "claim": "ProjectScopeCoordinator ignores failed cursor CAS.", "post_reveal": "Dynamic non-durable identity; only same-module helper and tests call it."},
+    {"id": "BH-012", "status": "CONFIRMED_STATIC", "claim": "Conversation binding commits before launch claim succeeds.", "post_reveal": "Reachable native route; dynamic replay skipped by user safety direction."},
+    {"id": "BH-013", "status": "UNVERIFIED_PRODUCT_BOUNDARY", "claim": "Qualification is disconnected from release lifecycle.", "post_reveal": "No workflow explicitly gates release on NX069; external/manual authority may exist."}
+  ],
+  "blind_finding_checkpoint": ["BH-001", "BH-002", "BH-003", "BH-004", "BH-005", "BH-008", "BH-010", "BH-011", "BH-012"],
+  "blind_sound_claims": [
+    {"id": "BS-001", "status": "SOUND_FOR_INSPECTED_FAILURE_MODEL", "claim": "Native message framing is byte-bounded and malformed/truncated frames fail closed.", "evidence": "bdb_vnext/m9b_native_host.py:482-506"},
+    {"id": "BS-002", "status": "SOUND_FOR_INSPECTED_FAILURE_MODEL", "claim": "Raw process execution uses argv and shell=False.", "evidence": "bdb_vnext/stateless_process_runner.py:326-334"},
+    {"id": "BS-003", "status": "SOUND_FOR_ENVELOPE_IDENTITY_ONLY", "claim": "Submission validates binding/command/correlation/project/task/plan/head_before identity.", "evidence": "bdb_vnext/project_execution.py:1332-1350"},
+    {"id": "BS-004", "status": "SOUND_FOR_UUID_CLAIM_OWNERSHIP_ONLY", "claim": "Queue claim/ack validates launch and claim UUID ownership.", "evidence": "bdb_vnext/project_launch.py:380-430"},
+    {"id": "BS-005", "status": "SOUND_FOR_DIRTY_SOURCE_FAILURE", "claim": "NX023 and NX030 machine gates fail closed on the current dirty effective worktree.", "evidence": "targeted pytest: 2 expected gate failures"}
+  ],
+  "blind_coverage": {
+    "tracked_inventory": 1208,
+    "semantically_reviewed": [
+      "Project Center GUI/AUTO",
+      "Project Catalog",
+      "Project Memory v1 and focused v2",
+      "Project Execution",
+      "Project Workflow and launch queue/outbox",
+      "Native/Browser dispatch",
+      "scope orchestration",
+      "qualification/evidence runner and oracle",
+      "focused release workflows",
+      "local execution policy and runner"
+    ],
+    "not_exhaustive": ["legacy bridge", "all 72 gates", "all 24 workflows", "all schemas", "physical deployment and client state"]
+  },
+  "previous_obligation_ledger": [
+    {"id": "PO-01", "requirement": "Read-only audit", "previous_status": "EXECUTED", "current_adjudication": "Source/deployment mutation not shown."},
+    {"id": "PO-02", "requirement": "Read exact canonical JSON and MD or mark unavailable", "previous_status": "BLOCKED", "current_adjudication": "Correctly access-blocked; exact files remain unavailable."},
+    {"id": "PO-03", "requirement": "Fresh remote/local source preflight", "previous_status": "EXECUTED", "current_adjudication": "Well evidenced for previous run; current local identity is unchanged."},
+    {"id": "PO-04", "requirement": "Lifecycle identities separated", "previous_status": "EXECUTED", "current_adjudication": "Previous separation was strong; physical identities are historical-only for this iteration."},
+    {"id": "PO-05", "requirement": "Choose FIRST_PASS/NEXT_ITERATION mode", "previous_status": "EXECUTED", "current_adjudication": "FIRST_PASS was consistent with supplied state then."},
+    {"id": "PO-06", "requirement": "Ledger-first obligation/finding/evidence/coverage/checkpoints", "previous_status": "UNVERIFIED", "current_adjudication": "Report claims a JSON ledger, but no previous ledger was explicitly supplied for adjudication."},
+    {"id": "PO-07", "requirement": "Entrypoint/reachability mapping", "previous_status": "PARTIAL", "current_adjudication": "Useful main flow and 133-module lower bound; not complete runtime closure."},
+    {"id": "PO-08", "requirement": "Actual system model before conformance", "previous_status": "PARTIAL", "current_adjudication": "Core owners mapped; v1/v2 GUI authority split was missed."},
+    {"id": "PO-09", "requirement": "State/mutation inventory", "previous_status": "PARTIAL", "current_adjudication": "Core domains covered; plan multi-object transition and GUI v2 authority omitted."},
+    {"id": "PO-10", "requirement": "Failure-boundary exhaustion", "previous_status": "PARTIAL", "current_adjudication": "High-value queue/outbox/locks covered; plan pointer and output-memory boundaries missed."},
+    {"id": "PO-11", "requirement": "Concurrency/linearization", "previous_status": "EXECUTED_FOCUSED", "current_adjudication": "Strong on known locks; immutable-plan race and ignored CAS omitted."},
+    {"id": "PO-12", "requirement": "Ownership/replacement/ABA", "previous_status": "EXECUTED_FOCUSED", "current_adjudication": "Strong for pathname locks and outbox."},
+    {"id": "PO-13", "requirement": "Defect-class propagation", "previous_status": "PARTIAL", "current_adjudication": "6/72 gate sample honestly bounded; result-authority and split-authority siblings missed."},
+    {"id": "PO-14", "requirement": "Cross-persistence recovery", "previous_status": "EXECUTED_FOCUSED", "current_adjudication": "Outbox covered; plan pointer/memory/catalog and v1/v2 AUTO convergence missed."},
+    {"id": "PO-15", "requirement": "Test/oracle realism", "previous_status": "EXECUTED_FOCUSED", "current_adjudication": "54-test interpretation was sound but not broad execution proof."},
+    {"id": "PO-16", "requirement": "Evidence producer audit", "previous_status": "PARTIAL", "current_adjudication": "NX069 deeply audited; denominator beyond 6 sampled producers remained unresolved."},
+    {"id": "PO-17", "requirement": "Gate lineage and detector-of-detector", "previous_status": "PARTIAL", "current_adjudication": "NX069 and sample strong; no full material-gate denominator review."},
+    {"id": "PO-18", "requirement": "Source-bound evidence", "previous_status": "EXECUTED", "current_adjudication": "Correctly invalidated qualification."},
+    {"id": "PO-19", "requirement": "Security audit", "previous_status": "PARTIAL", "current_adjudication": "Previous report says user narrowed access-dependent work; against the original prompt many security obligations remained unexecuted."},
+    {"id": "PO-20", "requirement": "Reliability/recovery audit", "previous_status": "EXECUTED_FOCUSED", "current_adjudication": "Strong known counterexamples; several new reliability false negatives recovered now."},
+    {"id": "PO-21", "requirement": "Cross-layer review", "previous_status": "PARTIAL", "current_adjudication": "Core chain covered; GUI v2 to v1 Native path and plan/catalog boundary missed."},
+    {"id": "PO-22", "requirement": "False-positive/false-negative challenges", "previous_status": "PARTIAL", "current_adjudication": "Some explicit falsification; negative-space replay was not systematic."},
+    {"id": "PO-23", "requirement": "Blocker discipline and completion validator", "previous_status": "NOT_EXECUTED_AS_CLAIMED", "current_adjudication": "Canonical blocker valid, but executable 10x/negative-space/format obligations remained when the report declared completion."},
+    {"id": "PO-24", "requirement": "Full finding format and severity calibration", "previous_status": "PARTIAL", "current_adjudication": "Severities mostly calibrated; required per-finding fields were substantially compressed."},
+    {"id": "PO-25", "requirement": "At least 10 hypotheses 10x worse and 10 arguments 10x better", "previous_status": "NOT_EXECUTED", "current_adjudication": "Previous report supplied one worse scenario and five better bullets, below both explicit denominators."},
+    {"id": "PO-26", "requirement": "Verdict sensitivity/root causes/minimal requalification", "previous_status": "EXECUTED", "current_adjudication": "Materially useful and internally coherent."},
+    {"id": "PO-27", "requirement": "Four-axis status/final decision", "previous_status": "EXECUTED", "current_adjudication": "Axes were separated; deployment result is now historical rather than current."},
+    {"id": "PO-28", "requirement": "Markdown/JSON consistency and template validation", "previous_status": "UNVERIFIED", "current_adjudication": "Markdown has no obvious template leakage; previous JSON was not explicitly supplied."}
+  ],
+  "previous_audit_quality": {
+    "verdict": "MATERIALLY_USEFUL_BUT_PREMATURELY_COMPLETE",
+    "false_positives_removed": 0,
+    "material_previous_source_findings_refuted": 0,
+    "false_negatives_recovered": ["manual criterion reclassification", "GUI v2/v1 AUTO split", "GUI STOP does not fence v1", "plan pointer crash window", "bind-before-claim", "unbounded pre-truncation output", "ignored CAS in latent scope helper"],
+    "false_closures_overturned": ["audit completion despite PO-25 and other executable obligations", "single-file atomic publish treated too broadly for multi-object plan transition", "canonical GUI STOP does not close live v1 AUTO"],
+    "strengths": ["source identity", "lifecycle separation", "NX069 evidence-lineage analysis", "lock/outbox counterexamples", "explicit coverage limits", "root-cause compression"],
+    "no_template_leakage_found_in_markdown": true,
+    "previous_json_consistency": "UNVERIFIED_NOT_SUPPLIED"
+  },
+  "previous_finding_adjudication": [
+    {"previous_id": "F-001", "current_status": "CONFIRMED_CURRENT", "current_severity": "CRITICAL_ASSURANCE", "relation_to_blind": "INDEPENDENTLY_REDISCOVERED", "current_evidence": "full_qualification_runner.py and test_nx069_full_qualification.py unchanged at same HEAD", "correction": "Release-workflow binding remains an additional unresolved assurance gap."},
+    {"previous_id": "F-002", "current_status": "CONFIRMED_CURRENT_EXPANDED", "current_severity": "HIGH", "relation_to_blind": "INDEPENDENTLY_REDISCOVERED", "current_evidence": "project_execution.py:1278-1441 plus dynamic manual-review spoof", "correction": "New sibling proves submitter also controls criterion classification."},
+    {"previous_id": "F-003", "current_status": "CONFIRMED_CURRENT", "current_severity": "HIGH", "relation_to_blind": "INDEPENDENTLY_REDISCOVERED", "current_evidence": "project_memory.py:533-608 and project_catalog.py:685-721 unchanged", "correction": null},
+    {"previous_id": "F-004", "current_status": "CONFIRMED_CURRENT", "current_severity": "HIGH", "relation_to_blind": "PREVIOUS_ONLY_WITH_NARROW_BLIND_SOUND_CLAIM", "current_evidence": "project_launch.py:451-560", "correction": "Queue does protect against age-only live-owner reclaim, but corrupt-lock liveness, short write, and compare-then-unlink ABA remain."},
+    {"previous_id": "F-005", "current_status": "CONFIRMED_BUT_NARROWER", "current_severity": "HIGH_RELIABILITY", "relation_to_blind": "PREVIOUS_ONLY_PLUS_BLIND_REACHABILITY_WARNING", "current_evidence": "project_workflow.py:566-653 and zero production reconciler call sites", "correction": "Reconciler-specific replacement deletion is not product-reachable from inspected entrypoints; reachable publish/TTL asymmetry remains."},
+    {"previous_id": "F-006", "current_status": "CONFIRMED_CURRENT", "current_severity": "MEDIUM_OPERATIONAL", "relation_to_blind": "PREVIOUS_ONLY", "current_evidence": "docs/NX070_CURRENT_STATE.md:71,92-105", "correction": "Document also links nonexistent m11c_active_reader.py and overstates AUTO/source-bound closure."},
+    {"previous_id": "F-007", "current_status": "ACCESS_BLOCKED", "current_severity": "BLOCKER_FOR_CONFORMANCE_NOT_SOURCE_DEFECT", "relation_to_blind": "NOT_APPLICABLE", "current_evidence": "Exact canonical filenames absent from accessible workspaces", "correction": "Do not count as an implementation finding or global audit stop."}
+  ],
+  "previous_sound_claim_adjudication": [
+    {"claim": "Memory/Catalog/Queue data publish is atomic", "status": "SOUND_FOR_SINGLE_FILE_REPLACE_ONLY", "stronger_replay": "Plan file, pointer, memory, events, and catalog are not one transaction; crash replay failed."},
+    {"claim": "BootstrapLock and legacy InstanceLock use OS-handle locks", "status": "SOUND_FOR_INSPECTED_OWNER_DEATH_MODEL", "stronger_replay": "Source confirms msvcrt/fcntl stable-handle lock; path/reparse physical races not reverified."},
+    {"claim": "Project result binding validates identity", "status": "SOUND_FOR_ENVELOPE_IDENTITY_ONLY", "stronger_replay": "Manual criterion type, head_after, evidence, and validation truth remain submitter-controlled."},
+    {"claim": "ACTIVE/PREVIOUS/CANDIDATE physically separated and candidate null", "status": "HISTORICAL_ONLY_CURRENT_UNVERIFIED", "stronger_replay": "No current physical read permitted; previous observation cannot be relabeled current."},
+    {"claim": "Current and claimed-qualified runtime bytes match", "status": "APPARENTLY_SOUND_STATIC_FOR_NAMED_COMMITS", "stronger_replay": "Does not validate qualification or deployment."},
+    {"claim": "Normal Browser crash-after-confirmed-send does not blindly resend", "status": "SOUND_FOR_INSPECTED_NORMAL_RECOVERY", "stronger_replay": "Blind source challenge found acknowledge/stop paths; physical DOM/storage-loss combinations remain unverified."}
+  ],
+  "finding_ledger": [
+    {"id": "CF-001", "title": "NX069 qualification manufactures decisive PASS fields", "category": "ASSURANCE_EVIDENCE_INTEGRITY", "severity": "CRITICAL_ASSURANCE", "confidence": "HIGH", "audit_track": "BLIND_REDISCOVERED", "reachability": "CURRENT_QUALIFICATION_SOURCE", "paths": ["bdb_vnext/full_qualification_runner.py:57-71", "bdb_vnext/full_qualification_runner.py:106-127", "bdb_vnext/full_qualification_runner.py:214-247", "bdb_vnext/full_qualification_runner.py:447-493", "tests/test_nx069_full_qualification.py:91-110", "tests/test_nx069_full_qualification.py:235-396"], "invariant": "Qualification PASS must derive from fresh executed source-bound evidence.", "minimal_failure": "Literal PASS/zero fields plus stale/forged aggregate artifacts yield a source-bound-looking PASS.", "falsification": "Current passing XML and runtime-byte equality do not close missing lineage or dirty-tree behavior.", "root_cause": "RC-01", "release_impact": "QUALIFICATION_INVALIDATED"},
+    {"id": "CF-002", "title": "Task completion trusts submitted repository/evidence/criterion assertions", "category": "FUNCTIONAL_INTEGRITY", "severity": "HIGH", "confidence": "HIGH", "audit_track": "BLIND_REDISCOVERED_PLUS_NEW_SIBLING", "reachability": "OFFICIAL_BROWSER_NATIVE_SUBMISSION", "paths": ["browser_extension_vnext/content_adapter.js:71-85", "bdb_vnext/m9b_native_host.py:364-379", "bdb_vnext/project_execution.py:1278-1441"], "invariant": "Canonical completion requires authoritative Git/evidence observation and plan-owned criterion classification.", "minimal_failure": "Submit PASS, null/arbitrary head_after, no evidence, and manual criterion retyped DETERMINISTIC; task becomes completed without approve_review.", "dynamic_evidence": "adversarial-results.json/manual_criterion_spoof", "falsification": "Binding/command/correlation/head_before checks remain real but do not validate asserted facts.", "root_cause": "RC-01", "release_impact": "REPAIR_REQUIRED"},
+    {"id": "CF-003", "title": "v1 Memory and Catalog locks reclaim live owners by age", "category": "CONCURRENCY_INTEGRITY", "severity": "HIGH", "confidence": "HIGH", "audit_track": "BLIND_REDISCOVERED", "reachability": "GUI_WORKFLOW_NATIVE", "paths": ["bdb_vnext/project_memory.py:533-608", "bdb_vnext/project_catalog.py:685-721"], "invariant": "Live owner retains exclusive critical section regardless of suspension/sleep duration.", "minimal_failure": "Writer A pauses >120s; B unlinks A lock and commits; A resumes and commits conflicting state.", "falsification": "Short expected critical sections do not cover sleep/suspension; queue uses a different mechanism.", "root_cause": "RC-03", "release_impact": "REPAIR_REQUIRED"},
+    {"id": "CF-004", "title": "Queue lock has corrupt-create liveness and compare/unlink ABA windows", "category": "CONCURRENCY_LIVENESS", "severity": "HIGH", "confidence": "HIGH", "audit_track": "PREVIOUS_ONLY_CONFIRMED", "reachability": "PROJECT_WORKFLOW_QUEUE", "paths": ["bdb_vnext/project_launch.py:451-560"], "invariant": "Lock creation/reclaim/release cannot permanently wedge or delete a replacement owner.", "minimal_failure": "Short/crashed metadata write leaves non-reclaimable lock; or replacement occurs after token reread but before unlink.", "falsification": "PID+lease+token checks close age-only reclaim but not pathname atomicity or malformed-create liveness.", "root_cause": "RC-03", "release_impact": "REPAIR_REQUIRED"},
+    {"id": "CF-005", "title": "Launch outbox and queue projection do not converge across replacement and TTL", "category": "CROSS_PERSISTENCE_RECOVERY", "severity": "HIGH_RELIABILITY", "confidence": "HIGH", "audit_track": "PREVIOUS_ONLY_CONFIRMED_NARROWED", "reachability": "PUBLISH_REACHABLE_RECONCILER_NOT_REACHABLE", "paths": ["bdb_vnext/project_workflow.py:566-653", "bdb_vnext/project_execution.py:998-1055"], "invariant": "Every canonical launch converges to one consumable projection or explicit blocked state.", "minimal_failure": "PUBLISHED queue item expires; only PENDING is reconciled and no product caller runs reconciler, or orphan check deletes a replacement.", "falsification": "Sequential tests do not inject replacement or PUBLISHED expiry.", "root_cause": "RC-02", "release_impact": "REPAIR_REQUIRED"},
+    {"id": "CF-006", "title": "CURRENT lifecycle documentation is stale and overstates closure", "category": "OPERATIONAL_ASSURANCE", "severity": "MEDIUM", "confidence": "HIGH", "audit_track": "PREVIOUS_ONLY_CONFIRMED", "reachability": "CURRENT_DOCS", "paths": ["docs/NX070_CURRENT_STATE.md:71", "docs/NX070_CURRENT_STATE.md:92-105", "docs/DOCUMENTATION_STATUS.md:76-82"], "invariant": "CURRENT documentation matches current branch state and does not claim unproven qualification/authority convergence.", "minimal_failure": "Operator reads NX071 NOT STARTED and source-bound/canonical AUTO claims contradicted by source.", "falsification": "Historical-purpose interpretation conflicts with explicit CURRENT maintenance policy.", "root_cause": "RC-06", "release_impact": "DOC_UPDATE_AND_REQUALIFICATION_REQUIRED"},
+    {"id": "CF-007", "title": "GUI AUTO Start/Stop and live Browser/Native AUTO use split authorities", "category": "FUNCTIONAL_LIVENESS_AND_STOP_SAFETY", "severity": "HIGH", "confidence": "HIGH", "audit_track": "BLIND_ONLY_NEW_CLASS", "reachability": "DEFAULT_PROJECT_CENTER_GUI", "paths": ["bdb_gui/project_center.py:638-649", "bdb_gui/project_center.py:756-789", "bdb_vnext/project_center_auto.py:565-744", "bdb_vnext/project_memory_v2_store.py:95-100", "bdb_vnext/project_execution.py:1145-1236", "bdb_vnext/project_workflow.py:661-689"], "invariant": "User-visible AUTO commands and executing transport share one authority; STOP fences every live run.", "minimal_failure": "GUI Start returns AUTO_STARTED in v2 but creates no v1 run/binding/queue; GUI STOP returns STOPPED while preexisting v1 run remains RUNNABLE.", "dynamic_evidence": ["adversarial-results.json/gui_auto_authority_split", "adversarial-results.json/gui_stop_does_not_fence_v1"], "falsification": "No production bridge from v2 cursor/fence to v1 run/queue was found.", "root_cause": "RC-02", "release_impact": "REPAIR_REQUIRED"},
+    {"id": "CF-008", "title": "Plan activation is not crash-atomic or concurrency-safe across plan/pointer/memory/catalog", "category": "CROSS_PERSISTENCE_INTEGRITY", "severity": "HIGH", "confidence": "HIGH", "audit_track": "BLIND_ONLY_NEW_CLASS_SECOND_ORDER", "reachability": "DEFAULT_GUI_PLAN_IMPORT_UPDATE", "paths": ["bdb_gui/project_center.py:951-972", "bdb_vnext/project_catalog.py:918-975", "bdb_vnext/project_memory.py:736-747", "bdb_vnext/project_memory.py:784-800", "bdb_vnext/project_memory.py:855-864"], "invariant": "Plan bytes, current pointer, execution prerequisites/events, and catalog converge or recover atomically.", "minimal_failure": "Crash after pointer v2 publish leaves state/event at v1 and same-byte retry rejected; concurrent different v2 writers can leave pointer digest mismatched with last-replaced plan bytes.", "dynamic_evidence": "adversarial-results.json/plan_pointer_crash_window", "falsification": "No startup reconciler or target-file CAS was found; per-file os.replace is insufficient.", "root_cause": "RC-02", "release_impact": "REPAIR_REQUIRED"},
+    {"id": "CF-009", "title": "Conversation binding commits before launch claim ownership", "category": "CHECK_MUTATION_OWNERSHIP", "severity": "MEDIUM", "confidence": "HIGH_STATIC", "audit_track": "BLIND_ONLY_NEW_INSTANCE", "reachability": "NATIVE_PROJECT_LAUNCH_CLAIM", "paths": ["bdb_vnext/m9b_native_host.py:400-418", "bdb_vnext/project_execution.py:687-712", "bdb_vnext/project_launch.py:380-412"], "invariant": "Conversation ownership linearizes with successful launch claim.", "minimal_failure": "Peek sees launch; conversation binding commits; competing claim makes queue.claim return none; binding has no rollback.", "falsification": "Binding idempotency does not restore ownership to the actual claimant.", "root_cause": "RC-02", "release_impact": "FOCUSED_REPAIR_REQUIRED"},
+    {"id": "CF-010", "title": "Output evidence bounds inline data only after unbounded accumulation", "category": "RESOURCE_LIVENESS", "severity": "MEDIUM_LATENT_HIGH_IF_WIRED", "confidence": "HIGH", "audit_track": "BLIND_ONLY_NEW_CLASS_NARROWED", "reachability": "PACKAGE_AND_TEST_SURFACE_NO_INSPECTED_PRODUCT_CALLER", "paths": ["bdb_vnext/stateless_process_runner.py:318-349", "bdb_vnext/stateless_process_runner.py:391-435", "bdb_vnext/local_execution_contract.py:148-176"], "invariant": "Evidence byte limits bound parent memory during capture.", "minimal_failure": "Child emits 8 MiB; runner accumulates and joins all bytes before 64 KiB truncation.", "dynamic_evidence": "8,388,608 raw bytes; 65,536 inline chars; 17,095,838-byte tracemalloc peak; ratio 260.86", "falsification": "Timeout bounds time, not output rate; current product reachability was not established.", "root_cause": "RC-05", "release_impact": "REPAIR_IF_WIRED_REQUALIFY_PACKAGE"},
+    {"id": "CF-011", "title": "ProjectScopeCoordinator reports identity/success after failed cursor CAS", "category": "LATENT_CONCURRENCY_CORRECTNESS", "severity": "LOW_MEDIUM_LATENT", "confidence": "HIGH", "audit_track": "BLIND_ONLY_NEW_INSTANCE_NARROWED", "reachability": "SAME_MODULE_COMMAND_HELPER_AND_TESTS_ONLY", "paths": ["bdb_vnext/scope_orchestrator.py:332-393", "bdb_vnext/project_scope_execution.py:147-213", "bdb_vnext/project_scope_execution.py:427-470"], "invariant": "Returned run authority/success must correspond to a committed cursor CAS.", "minimal_failure": "CAS returns false; caller discards it and returns a run identity not present in durable cursor.", "dynamic_evidence": "adversarial-results.json/ignored_cursor_cas", "falsification": "Reachability search found no current product caller.", "root_cause": "RC-04", "release_impact": "FIX_BEFORE_WIRING"}
+  ],
+  "evidence_ledger": [
+    {"id": "EV-001", "type": "STATIC_LOCAL_GIT", "subject": "HEAD/tree/branch/upstream/tracked status", "source_bound": true, "realism": "REAL_FILESYSTEM_GIT", "current": true},
+    {"id": "EV-002", "type": "BLIND_REVIEW_TRANSCRIPT", "subject": "context-isolated blind source findings", "source_bound": true, "realism": "STATIC_PLUS_SAFE_PROBES", "current": true},
+    {"id": "EV-003", "type": "ADVERSARIAL_RESULTS_JSON", "path": "artifacts/bdb-vnext-next-iteration-audit-20260829/adversarial-results.json", "sha256": "D8678650039408D467519845FEE58DB47851F98EBCE4C80D7A4787D17735A2B1", "realism": "REAL_FILESYSTEM_SQLITE_SUBPROCESS_ISOLATED", "current": true},
+    {"id": "EV-004", "type": "AUDIT_HARNESS", "path": "artifacts/bdb-vnext-next-iteration-audit-20260829/adversarial-next-iteration-harness.py", "sha256": "23C7F8A6FC8536FEE867472E7CA7D568172009758E2F52459001BC3C9C6F8E3D", "realism": "LOCAL_ISOLATED", "current": true},
+    {"id": "EV-005", "type": "TARGETED_PYTEST", "collected": 76, "passed": 74, "failed": 2, "failure_reason": "dirty effective worktree caused NX023/NX030 source-bound gates to fail closed", "realism": "UNIT_REAL_FILESYSTEM_SQLITE_SUBPROCESS_MIXED", "current": true},
+    {"id": "EV-006", "type": "PREVIOUS_REPORT", "sha256": "D23D7A9C7B059C2F33C62AC62C9130FEA28758D47C19C5AA63DCEC3E8CA91D91", "authority": "EVIDENCE_INPUT_ONLY", "current": false},
+    {"id": "EV-007", "type": "CURRENT_SOURCE_READBACK", "subject": "exact symbols and call-site denominators", "source_bound": true, "realism": "STATIC", "current": true},
+    {"id": "EV-008", "type": "ARTIFACT_INTEGRITY_NOTICE", "path": "artifacts/bdb-vnext-next-iteration-audit-20260829/artifact-integrity-notice.json", "sha256": "28974B65D57F747FE7359987E83B27E459B54C6D6F5A7BA86BEBCEE9497EB309", "current": true}
+  ],
+  "coverage_ledger": {
+    "inventory_denominators": {"tracked_files": 1208, "python_files": 732, "python_source_files": 354, "python_test_files": 378, "json_schemas": 109, "github_workflows": 24, "console_entrypoints": 19, "gate_qualification_functions_previous_measurement": 72},
+    "executed_test_denominator": {"selected_tests": 76, "passed": 74, "failed_dirty_gate": 2},
+    "semantically_reviewed_subsystems": 11,
+    "physically_verified_current_deployment": 0,
+    "coverage_claim": "FOCUSED_ADAPTIVE_NOT_REPOSITORY_COMPLETE"
+  },
+  "lifecycle_matrix": {
+    "COMMITTED_SOURCE": {"identity": "a3e111f19ebf8df803a92bee5734a9f03524501a/ab70143e69973f71f2965ffc09a5144a3d074757", "status": "VERIFIED_LOCAL_GIT"},
+    "EFFECTIVE_LOCAL_SOURCE": {"status": "DIRTY_UNTRACKED_AUDIT_ARTIFACTS_ONLY_TRACKED_DIFF_ZERO"},
+    "CLAIMED_QUALIFIED_SOURCE": {"identity": "a6aa681ccbf40ca181834ed3fe628152a06dd406/a496aefa0667498985f0a117c5e13bf59f2be9ef", "status": "HISTORICAL_CLAIM_QUALIFICATION_INVALIDATED"},
+    "BUILD": {"status": "UNVERIFIED"},
+    "STAGED": {"status": "UNVERIFIED"},
+    "CANDIDATE": {"status": "CURRENT_PHYSICAL_STATE_UNVERIFIED"},
+    "DEPLOYED_ACTIVE": {"status": "CURRENT_PHYSICAL_STATE_UNVERIFIED_PREVIOUS_REPORT_OBSERVED_OLDER_SOURCE"},
+    "PREVIOUS_SLOT": {"status": "CURRENT_PHYSICAL_STATE_UNVERIFIED"},
+    "INSTALLED_CLIENT": {"status": "UNVERIFIED"},
+    "RUNNING_PROCESS": {"status": "UNVERIFIED"},
+    "REGISTRY_ROUTES": {"status": "UNVERIFIED"}
+  },
+  "state_mutation_inventory": [
+    {"operation": "Task result acceptance", "authority": "ProjectMemory v1", "check": "binding envelope", "mutation": "attempt/acceptance/binding/task/AUTO", "gap": "external facts and criterion type are submitter assertions", "finding": "CF-002"},
+    {"operation": "GUI AUTO Start/Stop", "authority": "ProjectMemory v2", "mutation": "scope cursor/STOP fence", "consumer": "GUI snapshot", "gap": "live v1 Browser/Native path does not consume it", "finding": "CF-007"},
+    {"operation": "Plan update", "authority": "plan file/pointer then v1 memory then catalog", "publication": "multiple os.replace/transactions", "gap": "no journal/recovery/CAS across domains", "finding": "CF-008"},
+    {"operation": "Queue lock", "authority": "pathname lock metadata", "gap": "short write, corrupt liveness, compare/unlink ABA", "finding": "CF-004"},
+    {"operation": "Launch projection", "authority": "v1 outbox plus queue", "gap": "PUBLISHED expiry and unreachable recovery", "finding": "CF-005"},
+    {"operation": "Subprocess output", "authority": "runner memory then evidence object", "gap": "limit applied after full accumulation", "finding": "CF-010"}
+  ],
+  "confirmed_findings": ["CF-001", "CF-002", "CF-003", "CF-004", "CF-005", "CF-006", "CF-007", "CF-008", "CF-009", "CF-010", "CF-011"],
+  "refuted_findings": [],
+  "new_findings": ["CF-007", "CF-008", "CF-009", "CF-010", "CF-011"],
+  "unverified_risks": [
+    "Native Host origin-optional behavior requires an explicit same-user trust policy; dynamic authentication probe skipped.",
+    "Execution effect confinement is declaration-based in package/test routes, but current product reachability and dynamic effect probes were not established.",
+    "Native root physical alias/reparse behavior and installer ACLs were not verified.",
+    "No workflow explicitly names NX069 as a release prerequisite; an external/manual release authority may exist.",
+    "Remaining 66 of the previous 72-gate denominator were not semantically lineage-audited.",
+    "Current ACTIVE/PREVIOUS/CANDIDATE/Registry/client/running-process identities were not physically read in this iteration.",
+    "Legacy bridge and older browser generation were not exhaustively audited."
+  ],
+  "first_order_defect_propagation": [
+    {"class": "ASSERTION_SUBSTITUTES_AUTHORITY", "confirmed": ["NX069 PASS fields", "task global PASS", "manual criterion type/status"], "unresolved": ["remaining gate producers"]},
+    {"class": "PATHNAME_COMPARE_THEN_MUTATE", "confirmed": ["v1 lock reclaim", "queue reclaim/release", "outbox orphan clear"], "refuted_or_narrowed": ["Bootstrap/Instance stable-handle owner-death"]},
+    {"class": "CROSS_DOMAIN_PUBLICATION_WITHOUT_RECOVERY", "confirmed": ["outbox/queue", "plan/pointer/memory/catalog", "v2 GUI AUTO/v1 execution"]},
+    {"class": "CHECK_OR_RESULT_IGNORED", "confirmed": ["bind before claim", "latent cursor CAS return"]},
+    {"class": "POST_HOC_BOUNDING", "confirmed": ["subprocess output memory before evidence truncation"]}
+  ],
+  "second_order_defect_propagation": [
+    {"id": "SO-001", "root": "CF-007", "finding": "GUI STOP writes v2 STOPPED but a preexisting v1 milestone run remains RUNNABLE", "status": "CONFIRMED_DYNAMIC"},
+    {"id": "SO-002", "root": "CF-008", "finding": "Concurrent different writers for the same plan version can leave current pointer digest inconsistent with last-replaced plan bytes", "status": "CONFIRMED_BY_INTERLEAVING_STATIC"},
+    {"id": "SO-003", "root": "CF-002", "finding": "Manual/external review requirement can be reclassified by the same untrusted result producer", "status": "CONFIRMED_DYNAMIC"}
+  ],
+  "marginal_audit_value": {
+    "new_true_defect_classes_current": 2,
+    "new_true_defect_classes_latent": 1,
+    "new_true_instances_of_known_classes": 3,
+    "recovered_false_negatives": 7,
+    "previous_findings_refuted": 0,
+    "previous_findings_narrowed_or_reclassified": 2,
+    "false_closures_overturned": 3,
+    "new_sound_mechanisms_proven": 2,
+    "new_semantic_siblings": 3,
+    "new_second_order_findings": 3,
+    "current_iteration_false_positives_controlled": ["origin optional held unresolved", "root alias held unverified physical", "CAS/output severities narrowed by reachability"]
+  },
+  "current_iteration_output": {
+    "blind_independent_findings": 11,
+    "dynamic_counterexamples_successful": 5,
+    "targeted_tests_collected": 76,
+    "previous_findings_adjudicated": 7,
+    "previous_material_obligations_adjudicated": 28,
+    "security_or_physical_actions_skipped_per_user": true
+  },
+  "cumulative_chain_knowledge_state": {
+    "current_confirmed_source_finding_families": 9,
+    "latent_or_not_product_reachable_families": 2,
+    "access_blockers": 2,
+    "qualification": "INVALIDATED",
+    "implementation": "REPAIR_REQUIRED",
+    "deployment": "CURRENT_IDENTITY_UNVERIFIED",
+    "canonical_conformance": "UNVERIFIED_ACCESS"
+  },
+  "blockers": [
+    {"id": "BL-001", "obligation": "Canonical plan/architecture conformance", "blocker": "Exact two canonical files named by original prompt unavailable", "scope": "CONFORMANCE_ONLY"},
+    {"id": "BL-002", "obligation": "Physical deployment/client/Registry/Browser/UAC/reparse verification", "blocker": "Skipped per user's safety/access direction", "scope": "PHYSICAL_ONLY"}
+  ],
+  "remaining_obligations": [
+    {"obligation": "Full lineage review of remaining gate denominator", "status": "UNRESOLVED_NOT_CLAIMED_COMPLETE", "reason": "Adaptive audit closed higher-value current defects; no global all-gates claim."},
+    {"obligation": "Canonical conformance", "status": "BLOCKED", "reason": "BL-001"},
+    {"obligation": "Physical lifecycle verification", "status": "BLOCKED", "reason": "BL-002"},
+    {"obligation": "Full legacy/product-wide exhaustive audit", "status": "NOT_REQUIRED_FOR_THIS_ADAPTIVE_ITERATION", "reason": "Current audit universe focused by entrypoint and marginal value."}
+  ],
+  "root_causes": [
+    {"id": "RC-01", "mechanism": "Declaration or identifier substitutes authoritative observation", "findings": ["CF-001", "CF-002"], "repair_objective": "Derive verdicts from authenticated/fresh producers and plan-owned classification."},
+    {"id": "RC-02", "mechanism": "Authority transition spans persistence domains without one transaction, fence, or reachable reconciliation", "findings": ["CF-005", "CF-007", "CF-008", "CF-009"], "repair_objective": "Choose one authority or add journaled compare-and-commit plus startup convergence."},
+    {"id": "RC-03", "mechanism": "Pathname and age/token checks substitute stable ownership", "findings": ["CF-003", "CF-004"], "repair_objective": "Use OS/stable-handle locks or atomic compare-delete with incarnation and malformed-create recovery."},
+    {"id": "RC-04", "mechanism": "Mutation result is discarded", "findings": ["CF-011"], "repair_objective": "Fail closed on CAS false and propagate committed identity only."},
+    {"id": "RC-05", "mechanism": "Bound applies after resource acquisition", "findings": ["CF-010"], "repair_objective": "Stream with hard byte cap/spill/kill policy before accumulation."},
+    {"id": "RC-06", "mechanism": "Lifecycle/documentation projection is not updated from current authority", "findings": ["CF-006"], "repair_objective": "Regenerate CURRENT claims from validated current evidence and exact product boundary."}
+  ],
+  "ten_x_worse": [
+    {"id": "W-01", "hypothesis": "Other v1/v2 authorities diverge beyond GUI AUTO", "status": "UNRESOLVED", "required_evidence": "End-to-end authority map and crash replay for every v2 consumer."},
+    {"id": "W-02", "hypothesis": "More gate producers in the remaining 66 share self-certifying lineage", "status": "UNRESOLVED", "required_evidence": "Semantic producer-to-verdict audit for all material gates."},
+    {"id": "W-03", "hypothesis": "Concurrent same-version plan writers can produce persistent pointer digest failure", "status": "STATIC_INTERLEAVING_CONFIRMED_NOT_DYNAMIC", "required_evidence": "Barriered cross-process replay."},
+    {"id": "W-04", "hypothesis": "Other canonical/projection pairs lack startup reconciliation", "status": "UNRESOLVED", "required_evidence": "Call-site and restart matrix across queues, caches, journals, and registries."},
+    {"id": "W-05", "hypothesis": "Installed/running bytes differ from all recorded lifecycle manifests", "status": "UNVERIFIED_PHYSICAL", "required_evidence": "Current process/module/client/slot digest readback."},
+    {"id": "W-06", "hypothesis": "Browser DOM/storage changes break send-proof negative-space assumptions", "status": "UNVERIFIED_PHYSICAL", "required_evidence": "Real Browser crash/storage-loss matrix."},
+    {"id": "W-07", "hypothesis": "Native root aliases or ACL drift collapse intended authority separation", "status": "UNVERIFIED_PHYSICAL", "required_evidence": "Authorized reparse/file-identity and ACL inspection."},
+    {"id": "W-08", "hypothesis": "Undeclared subprocess effects become reachable when latent local execution is wired", "status": "NOT_PRODUCT_REACHABLE_CURRENT", "required_evidence": "Product call graph plus sandbox/effect tests after wiring."},
+    {"id": "W-09", "hypothesis": "Dual-stream or parallel executions amplify output-memory exhaustion beyond the 8 MiB replay", "status": "UNRESOLVED", "required_evidence": "Bounded high-rate multi-process stress after product reachability is established."},
+    {"id": "W-10", "hypothesis": "Older ACTIVE source contains defects absent from current-source analysis", "status": "UNVERIFIED_DEPLOYMENT", "required_evidence": "Current ACTIVE identity then separate source audit of exact deployed bytes."}
+  ],
+  "ten_x_better": [
+    {"id": "B-01", "mechanism": "Tracked HEAD/tree stayed unchanged", "confidence": "HIGH"},
+    {"id": "B-02", "mechanism": "Binding/command/correlation/subject/head_before envelope checks are real", "confidence": "HIGH"},
+    {"id": "B-03", "mechanism": "Result replay digest is idempotent and versioned", "confidence": "HIGH_STATIC"},
+    {"id": "B-04", "mechanism": "Individual JSON documents use temp write, flush, fsync, and os.replace", "confidence": "HIGH_SINGLE_FILE_ONLY"},
+    {"id": "B-05", "mechanism": "Queue rejects age-only reclaim while PID is alive", "confidence": "HIGH_NARROW"},
+    {"id": "B-06", "mechanism": "BootstrapLock and InstanceLock use OS-handle locks", "confidence": "HIGH_OWNER_DEATH_MODEL"},
+    {"id": "B-07", "mechanism": "Queue claim/ack validates UUID and claim ownership", "confidence": "HIGH"},
+    {"id": "B-08", "mechanism": "Normal Browser SEND_ATTEMPTED/SEND_CONFIRMED recovery avoids unconditional resend", "confidence": "MEDIUM_HIGH_STATIC"},
+    {"id": "B-09", "mechanism": "Native framing rejects oversized/malformed/truncated messages", "confidence": "HIGH_STATIC"},
+    {"id": "B-10", "mechanism": "74/76 targeted tests passed and the remaining two failed closed solely on dirty source binding", "confidence": "HIGH_FOR_ASSERTED_ORACLES"},
+    {"id": "B-11", "mechanism": "NX023/NX030 source-bound gates do not launder the current dirty worktree into PASS", "confidence": "HIGH_DYNAMIC"},
+    {"id": "B-12", "mechanism": "Current-source defects are not automatically present in a different older deployed source", "confidence": "HIGH_LIFECYCLE_LOGIC"}
+  ],
+  "verdict_sensitivity": [
+    {"fact": "Exact canonical documents become available", "favorable": "Conformance may become provable", "unfavorable": "Additional violations may appear", "stable_effect": "Confirmed source counterexamples remain."},
+    {"fact": "Current physical ACTIVE identity", "favorable": "Older active bytes may avoid current defects", "unfavorable": "Current defective bytes may be active", "stable_effect": "Source and qualification verdicts remain."},
+    {"fact": "External release controller requires fresh NX069 evidence", "favorable": "Workflow-disconnect risk narrows", "unfavorable": "Release can consume invalid PASS", "stable_effect": "Internal NX069 lineage defect remains."},
+    {"fact": "Latent local execution becomes product-reachable", "favorable": "OS sandbox/outer authority may close effects/output", "unfavorable": "CF-010 severity rises and effect risks become current", "stable_effect": "Current reachability classification changes."},
+    {"fact": "Same-user originless Native calls are explicitly trusted", "favorable": "Origin-optional risk is policy-compliant", "unfavorable": "Authentication defect emerges", "stable_effect": "No current confirmed finding depends on it."},
+    {"fact": "Full clean test suite passes", "favorable": "Regression confidence rises", "unfavorable": "More functional failures appear", "stable_effect": "It cannot erase dynamic counterexamples or missing evidence lineage."}
+  ],
+  "minimal_requalification_set": [
+    "One clean exact-HEAD/tree evidence generation with closed test manifest, producer versions, timestamps, and artifact digests.",
+    "Mutation tests proving literals, aliases, defaults, stale files, fake HEAD, absent evidence, and dirty source cannot produce qualification PASS.",
+    "Project-result tests rejecting fake/null head_after, absent evidence, empty criteria, and manual/external criterion reclassification.",
+    "Cross-process v1 lock and queue tests for pause > lease, owner death, PID/incarnation, short write, corrupt create, ABA, and replacement.",
+    "Plan update crash/concurrency matrix covering every boundary among plan file, pointer, memory transaction, events, and catalog projection.",
+    "End-to-end GUI AUTO Start/Continue/Stop/Resume through the same authority consumed by Native/Browser; prove STOP fences preexisting runs.",
+    "Outbox PENDING/PUBLISHED/ACKNOWLEDGED plus queue TTL/restart/retry convergence with a reachable startup reconciler.",
+    "Streaming output byte cap test if/when the runner is product-reachable.",
+    "Canonical conformance after the two exact authority documents are supplied.",
+    "Authorized physical client/deployment verification only after the skipped-access scope is explicitly enabled."
+  ],
+  "four_axis_status": {
+    "implementation_status": "REPAIR_REQUIRED",
+    "qualification_evidence_status": "INVALIDATED_REQUALIFICATION_REQUIRED",
+    "dependency_assurance_status": "UNVERIFIED_CANONICAL_ACCESS_BLOCKED",
+    "deployment_lifecycle_status": "UNVERIFIED_ENVIRONMENT_BLOCKED"
+  },
+  "final_decision": "NO_GO_NOT_READY_FOR_NEXT_GATE",
+  "audit_completion_status": {
+    "status": "COMPLETE_FOR_EXECUTABLE_ALLOWED_NEXT_ITERATION_SCOPE",
+    "required_executable_allowed_obligations_remaining": 0,
+    "blocked_obligations": ["canonical conformance", "physical deployment/security/client verification"],
+    "non_claims": ["not a full repository audit", "not a physical deployment audit", "not canonical-conformance complete", "not all 72 gates lineage-audited"]
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "status": "POST_FREEZE_AUDIT_ARTIFACT_DRIFT_DETECTED",
+  "affected_path": "artifacts/bdb-vnext-next-iteration-audit-20260829/blind-checkpoint.json",
+  "original_pre_reveal_validation": {
+    "length_bytes": 17321,
+    "sha256": "2504888FED13719B6B409CD3041D8674E43C65648E5AADE02FE875B92F213585",
+    "json_valid": true
+  },
+  "post_reveal_observation": {
+    "length_bytes": 5947,
+    "sha256": "22704C60F75816784057B0837827C8ED1B91E6345C37B83E2F6549C1FA6D6457",
+    "last_write_time_utc": "2026-08-29T20:12:53Z"
+  },
+  "unexpected_file": {
+    "path": "artifacts/bdb-vnext-next-iteration-audit-20260829/audit-ledger.json",
+    "length_bytes": 13103,
+    "sha256": "40C6645E9AECDF9910666EE18F28564693B5476C74520EB0A218507CA3AC0ACD",
+    "last_write_time_utc": "2026-08-29T20:13:15Z",
+    "authority": "REJECTED_NOT_USER_SUPPLIED_NOT_FINAL",
+    "rejection_reasons": [
+      "claims quarantine_respected=true despite the orchestrator's recorded accidental early exposure",
+      "claims a previous machine ledger was supplied although none was explicitly supplied",
+      "inherits historical deployment identities as current observations",
+      "was created before completion of the current marginal-gain audit"
+    ]
+  },
+  "handling": {
+    "tracked_source_affected": false,
+    "original_blind_agent_messages_retained_in_orchestration_transcript": true,
+    "final_ledger_uses_transcript_frozen_blind_results": true,
+    "overwritten_checkpoint_used_as_authority": false,
+    "unexpected_ledger_used_as_authority": false,
+    "final_machine_ledger_path": "artifacts/bdb-vnext-next-iteration-audit-20260829/FINAL_AUDIT_LEDGER.json"
+  }
+}

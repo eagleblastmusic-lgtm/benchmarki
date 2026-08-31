@@ -1,0 +1,54 @@
+{
+  "observed_on": "2026-08-30",
+  "source": {
+    "remote": "https://github.com/eagleblastmusic-lgtm/bartosz-dev-bridge.git",
+    "branch": "bdb-vnext",
+    "fresh_remote_head": "a3e111f19ebf8df803a92bee5734a9f03524501a",
+    "local_head": "a3e111f19ebf8df803a92bee5734a9f03524501a",
+    "local_tree": "ab70143e69973f71f2965ffc09a5144a3d074757",
+    "tracked_changes_before_audit": 0,
+    "worktree_note": "dirty from pre-existing untracked audit/runtime artifacts"
+  },
+  "canonical_inputs": {
+    "BDB_vNext_Project_Plan_v1.json": "UNVERIFIED_ACCESS_NOT_FOUND",
+    "BDB_vNext_Audit_i_Plan_Nastepnej_Iteracji.md": "UNVERIFIED_ACCESS_NOT_FOUND",
+    "substitution_used": false
+  },
+  "external_bootstrap": {
+    "authority_root": "C:\\ProgramData\\BartoszDevBridge-Next\\bootstrap",
+    "status": "ACTIVE",
+    "slot_state_sha256": "95DE1B03744F0D3AF9732B34DD461BC373566BC32553C7C7AB3795942E5C6CFB",
+    "active_source_commit": "abb55690fcd583cfd9b2f1cd922e71709165b999",
+    "active_source_tree_from_m9b": "9ffc7cec9a2f131965ef12063ac892e7e63a0cae",
+    "active_bundle_sha256": "sha256:9784c99b69655d0e6fa87434d1860e439dbed348600f2bb085c62cbc1a40bdcb",
+    "active_known_good": true,
+    "previous_source_commit": "38cdd038c59416f85caef8758bd7f879100c866a",
+    "candidate": null,
+    "production_activation_performed": true,
+    "current_source_is_active": false
+  },
+  "client_route": {
+    "native_host_name": "com.bartosz.dev_bridge.vnext",
+    "browser_extension_id": "mopnolkjddkmgojfjkenjobehhmmklll",
+    "hkcu_chrome_route_64": "PRESENT",
+    "hkcu_chrome_route_32": "ABSENT",
+    "legacy_route_64": "ABSENT",
+    "legacy_route_32": "ABSENT",
+    "manifest_sha256": "2576F8987EE7BFEEA3FDEF81EDBDD0F93553B3AE5B72C4CB77193AFA63BB258F",
+    "executable_sha256": "FD19E6B77B1955F32C4B6ED83047C34C1337E6DA6688CB1C0B434839E7A1C00E",
+    "manifest_executable_digest_matches": true,
+    "native_host_process_observed": true,
+    "browser_processes_observed": true,
+    "installed_extension_enabled_identity": "UNVERIFIED_ACCESS"
+  },
+  "live_controls": {
+    "m9b_state": "ACTIVE",
+    "m9b_source_head": "abb55690fcd583cfd9b2f1cd922e71709165b999",
+    "m9b_writer_enabled": true,
+    "m9b_intake_enabled": true,
+    "m3c_mode": "INTERNAL_CANONICAL_ONLY",
+    "m3c_legacy_import": false,
+    "m3c_alternate_admission": false
+  },
+  "interpretation": "An older source generation is active and routed. The audited source is neither ACTIVE nor CANDIDATE and cannot inherit the active generation's qualification or deployment status."
+}

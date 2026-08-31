@@ -1,0 +1,19 @@
+{
+  "claim": null,
+  "pending": {
+    "auto_send": false,
+    "command_id": "command-84baae753fb645fab775aa1871c38e96",
+    "correlation_id": "corr-84baae753fb645fab775aa1871c38e96",
+    "created_at": "2026-08-29T21:51:38.144154Z",
+    "execution_binding_id": "binding-84baae753fb645fab775aa1871c38e96",
+    "expires_at": "2026-08-29T22:01:38.144154Z",
+    "launch_id": "faf2ba47-75ba-4eec-b653-3eb909282083",
+    "plan_version": "1",
+    "project_id": "proj-outbox-1",
+    "prompt": "Execute Task 1",
+    "repo_alias": "outbox-test",
+    "schema": "bdb-project-launch-v1",
+    "task_id": "T1-01"
+  },
+  "schema": "bdb-project-launch-queue-v1"
+}

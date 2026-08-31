@@ -1,0 +1,173 @@
+{
+  "checkpoint_id": "BLIND-CHECKPOINT-20260829-BDB-VNEXT",
+  "checkpoint_timestamp": "2026-08-29T22:13:00+02:00",
+  "source_identity": {
+    "repo_url": "https://github.com/eagleblastmusic-lgtm/bartosz-dev-bridge.git",
+    "branch": "bdb-vnext",
+    "head_sha": "a3e111f19ebf8df803a92bee5734a9f03524501a",
+    "tree_sha": "ab70143e69973f71f2965ffc09a5144a3d074757",
+    "parent_sha": "47d0f3903d991bdae7b736b74656c7a1a27097b9",
+    "commit_date": "2026-08-27 22:58:43 +0200",
+    "commit_subject": "bdb-vnext: isolate NX-071 registry fixture",
+    "worktree_clean_before_audit_artifacts": true
+  },
+  "system_model": {
+    "entrypoints": [
+      "bdb_gui.app",
+      "bdb_bridge.cli",
+      "bdb_bridge.native_host",
+      "bdb_operator.cli",
+      "bdb_vnext.bootstrap",
+      "bdb_vnext.m11a_bootstrap_admin",
+      "bdb_vnext.m9b_native_host",
+      "bdb_vnext.m11c_cutover_cli",
+      "bdb_vnext.m11c_client_promotion",
+      "bdb_vnext.m11c_final_prepare",
+      "bdb_vnext.m11c_legacy_recovery",
+      "bdb_vnext.m12a_compatibility_zero",
+      "bdb_vnext.m12a_closure",
+      "bdb_vnext.m11c_post_active_maintenance_cli",
+      "bdb_vnext.m9b_recovery_cli",
+      "bdb_vnext.single_root_migration"
+    ],
+    "core_data_owners": [
+      "ProjectCatalog",
+      "ProjectMemoryStore",
+      "ProjectExecutionCoordinator",
+      "ProjectLaunchQueueAdapter",
+      "BootstrapSlotAuthority"
+    ],
+    "ipc_and_transport": [
+      "NativeMessaging (m9b_native_host)",
+      "BrowserTransportWorker",
+      "LocalExecutionWorkerIPC"
+    ]
+  },
+  "blind_hypotheses": [
+    {
+      "id": "BH-01",
+      "subsystem": "Qualification/Gates",
+      "status": "CONFIRMED",
+      "summary": "Qualification runner creates synthetic PASS values and source-bound check has boolean flaw"
+    },
+    {
+      "id": "BH-02",
+      "subsystem": "ProjectExecution",
+      "status": "CONFIRMED",
+      "summary": "record_result accepts caller status and completes task without repo observation or evidence dereferencing"
+    },
+    {
+      "id": "BH-03",
+      "subsystem": "Catalog/Memory Locking",
+      "status": "CONFIRMED",
+      "summary": "Age-only lock reclaim steals lock from alive process without PID/incarnation validation"
+    },
+    {
+      "id": "BH-04",
+      "subsystem": "Queue Locking",
+      "status": "CONFIRMED",
+      "summary": "Crash during lock creation creates unparseable 0-byte lock causing permanent denial of service; reclaim has ABA race"
+    },
+    {
+      "id": "BH-05",
+      "subsystem": "Outbox Recovery",
+      "status": "CONFIRMED",
+      "summary": "Outbox recovery overwrites valid replacement and ignores expired PUBLISHED items; reconciler uncalled in production"
+    },
+    {
+      "id": "BH-06",
+      "subsystem": "Documentation Parity",
+      "status": "CONFIRMED",
+      "summary": "NX070_CURRENT_STATE claims NX-071 not started when commits exist in HEAD"
+    }
+  ],
+  "blind_findings": [
+    {
+      "id": "BLIND-F-01",
+      "title": "Qualification gate generates self-declared PASS and contains worktree source-binding bypass",
+      "severity": "CRITICAL",
+      "symbols": [
+        "bdb_vnext/full_qualification_runner.py",
+        "tests/test_nx069_full_qualification.py"
+      ]
+    },
+    {
+      "id": "BLIND-F-02",
+      "title": "ProjectExecution.record_result advances canonical task state without live repo observation or evidence validation",
+      "severity": "HIGH",
+      "symbols": [
+        "bdb_vnext/project_execution.py:record_result",
+        "bdb_vnext/project_execution.py:_evaluate_acceptance"
+      ]
+    },
+    {
+      "id": "BLIND-F-03",
+      "title": "ProjectCatalog and ProjectMemoryStore lock reclaim steals lock from running process after 120s",
+      "severity": "HIGH",
+      "symbols": [
+        "bdb_vnext/project_catalog.py:_lock",
+        "bdb_vnext/project_memory.py:_execution_lock"
+      ]
+    },
+    {
+      "id": "BLIND-F-04",
+      "title": "ProjectLaunchQueueAdapter lock is unrecoverable on partial write crash and has check-to-unlink race",
+      "severity": "HIGH",
+      "symbols": [
+        "bdb_vnext/project_launch.py:_lock",
+        "bdb_vnext/project_launch.py:_is_lock_stale"
+      ]
+    },
+    {
+      "id": "BLIND-F-05",
+      "title": "Launch outbox reconciliation can delete concurrent valid launch and ignores expired PUBLISHED records",
+      "severity": "HIGH",
+      "symbols": [
+        "bdb_vnext/project_workflow.py:publish_outbox_launch",
+        "bdb_vnext/project_workflow.py:reconcile_launch_outbox"
+      ]
+    },
+    {
+      "id": "BLIND-F-06",
+      "title": "CURRENT documentation drifts from current git commit history regarding NX-071",
+      "severity": "MEDIUM",
+      "symbols": [
+        "docs/NX070_CURRENT_STATE.md"
+      ]
+    }
+  ],
+  "blind_sound_claims": [
+    {
+      "id": "BSC-01",
+      "mechanism": "Atomic document persistence via temp + fsync + os.replace in Memory/Catalog/Queue",
+      "status": "SOUND_FOR_INSPECTED_FAILURE_MODEL"
+    },
+    {
+      "id": "BSC-02",
+      "mechanism": "BootstrapLock OS-level file handle locking on Windows/POSIX",
+      "status": "SOUND_FOR_INSPECTED_FAILURE_MODEL"
+    },
+    {
+      "id": "BSC-03",
+      "mechanism": "External Bootstrap ACTIVE/PREVIOUS/CANDIDATE physical separation",
+      "status": "SOUND_FOR_INSPECTED_FAILURE_MODEL"
+    }
+  ],
+  "blind_unresolved_risks": [
+    {
+      "id": "BUR-01",
+      "area": "Full lineage audit across remaining 66 gate functions",
+      "reason": "Sampled 6/6 gates had hardcoded/defaulted patterns, remaining require full AST lineage pass"
+    },
+    {
+      "id": "BUR-02",
+      "area": "Dynamic entrypoint reachability vs static closure",
+      "reason": "Dynamic reflection and UI state transitions may add runtime paths not in static AST closure"
+    },
+    {
+      "id": "BUR-03",
+      "area": "Runtime Chrome extension loaded DOM state",
+      "reason": "No active browser process was running during inspection"
+    }
+  ]
+}

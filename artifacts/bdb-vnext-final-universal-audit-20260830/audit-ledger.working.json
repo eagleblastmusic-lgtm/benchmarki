@@ -1,0 +1,30 @@
+{
+  "audit_id": "bdb-vnext-final-universal-audit-20260830",
+  "status": "EXECUTING",
+  "repository": "https://github.com/eagleblastmusic-lgtm/bartosz-dev-bridge",
+  "branch": "bdb-vnext",
+  "remote_head": "a3e111f19ebf8df803a92bee5734a9f03524501a",
+  "remote_tree": "ab70143e69973f71f2965ffc09a5144a3d074757",
+  "canonical_authority": {
+    "BDB_vNext_Project_Plan_v1.json": "UNVERIFIED_ACCESS",
+    "BDB_vNext_Audit_i_Plan_Nastepnej_Iteracji.md": "UNVERIFIED_ACCESS"
+  },
+  "obligations": [
+    {"id":"O-01","requirement":"Canonical authority preflight","status":"BLOCKED","blocker":"Named documents were not supplied and were not found in either workspace checkout, the attachment set, or tracked branch contents."},
+    {"id":"O-02","requirement":"Fresh remote and local source preflight","status":"EXECUTED","evidence":"Fresh git ls-remote plus local content-addressed commit/tree and git worktree inspection."},
+    {"id":"O-03","requirement":"Lifecycle identity matrix","status":"EXECUTING"},
+    {"id":"O-04","requirement":"Source-driven system model and entrypoint reachability","status":"NOT_STARTED"},
+    {"id":"O-05","requirement":"Coverage and state/mutation inventories","status":"NOT_STARTED"},
+    {"id":"O-06","requirement":"Failure-boundary, interleaving, linearization, ownership and recovery audit","status":"NOT_STARTED"},
+    {"id":"O-07","requirement":"Test-oracle, evidence-producer, gate-lineage and source-binding audit","status":"NOT_STARTED"},
+    {"id":"O-08","requirement":"Security, reliability and cross-layer audit","status":"NOT_STARTED"},
+    {"id":"O-09","requirement":"Finding falsification, negative challenges and defect-class propagation","status":"NOT_STARTED"},
+    {"id":"O-10","requirement":"Earlier-report adjudication if input conditions are met","status":"NOT_STARTED"},
+    {"id":"O-11","requirement":"Adversarial 10x worse/better, sensitivity, root causes and requalification","status":"NOT_STARTED"},
+    {"id":"O-12","requirement":"Markdown/JSON cross-validation and completion validator","status":"NOT_STARTED"}
+  ],
+  "findings": [],
+  "evidence": [],
+  "coverage_denominators": {},
+  "remaining_obligations": ["O-03","O-04","O-05","O-06","O-07","O-08","O-09","O-10","O-11","O-12"]
+}

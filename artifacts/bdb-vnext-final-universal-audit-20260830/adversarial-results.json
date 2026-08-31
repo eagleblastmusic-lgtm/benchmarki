@@ -1,0 +1,107 @@
+{
+  "audit_identity": {
+    "source_head": "a3e111f19ebf8df803a92bee5734a9f03524501a",
+    "source_tree": "ab70143e69973f71f2965ffc09a5144a3d074757",
+    "executed_at_local_date": "2026-08-30",
+    "scope": "isolated local fixtures only"
+  },
+  "independent_harness": {
+    "cache_lock_compare_then_unlink_deletes_replacement": {
+      "foreign_replacement_survived": false,
+      "release_returned": true
+    },
+    "catalog_age_only_reclaimed_live_pid": {
+      "foreign_pid_was_current_process": true,
+      "operation_succeeded": true
+    },
+    "launch_compare_then_unlink_deletes_replacement": {
+      "contender_acquired_after_unlinking_replacement": true,
+      "foreign_live_replacement_installed": true,
+      "read_calls": 3
+    },
+    "launch_publication_before_metadata_wedges_lock": {
+      "final_path_exists_after_failed_metadata_write": true,
+      "final_path_size": 0,
+      "subsequent_acquire_result": "ProjectLaunchQueueError:queue_busy"
+    },
+    "losing_launch_claim_binds_conversation_before_ownership": {
+      "losing_claim_status": "busy_or_missing",
+      "losing_conversation_was_persisted": true,
+      "queue_claim_cas_was_forced_to_lose_after_preview": true
+    },
+    "memory_age_only_reclaimed_live_pid": {
+      "foreign_pid_was_current_process": true,
+      "operation_result": "entered"
+    },
+    "project_single_flight_not_closed_across_execution_ids": {
+      "both_claimed": true,
+      "both_mutating": true,
+      "both_submitted": true,
+      "same_project": true
+    },
+    "published_outbox_does_not_reproject_after_queue_ttl": {
+      "outbox_status_before_expiry": "PUBLISHED",
+      "queue_empty_after_expiry": true,
+      "reconciled_count": 0,
+      "queue_remains_empty": true,
+      "outbox_status_after_reconcile": "PUBLISHED"
+    },
+    "shared_lock_compare_then_unlink_deletes_replacement": {
+      "foreign_replacement_survived": false,
+      "release_returned": true
+    }
+  },
+  "post_reveal_replay_of_prior_harness": {
+    "manual_criterion_spoof": {
+      "attempt_result": "PASS",
+      "evidence_ref_count": 0,
+      "head_after": null,
+      "manual_approval_invoked": false,
+      "normalized_type": "DETERMINISTIC",
+      "task_status": "completed"
+    },
+    "gui_auto_authority_split": {
+      "gui_receipt": "AUTO_STARTED",
+      "queue_projection_exists": false,
+      "v1_binding_count": 0,
+      "v1_status": "RUNNABLE",
+      "v2_scope_status": "ACTIVE"
+    },
+    "gui_stop_does_not_fence_v1": {
+      "gui_stop_receipt": "STOPPED",
+      "v1_status_after_gui_stop": "RUNNABLE",
+      "v1_stop_fenced_by_gui": false,
+      "v2_scope_status_after_gui_stop": "STOPPED"
+    },
+    "ignored_cursor_cas": {
+      "identity_returned": true,
+      "returned_identity_is_durable": false,
+      "source_call_site_is_same_module_command_helper": true
+    },
+    "output_memory_amplification": {
+      "child_output_bytes": 8388608,
+      "inline_character_count": 65536,
+      "is_truncated": true,
+      "python_tracemalloc_peak_bytes": 17096094,
+      "peak_to_inline_ratio": 260.87
+    },
+    "plan_pointer_crash_window": {
+      "current_plan_version_after_failure": "2",
+      "plan_updated_event_present": false,
+      "retry_reason": "plan_successor_required",
+      "retry_same_bytes_accepted": false
+    }
+  },
+  "focused_existing_tests": {
+    "command": "python -m pytest -q -p no:cacheprovider --basetemp <audit-dir>/pytest-temp <4 selected areas>",
+    "collected": 15,
+    "passed": 15,
+    "failed": 0,
+    "interpretation": "Nominal tests pass while adversarial counterexamples remain reproducible; this is oracle-gap evidence, not a regression-test failure."
+  },
+  "omitted_by_user_direction": [
+    "dynamic probes requiring additional cybersecurity verification",
+    "undeclared external network or filesystem-effect probes",
+    "destructive deployment, activation, promotion, repair, or source mutation"
+  ]
+}
